@@ -1,10 +1,58 @@
 module Parser where
 
-import RIO hiding (many, some, bracket, try)
-import Text.Megaparsec (Parsec, single, some, satisfy, token, takeWhile1P, runParser, label, try)
-import Lexer (TokenT(..), Ident(..), OpT(..), lex)
-import Prelude hiding (lex)
-import Text.Megaparsec.Error (ParseErrorBundle)
+import RIO
+import FlatParse.Basic (Parser, satisfyAscii, anyAsciiChar, failed, satisfy, skipMany, byteStringOf, char, string, runParser, Result (..), skipSome, empty, err, Pos, posLineCols, getPos)
+
+-- For now, just untyped.
+
+data OpT
+  = Add
+  | Sub
+  | Mul
+  | Div
+  deriving (Show, Eq, Ord)
+
+newtype Ident = Ident ByteString
+  deriving (Show, Eq, Ord)
+
+type Parser' = Parser Pos
+
+space :: Parser' ()
+space = skipMany (satisfyAscii (\x → x == ' ' || x == '\n'))
+
+token :: Parser' a → Parser' a
+token x = space *> x <* space
+
+digit :: Parser' Word32
+digit = anyAsciiChar >>= \case
+  '0' → pure 0
+  '1' → pure 1
+  '2' → pure 2
+  '3' → pure 3
+  '4' → pure 4
+  '5' → pure 5
+  '6' → pure 6
+  '7' → pure 7
+  '8' → pure 8
+  '9' → pure 9
+  _ → failed
+
+number :: Parser' Word32
+number = token $ foldl' (\acc x → acc + x) 0 <$> some digit
+
+op :: Parser' OpT
+op = token $ anyAsciiChar >>= \case
+  '+' → pure Add
+  '-' → pure Sub
+  '*' → pure Mul
+  '/' → pure Div
+  _ → failed
+
+ident :: Parser' Ident
+ident = token do
+  result ← byteStringOf (skipSome $ satisfy \x → x /= '\\' && x /= ' ' && x /= '\n' && x /= '=' && x /= '(' && x /= ')')
+  guard $ not $ result `elem` ["let", "in", "+", "-", "/", "*"]
+  pure $ Ident result
 
 data ExprT
   = Lam !Ident ExprT
@@ -15,87 +63,73 @@ data ExprT
   | Var !Ident
   deriving (Show, Eq)
 
-type Parser = Parsec () [TokenT]
+infxr :: Parser' a -> Parser' (a -> a -> a) -> Parser' a
+infxr a oper = do
+  a' ← a
+  (do
+      oper' ← oper
+      oper' a' <$> infxr a oper
+    ) <|> pure a'
 
-ident :: Parser Ident
-ident = token
-  (\case
-    TokenIdent x → Just x
-    _ → Nothing)
-  mempty
+infxl :: Parser' a -> Parser' (a -> a -> a) -> Parser' a
+infxl a oper = a >>= infxl' where
+  infxl' prev =
+    do
+      oper' <- oper
+      next <- a
+      infxl' $ oper' prev next
+    <|> pure prev
 
-single_ :: TokenT → Parser ()
-single_ = void . single
+parsePrim :: Parser' ExprT
+parsePrim = token $
+  Nat <$> number
+  <|> Var <$> ident
+  <|> $(char '(') *> parseTop <* $(char ')')
 
-parsePrim :: Parser ExprT
-parsePrim = label "Prim" $
-  let
-    bracket opening = satisfy
-      (\case
-        TokenBracket opening2
-          | opening == opening2 → True
-        _ → False
-      )
-    nat = token (\case
-      TokenNat x → Just x
-      _ → Nothing) mempty
-    var = token (\case
-        TokenIdent x → Just x
-        _ → Nothing
-      ) mempty
-  in Nat <$> nat
-  <|> Var <$> var
-  <|> bracket True *> parseTop <* bracket False
-  
-parseApp :: Parser ExprT
-parseApp = label "app" $ -- LEFT-ASSOCIATIVE
-  try (App <$> parsePrim <*> parseApp)
-  <|> parsePrim
+parseApp :: Parser' ExprT
+parseApp = infxl parsePrim (pure App)
 
-parseMath1 :: Parser ExprT
-parseMath1 = label "math1" $
-  let math1Op =
-        token (\case
-          TokenOp Mul → Just Mul
-          TokenOp Div → Just Div
-          _ → Nothing
-        ) mempty
-  in try (Op <$> parseApp <*> math1Op <*> parseMath1)
-  <|> parseApp
+parseMath1 :: Parser' ExprT
+parseMath1 =
+  infxr parseApp (op >>= \case
+    Mul -> pure \x -> Op x Mul
+    Div -> pure \x -> Op x Div
+    _ -> empty
+  )
 
-parseMath0 :: Parser ExprT
-parseMath0 = label "math0" $
-  let math0Op =
-        token (\case
-          TokenOp Add → Just Add
-          TokenOp Sub → Just Sub
-          _ → Nothing
-        ) mempty
-  in try (Op <$> parseMath1 <*> math0Op <*> parseMath0)
-  <|> parseMath1
+parseMath0 :: Parser' ExprT
+parseMath0 =
+  infxr parseMath1 (op >>= \case
+    Add -> pure \x -> Op x Add
+    Sub -> pure \x -> Op x Sub
+    _ -> empty
+  )
 
-parseLet :: Parser ExprT
-parseLet = label "Let" do
+parseLet :: Parser' ExprT
+parseLet = token $ do
   defs ← some do
-    single_ TokenLet
+    token $ $(string "let")
     name ← ident
-    single_ TokenAssign
+    token $ $(char '=')
     expr ← parseTop
     pure (name, expr)
-  single_ TokenIn
-  val ← parseTop
-  pure $ Let defs val
+  (token do
+    $(string "in")
+    val ← parseTop
+    pure $ Let defs val)
+  <|> (err =<< getPos)
 
-parseTop :: Parser ExprT
-parseTop = label "Top" $
-  parseLet
-  <|> single_ TokenLam *> (Lam <$> ident <*> parseTop)
+parseTop :: Parser' ExprT
+parseTop = token $ parseLet
+  <|> token ($(char '\\')) *> (Lam <$> ident <*> parseTop)
   <|> parseMath0
+  <|> (err =<< getPos)
+  
+parse :: ByteString → Either String ExprT
+parse inp = case runParser parseTop inp of
+  OK x "" → Right x
+  Err e → Left $ "Unable to parse at " <> show (posLineCols inp [e])
+  _ → Left "Internal error"
 
-type ParseErr = Maybe (ParseErrorBundle [TokenT] ())
-
-parseText :: ByteString → Either ParseErr ExprT
-parseText inp = maybe (Left Nothing) (either (Left . Just) Right . runParser parseTop "<inline>") $ lex inp
-
-parseFile :: FilePath → IO (Either ParseErr ExprT)
-parseFile x = parseText <$> readFileBinary x
+parseFile :: FilePath → IO (Either String ExprT)
+parseFile x = parse <$> readFileBinary x

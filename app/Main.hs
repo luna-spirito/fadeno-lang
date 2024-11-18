@@ -3,7 +3,6 @@ module Main where
 import RIO
 import qualified RIO.Text as T
 import Parser
-import Lexer (Ident(..))
 
 -- render :: ExprT → Text
 -- render = render' 0 where
@@ -27,14 +26,6 @@ render = \case
   App a b → "(" <> render a <> " " <> render b <> ")"
   Nat x → tshow x
   Var (Ident x) → decodeUtf8Lenient x
-
-
-
-
--- newtype WireId- = WireId Word32
-
--- data Wire = Wire ! 
-
 
 main :: IO ()
 main = pure ()

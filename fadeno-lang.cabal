@@ -20,7 +20,7 @@ common warnings
 executable fadeno-lang
     import:           warnings
     main-is:          Main.hs
-    other-modules: Lexer, Parser
+    other-modules: Parser
     default-extensions: LambdaCase, UnicodeSyntax, BlockArguments, TemplateHaskell, OverloadedStrings
     build-depends:    base ^>=4.20.0.0, rio >= 0.1, flatparse >= 0.5, megaparsec >= 9
     hs-source-dirs:   app
