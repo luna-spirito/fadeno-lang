@@ -1,0 +1,27 @@
+cabal-version:      3.4
+name:               fadeno-lang
+version:            0.1.0.0
+-- synopsis:
+-- description:
+homepage:           dentrado.art
+license:            AGPL-3.0-or-later
+license-file:       LICENSE
+author:             Gardanta Spirito
+maintainer:         guardspirit@protonmail.com
+-- copyright:
+category:           Language
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+-- extra-source-files:
+
+common warnings
+    ghc-options: -Wall
+
+executable fadeno-lang
+    import:           warnings
+    main-is:          Main.hs
+    other-modules: Lexer, Parser
+    default-extensions: LambdaCase, UnicodeSyntax, BlockArguments, TemplateHaskell, OverloadedStrings
+    build-depends:    base ^>=4.20.0.0, rio >= 0.1, flatparse >= 0.5, megaparsec >= 9
+    hs-source-dirs:   app
+    default-language: GHC2021
