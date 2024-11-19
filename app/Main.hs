@@ -4,20 +4,6 @@ import RIO
 import qualified RIO.Text as T
 import Parser
 
--- render :: ExprT → Text
--- render = render' 0 where
---   renderIndent indent = T.replicate indent " "
-  
---   renderLams indent = \case
---     Lam var expr → " \"" <> tshow var <> renderLams expr
---     e → render' (indent + 1) e
-
---   render' indent = \case
---     Lam var expr → renderIndent indent <> "\"" <> tshow var <> renderLams indent expr
---     Let defs final →
---       mconcat (defs <&> \(name, val) → renderIndent indent <> "let " <> tshow name <> " =\n" <> render' (indent + 1) val <> "\n")
---       <> renderIndent indent <> "in\n" <> render' (indent + 1) final
---     Op a
 render :: ExprT → Text
 render = \case
   Lam (Ident name) x → "(\\" <> decodeUtf8Lenient name <> " " <> render x <> ")"
