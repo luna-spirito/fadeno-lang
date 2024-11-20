@@ -1,12 +1,11 @@
 module Parser where
 
-import Control.Carrier.Empty.Church (EmptyC, runEmpty)
-import Control.Carrier.State.Church (StateC, evalState, get, modify)
-import Control.Carrier.Writer.Church (WriterC)
+import Control.Carrier.Empty.Church (runEmpty)
+import Control.Carrier.State.Church (evalState, get, modify)
 import Control.Effect.Empty qualified as E
 import FlatParse.Basic (Parser, Pos, Result (..), anyAsciiChar, byteStringOf, char, empty, err, failed, getPos, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSome, string)
-import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, group, hang, indent, layoutSmart, line, line', nest, softline, softline', vsep, (<+>))
-import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, colorDull, renderIO)
+import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, layoutSmart, line, nest, softline, vsep, (<+>))
+import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
 import RIO hiding (Reader, ask, local)
 
 -- For now, just untyped.
@@ -18,8 +17,8 @@ data OpT
   | Div
   deriving (Show, Eq, Ord)
 
-newtype Ident = Ident ByteString
-  deriving (Show, Eq, Ord)
+newtype Ident = Ident {unIdent ∷ ByteString}
+  deriving (Show, Eq, Ord, Hashable)
 
 type Parser' = Parser Pos
 
@@ -70,6 +69,7 @@ data ExprT
   | App !ExprT !ExprT
   | Nat !Word32
   | Var !Ident
+  | BuiltinsChurch
   deriving (Show, Eq)
 
 infxr ∷ Parser' a → Parser' (a → a → a) → Parser' a
@@ -85,16 +85,19 @@ infxl ∷ Parser' a → Parser' (a → a → a) → Parser' a
 infxl a oper = a >>= infxl'
  where
   infxl' prev =
-    do
-      oper' ← oper
-      next ← a
-      infxl' $ oper' prev next
+    ( do
+        oper' ← oper
+        next ← a
+        infxl' $ oper' prev next
+    )
       <|> pure prev
 
 parsePrim ∷ Parser' ExprT
 parsePrim =
   token $
-    Nat
+    BuiltinsChurch
+      <$ $(string "builtins/church")
+        <|> Nat
       <$> number
         <|> Var
       <$> ident
@@ -184,6 +187,7 @@ isSimple =
       App f a → complexity f *> complexity a
       Nat _ → ping
       Var _ → ping
+      BuiltinsChurch → ping
    in
     runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
 
@@ -216,14 +220,15 @@ pExpr oldPrec =
     App lam arg → (4, pExpr 4 lam <+> pExpr 5 arg)
     Nat x → (5, pretty x)
     Var x → (5, pIdent x)
+    BuiltinsChurch → (6, "builtins/church")
 
-parse ∷ ByteString → Either String ExprT
+parse ∷ ByteString → Either Text ExprT
 parse inp = case runParser parseTop inp of
   OK x "" → Right x
-  Err e → Left $ "Unable to parse at " <> show (posLineCols inp [e])
+  Err e → Left $ "Unable to parse at " <> tshow (posLineCols inp [e])
   _ → Left "Internal error"
 
-parseFile ∷ FilePath → IO (Either String ExprT)
+parseFile ∷ FilePath → IO (Either Text ExprT)
 parseFile x = parse <$> readFileBinary x
 
 parseFileOrDie ∷ FilePath → IO ExprT
