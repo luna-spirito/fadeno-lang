@@ -44,7 +44,7 @@ digit =
     _ → failed
 
 number ∷ Parser' Word32
-number = token $ foldl' (\acc x → acc + x) 0 <$> some digit
+number = token $ foldl' (\acc x → acc*10 + x) 0 <$> some digit
 
 operator ∷ Parser' OpT
 operator =
@@ -216,7 +216,7 @@ pExpr oldPrec =
             Sub → 2
             Mul → 3
             Div → 3
-       in (prec, pExpr prec a <> pOp op <> pExpr prec b)
+       in (prec, pExpr prec a <+> pOp op <+> pExpr prec b)
     App lam arg → (4, pExpr 4 lam <+> pExpr 5 arg)
     Nat x → (5, pretty x)
     Var x → (5, pIdent x)
