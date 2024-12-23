@@ -64,7 +64,7 @@ ident = token do
 
 data ExprT
   = Lam !Ident ExprT
-  | Let ![(Ident, ExprT)] !ExprT
+  | Let !(NonEmpty (Ident, ExprT)) !ExprT
   | Op !ExprT !OpT !ExprT
   | App !ExprT !ExprT
   | Nat !Word32
@@ -128,9 +128,12 @@ parseMath0 =
         _ → empty
     )
 
+someNonEmpty :: Alternative f ⇒ f a → f (NonEmpty a)
+someNonEmpty f = (:|) <$> f <*> many f
+
 parseLet ∷ Parser' ExprT
 parseLet = do
-  defs ← some do
+  defs ← someNonEmpty do
     token $ $(string "let")
     name ← ident
     token $ $(char '=')
@@ -205,7 +208,7 @@ pExpr oldPrec =
       )
     Let defs i →
       ( 1
-      , vsep (defs <&> \(name, val) → annotate (color Cyan) "let" <+> pIdent name <+> annotate (color Cyan) "=" <> softline <> nest 2 (pExpr 0 val))
+      , vsep (toList defs <&> \(name, val) → annotate (color Cyan) "let" <+> pIdent name <+> annotate (color Cyan) "=" <> softline <> nest 2 (pExpr 0 val))
           <> line
           <> annotate (color Cyan) "in"
           <+> nest 2 (pExpr 1 i)
