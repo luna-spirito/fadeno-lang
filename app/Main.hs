@@ -32,6 +32,7 @@ import Control.Carrier.Writer.Church (runWriter, execWriter)
 import RIO.Text (intercalate)
 import RIO.Seq  (Seq(..))
 import Data.Bits (unsafeShiftL, (.|.), unsafeShiftR, (.&.))
+import Data.Serialize (Putter)
 
 {-
 Whenever a node interacts with a negative package, DO NOT UNWRAP.
@@ -120,7 +121,8 @@ data Node :: Polarity → Type where
 type AnyNode = Either (Node Neg) (Node Pos)
 
 -- Format of heavy package differs between -lang and -jit.
-data StaticHeavyPackage = StaticHeavyPackage !Int !Bool !(Vector AnyNode)
+-- First elements of the auxs vector contains persistent aux, last — temporary ones. In normal order.
+data StaticHeavyPackage = StaticHeavyPackage !Int !Bool !(WireEnd Neg) !(Vector AnyWireEnd) !(Vector AnyNode)
 
 type Eval = State (IntMap (Either Word32 AnyNode)) :+: State (IntMap StaticHeavyPackage) :+: Fresh :+: Lift IO
 
@@ -233,43 +235,43 @@ primary n = do
 -- | Extension over WireEnd that also allows to serialise wires to primary ports;
 -- wires to heavy's auxiliary ports, both persistent and temporary (the ones used for multi-operand nodes introduced by -op1-op2+>).
 data HeavyWireEnd (pol :: Polarity)
-  = HWInternalAux !(WireEnd pol)
-  | HWInternalPri !Word32
-  | HWPersistentAux !Word32
-  | HWTemporaryAux !Word32
+  = HWAux !(WireEnd pol)
+  | HWPri !Word32
+  -- | HWPersistentAux !Word32
+  -- | HWTemporaryAux !Word32
 
 packHV :: HeavyWireEnd a → WireEnd a
 packHV hv =
   let (tag, val) = case hv of
-        HWInternalAux (WireEnd v) → (0, v)
-        HWInternalPri v → (1, v)
-        HWPersistentAux v → (2, v)
-        HWTemporaryAux v → (3, v)
-  in WireEnd $ (tag `unsafeShiftL` 30) .|. val
+        HWAux (WireEnd v) → (0, v)
+        HWPri v → (1, v)
+        -- HWPersistentAux v → (2, v)
+        -- HWTemporaryAux v → (3, v)
+  in WireEnd $ (tag `unsafeShiftL` 31) .|. val
 
 unpackHV :: WireEnd a → HeavyWireEnd a
 unpackHV (WireEnd x) =
-  let (tag, val) = (x `unsafeShiftR` 30, x .&. 0x3FFFFFFF)
+  let (tag, val) = (x `unsafeShiftR` 31, x .&. 0x7FFFFFFF)
   in case tag of
-    0 → HWInternalAux $ WireEnd val
-    1 → HWInternalPri val
-    2 → HWPersistentAux val
-    4 → HWTemporaryAux val
+    0 → HWAux $ WireEnd val
+    1 → HWPri val
+    -- 2 → HWPersistentAux val
+    -- 4 → HWTemporaryAux val
     _ → error "unknown tag"
 
-instHeavy :: forall sig m. Has Eval sig m => Word32 → Vector AnyWireEnd → m (Node Pos)
+instHeavy :: forall sig m. Has Eval sig m => Word32 → Vector AnyWireEnd → m (WireEnd Neg)
 instHeavy heavyId auxs = do
-  StaticHeavyPackage persAuxsLen hasResAux ns ← P.fromJust . IM.lookup @StaticHeavyPackage (fromIntegral heavyId) <$> get
+  StaticHeavyPackage persAuxsLen hasResAux mainWire auxWires ns ← P.fromJust . IM.lookup @StaticHeavyPackage (fromIntegral heavyId) <$> get
   let
     write :: forall a. DecPolarity a => Word32 → StateC (IntMap Word32) m (Node a)
     write i = case (decPolarity $ Proxy @a, P.fromJust $ ns V.!? fromIntegral i) of
-      (Left Refl, Left n) → travPorts r n--case n of
-      (Right Refl, Right n) → travPorts r n--case n of
+      (Left Refl, Left n) → travPorts r n
+      (Right Refl, Right n) → travPorts r n
       _ → error "impossible"
     
     r :: forall a. DecPolarity a ⇒ WireEnd a → StateC (IntMap Word32) m (WireEnd a)
     r hw0 = case unpackHV hw0 of
-      HWInternalAux (WireEnd wire0Id) → do
+      HWAux (WireEnd wire0Id) → do
         wireIdM ← IM.lookup (fromIntegral wire0Id) <$> get
         WireEnd <$> case wireIdM of
           Nothing → do
@@ -279,13 +281,14 @@ instHeavy heavyId auxs = do
           Just wireId → do
             modify $ IM.delete @Word32 $ fromIntegral wire0Id
             pure wireId
-      HWInternalPri nodeId →
+      HWPri nodeId →
         either (\Refl → primary =<< write @Pos nodeId) (\Refl → primary =<< write @Neg nodeId) $ decPolarity $ Proxy @a
-      HWPersistentAux wireId → pure case (decPolarity $ Proxy @a, P.fromJust $ auxs V.!? fromIntegral wireId) of
-        (Left Refl, Left a) → a
-        (Right Refl, Right a) → a
-        _ → error "impossible"
-  evalState IM.empty $ write 0
+  evalState IM.empty do
+    for_ (V.zip auxs auxWires) \case
+      (Left ext, Right int) → link ext =<< r int
+      (Right ext, Left int) → (`link` ext) =<< r int
+      _ → error "impossible"
+    r mainWire
 
 eval :: Has Eval sig m => Node Neg → Node Pos → m ()
 eval = curry \case
@@ -301,7 +304,7 @@ eval = curry \case
   (Dup dupl dp1 dp2, b) → runDup dupl dp1 dp2 $ travPorts dup b
   (a, Sup supl tm1 tm2) → runDup supl tm1 tm2 $ travPorts dup a
   
-  (a, StaticHeavy heavyId auxs) → eval a =<< instHeavy heavyId auxs
+  (a, StaticHeavy heavyId auxs) → move a =<< instHeavy heavyId auxs
 
   (App arg ret, Lam var bod) → do
     link arg var
@@ -368,17 +371,14 @@ isPrimary (WireEnd wire0Id) = do
 
 -- TODO: contract & retartget auxsList
 -- deferred?
-mkHeavy :: forall sig m. Has Eval sig m ⇒ [WireEnd Pos] → WireEnd Neg → m StaticHeavyPackage
-mkHeavy auxsList = \main0 → do
-    for_ (zip [0..] auxsList) \(i, wire0Id) → do
-      (wireId, _) ← contractWire wire0Id
-      modify $ IM.insert @(Either Word32 AnyNode) (fromIntegral wireId) $ Left $ (\(WireEnd a) → a) $ packHV $ HWPersistentAux i
-    res ← execWriter @(RevList AnyNode) $ evalState @Word32 0 $ evalState @(Seq AnyNode) mempty do
-      _ ← hdlPort main0
-      whilePop hdlNode
-    let resVec = fromList $ toList res
-    -- TODO: customs...
-    pure $ StaticHeavyPackage (V.length resVec) False resVec
+mkHeavy :: forall sig m. Has Eval sig m ⇒ WireEnd Neg → Vector AnyWireEnd → m StaticHeavyPackage
+mkHeavy = \main0 auxs0 → do
+  (pkg, (ma, au)) ← runWriter @(RevList AnyNode) (curry pure) $ evalState @Word32 0 $ evalState @(Seq AnyNode) mempty do
+    m ← hdlPort main0
+    a ← for auxs0 $ either (fmap Left . hdlPort) (fmap Right . hdlPort)
+    whilePop hdlNode
+    pure (m, a)
+  pure $ StaticHeavyPackage (V.length au) False ma au $ fromList $ toList pkg
   where
   -- auxsLen = length auxsList
   whilePop :: forall sig2 m2. Has (State (Seq AnyNode)) sig2 m2 ⇒ (AnyNode → m2 ()) → m2 ()
@@ -396,7 +396,7 @@ mkHeavy auxsList = \main0 → do
       Nothing → pure $ WireEnd wireId
       Just this → do
         modify @(Seq AnyNode) $ \q → q :|> either (\Refl → Right this) (\Refl → Left this) (decPolarity $ Proxy @a)
-        state @Word32 \len → (len + 1, packHV $ HWInternalPri len)
+        state @Word32 \len → (len + 1, packHV $ HWPri len)
 
 useFreeVar :: Has (Writer FreeVars :+: Eval) sig m ⇒ P.Ident → m (WireEnd Neg)
 useFreeVar ident = do
@@ -434,7 +434,7 @@ compile = \case
             let auxs = toList (unFreeVars freesInVal) >>= \(n, l) → (n,) <$> toList l
             for_ auxs \(_, aux) → E.guard . not =<< isPrimary aux
             -- Wrap
-            heavyPackage ← mkHeavy (snd <$> auxs) val'
+            heavyPackage ← mkHeavy val' (fromList $ Right . snd <$> auxs)
             heavyId ← fresh
             modify $ IM.insert heavyId heavyPackage
 
@@ -460,6 +460,8 @@ compile = \case
   P.Nat x → primary $ Word32 x
   P.Var ident → useFreeVar ident
             
+serHeavy :: Putter StaticHeavyPackage
+serHeavy = undefined
 {-
 serOp ∷ Putter P.OpT
 serOp =
