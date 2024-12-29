@@ -31,6 +31,49 @@ import Control.Effect.Throw (throwError)
 import Control.Carrier.Writer.Church (runWriter, execWriter)
 import RIO.Text (intercalate)
 import RIO.Seq  (Seq(..))
+import Data.Bits (unsafeShiftL, (.|.), unsafeShiftR, (.&.))
+
+{-
+Whenever a node interacts with a negative package, DO NOT UNWRAP.
+Instead, create a new, specialized package.
+
+Also, maybe YES sub-packages?, but NO deep substitutions. This messes things up.
+What could help is: BI-DIRECTIONALLY phase primary ports through custom node's auxiliary?
+This could help even in regular code I guess.
+\x
+  y = [3, 4, x]
+  z = (9, y)
+  w = (10, y)
+  in (z, w)
+... will automatically inline `y`.
+
+So, let's first separate tags and ports?
+
+\y ->
+  // x = +> (y, y)
+  x = (y, y)
+  in MkPair x x
+  
+builtins/rec \rec ->
+  \y -> if y == 0
+    then y*rec (y-1)
+    else 0
+
+EDIT: instead of "phasing" primary ports, just fix the entry point and "suck in" all the other nodes.
+EDIT: "phasing/sucking in/out" is not that bad since it increases optimality, but it as well reduces the compilation
+capabilities by reducing the amount of available information.
+"Phasing in" is clearly not as bad as "phasing out", but I'm not sure it's worth the effort and it still can yield worse performance
+in some edge cases (ex. partial erasure), although usually it's better.
+
+28.12.24: Phasing in/out, while could be a good thing for optimality, is not always this way.
+We'd better stick to the approach of "trusting the programmer", at least for now.
+Whatever programmer says to be the node, will be the node, with no "extra"s or "exclusion"s.
+Also, we package local variables as a transparent optimization, but we don't guarantee doing this or doing this the best way, but
+we do guarantee that we do it only when it preserves optimality.
+
+28.12.24: Solution:
+No phasings. Instead, each time a specialisation occurs (i. e. you interact with negative package), DO NOT UNWRAP it.
+-}
 
 newtype RevList a = UnsafeRevList [a] deriving (Functor)
 
@@ -57,7 +100,7 @@ data Polarity = Pos | Neg
 -- type Wire = Either (Node Neg) (Node Pos)
 
 -- | And end of a wire.
-data WireEnd (p :: Polarity) = WireEnd !Int
+data WireEnd (p :: Polarity) = WireEnd !Word32
   deriving Show
 type AnyWireEnd = Either (WireEnd Neg) (WireEnd Pos)
 
@@ -71,20 +114,19 @@ data Node :: Polarity → Type where
   Op1 :: !P.OpT → !(WireEnd Pos) → !(Word32) → Node Neg
   Era :: Node Neg
   Nul :: Node Pos
-  StaticHeavy :: !Word32 → !(Vector (WireEnd Neg)) → Node Pos
+  StaticHeavy :: !Word32 → !(Vector AnyWireEnd) → Node Pos
   Debug :: Node Neg
 
 type AnyNode = Either (Node Neg) (Node Pos)
 
 -- Format of heavy package differs between -lang and -jit.
-data StaticHeavyPackage = StaticHeavyPackage !(Vector AnyNode)
+data StaticHeavyPackage = StaticHeavyPackage !Int !Bool !(Vector AnyNode)
 
-type Eval = State (IntMap (Either Int AnyNode)) :+: State (IntMap StaticHeavyPackage) :+: Fresh :+: Lift IO
+type Eval = State (IntMap (Either Word32 AnyNode)) :+: State (IntMap StaticHeavyPackage) :+: Fresh :+: Lift IO
 
 newWire :: Has Eval sig m => m (WireEnd Neg, WireEnd Pos)
 newWire = do
-  wireId ← fresh
-  -- traceM $ "Created wire "<> tshow wireId
+  wireId ← fromIntegral <$> fresh
   pure (WireEnd wireId, WireEnd wireId)
 
 type family OppositePolarity a :: Polarity where
@@ -109,19 +151,16 @@ travPorts f = \case
   Op1 op a w → (\a' → Op1 op a' w) <$> f a
   Era → pure Era
   Nul → pure Nul
-  StaticHeavy heavyId auxs → StaticHeavy heavyId <$> (for auxs f)
+  StaticHeavy heavyId auxs  → StaticHeavy heavyId <$> for auxs (either (fmap Left . f) (fmap Right . f))
   Debug → pure Debug
 
 -- Destructive
-contractWire :: forall a sig m. (DecPolarity a, Has Eval sig m) => WireEnd a → m (Int, Maybe (Node (OppositePolarity a)))
+contractWire :: forall a sig m. (DecPolarity a, Has Eval sig m) => WireEnd a → m (Word32, Maybe (Node (OppositePolarity a)))
 contractWire (WireEnd wire0Id) = do
-  -- traceM $ "Contracting " <> tshow wire0Id <> "..."
-  wire0 ← IM.lookup @(Either Int AnyNode) wire0Id <$> get
+  wire0 ← IM.lookup @(Either Word32 AnyNode) (fromIntegral wire0Id) <$> get
   case wire0 of
     Just (Left wireId) → do
-  --     traceM $ "... to " <> tshow wireId
-  --     traceM $ "1: " <> tshow wire0Id
-      modify $ IM.delete @(Either Int AnyNode) wire0Id
+      modify $ IM.delete @(Either Word32 AnyNode) $ fromIntegral wire0Id
       contractWire $ WireEnd @a wireId
     Just (Right a) → pure (wire0Id, Just case (a, decPolarity $ Proxy @a) of
         (Left a', Right Refl) → a'
@@ -133,31 +172,25 @@ contractWire (WireEnd wire0Id) = do
 -- TODO: totality
 link :: Has Eval sig m => WireEnd Neg → WireEnd Pos → m ()
 link l0Id r0Id = do
-  -- traceM $ "link " <> tshow l0Id <> " " <> tshow r0Id
   (lId, l) ← contractWire l0Id
   (rId, r) ← contractWire r0Id
   case (l, r) of
     (Nothing, _) → do
-  --     traceM $ "2: " <> tshow lId
-      modify $ IM.insert @(Either Int AnyNode) lId $ Left rId
+      modify $ IM.insert @(Either Word32 AnyNode) (fromIntegral lId) $ Left rId
     (Just _, Nothing) → do
-  --     traceM $ "3: " <> tshow lId
-      modify $ IM.insert @(Either Int AnyNode) rId $ Left lId
+      modify $ IM.insert @(Either Word32 AnyNode) (fromIntegral rId) $ Left lId
     (Just a, Just b) → do
-      for_ @[] [lId, rId] $ modify . IM.delete @(Either Int AnyNode)
+      for_ @[] [lId, rId] $ modify . IM.delete @(Either Word32 AnyNode) . fromIntegral
       eval b a
  
 move :: forall a sig m. (Has Eval sig m, DecPolarity a) ⇒ Node a → WireEnd a → m ()
 move a wire0Id = do
-  -- traceM $ "move to " <> tshow wire0Id
   (wireId, wire) ← contractWire wire0Id
   case wire of
     Nothing → do
-  --     traceM $ "4: " <> tshow wireId
-      modify $ IM.insert @(Either Int AnyNode) wireId $ Right $ either (\Refl → Left a) (\Refl → Right a) $ decPolarity $ Proxy @a
+      modify $ IM.insert @(Either Word32 AnyNode) (fromIntegral wireId) $ Right $ either (\Refl → Left a) (\Refl → Right a) $ decPolarity $ Proxy @a
     Just b → do
-  --     traceM $ "5: " <> tshow wireId
-      modify $ IM.delete @(Either Int AnyNode) wireId
+      modify $ IM.delete @(Either Word32 AnyNode) $ fromIntegral wireId
       uncurry eval $ either (\Refl → (a, b)) (\Refl → (b, a)) $ decPolarity $ Proxy @a
 
 newtype TupC m a = TupC (forall (r :: Type). ((a, a) -> m r) -> m r)
@@ -197,40 +230,61 @@ primary n = do
     Left Refl → move n neg $> pos
     Right Refl → move n pos $> neg
 
-instHeavy :: forall sig m. Has Eval sig m => Word32 → Vector (WireEnd Neg) → m (Node Pos)
+-- | Extension over WireEnd that also allows to serialise wires to primary ports;
+-- wires to heavy's auxiliary ports, both persistent and temporary (the ones used for multi-operand nodes introduced by -op1-op2+>).
+data HeavyWireEnd (pol :: Polarity)
+  = HWInternalAux !(WireEnd pol)
+  | HWInternalPri !Word32
+  | HWPersistentAux !Word32
+  | HWTemporaryAux !Word32
+
+packHV :: HeavyWireEnd a → WireEnd a
+packHV hv =
+  let (tag, val) = case hv of
+        HWInternalAux (WireEnd v) → (0, v)
+        HWInternalPri v → (1, v)
+        HWPersistentAux v → (2, v)
+        HWTemporaryAux v → (3, v)
+  in WireEnd $ (tag `unsafeShiftL` 30) .|. val
+
+unpackHV :: WireEnd a → HeavyWireEnd a
+unpackHV (WireEnd x) =
+  let (tag, val) = (x `unsafeShiftR` 30, x .&. 0x3FFFFFFF)
+  in case tag of
+    0 → HWInternalAux $ WireEnd val
+    1 → HWInternalPri val
+    2 → HWPersistentAux val
+    4 → HWTemporaryAux val
+    _ → error "unknown tag"
+
+instHeavy :: forall sig m. Has Eval sig m => Word32 → Vector AnyWireEnd → m (Node Pos)
 instHeavy heavyId auxs = do
-  -- traceM "Inst heavy"
-  StaticHeavyPackage ns ← P.fromJust . IM.lookup @StaticHeavyPackage (fromIntegral heavyId) <$> get
+  StaticHeavyPackage persAuxsLen hasResAux ns ← P.fromJust . IM.lookup @StaticHeavyPackage (fromIntegral heavyId) <$> get
   let
-    write :: forall a. DecPolarity a => Int → StateC (IntMap Int) m (Node a)
-    write i = case (decPolarity $ Proxy @a, P.fromJust $ ns V.!? i) of
+    write :: forall a. DecPolarity a => Word32 → StateC (IntMap Word32) m (Node a)
+    write i = case (decPolarity $ Proxy @a, P.fromJust $ ns V.!? fromIntegral i) of
       (Left Refl, Left n) → travPorts r n--case n of
       (Right Refl, Right n) → travPorts r n--case n of
       _ → error "impossible"
     
-    r :: forall a. DecPolarity a ⇒ WireEnd a → StateC (IntMap Int) m (WireEnd a)
-    r (WireEnd wire0Id) =
-      if wire0Id < 0 then
-        let wireId = -wire0Id-1 in
-        if wireId < V.length auxs then
-          pure case decPolarity $ Proxy @a of
-            Left Refl → P.fromJust $ auxs V.!? wireId
-            Right _ → error "impossible"
-        else
-          let nodeId = wireId - V.length auxs in
-          either (\Refl → primary =<< write @Pos nodeId) (\Refl → primary =<< write @Neg nodeId) $ decPolarity $ Proxy @a
-      else do
-        wireIdM ← IM.lookup wire0Id <$> get
+    r :: forall a. DecPolarity a ⇒ WireEnd a → StateC (IntMap Word32) m (WireEnd a)
+    r hw0 = case unpackHV hw0 of
+      HWInternalAux (WireEnd wire0Id) → do
+        wireIdM ← IM.lookup (fromIntegral wire0Id) <$> get
         WireEnd <$> case wireIdM of
           Nothing → do
             wireId ← fresh
-  --           traceM $ "7: " <> tshow wire0Id
-            modify $ IM.insert wire0Id wireId
-            pure wireId
+            modify $ IM.insert @Word32 (fromIntegral wire0Id) $ fromIntegral wireId
+            pure $ fromIntegral wireId
           Just wireId → do
-  --           traceM $ "8: " <> tshow wire0Id
-            modify $ IM.delete @Int wire0Id
+            modify $ IM.delete @Word32 $ fromIntegral wire0Id
             pure wireId
+      HWInternalPri nodeId →
+        either (\Refl → primary =<< write @Pos nodeId) (\Refl → primary =<< write @Neg nodeId) $ decPolarity $ Proxy @a
+      HWPersistentAux wireId → pure case (decPolarity $ Proxy @a, P.fromJust $ auxs V.!? fromIntegral wireId) of
+        (Left Refl, Left a) → a
+        (Right Refl, Right a) → a
+        _ → error "impossible"
   evalState IM.empty $ write 0
 
 eval :: Has Eval sig m => Node Neg → Node Pos → m ()
@@ -306,9 +360,9 @@ isAffine = \case
 -- Doesn't contract wires so is not performant at all.
 isPrimary :: Has Eval sig m ⇒ WireEnd a → m Bool
 isPrimary (WireEnd wire0Id) = do
-  wire ← IM.lookup @(Either Int AnyNode) wire0Id <$> get
+  wire ← IM.lookup @(Either Word32 AnyNode) (fromIntegral wire0Id) <$> get
   case wire of
-    Just (Left x) → isPrimary $ WireEnd x
+    Just (Left x) → isPrimary $ WireEnd $ fromIntegral x
     Just (Right _) → pure True
     Nothing → pure False
 
@@ -318,31 +372,31 @@ mkHeavy :: forall sig m. Has Eval sig m ⇒ [WireEnd Pos] → WireEnd Neg → m 
 mkHeavy auxsList = \main0 → do
     for_ (zip [0..] auxsList) \(i, wire0Id) → do
       (wireId, _) ← contractWire wire0Id
-  --     traceM $ "9: " <> tshow wireId
-      modify $ IM.insert @(Either Int AnyNode) wireId $ Left (-(i+1))
-  --   traceM "mkHeavy main"
-    res ← execWriter @(RevList AnyNode) $ evalState @Int 0 $ evalState @(Seq AnyNode) mempty do
+      modify $ IM.insert @(Either Word32 AnyNode) (fromIntegral wireId) $ Left $ (\(WireEnd a) → a) $ packHV $ HWPersistentAux i
+    res ← execWriter @(RevList AnyNode) $ evalState @Word32 0 $ evalState @(Seq AnyNode) mempty do
       _ ← hdlPort main0
       whilePop hdlNode
-    pure $ StaticHeavyPackage $ fromList $ toList res
+    let resVec = fromList $ toList res
+    -- TODO: customs...
+    pure $ StaticHeavyPackage (V.length resVec) False resVec
   where
-  auxsLen = length auxsList
+  -- auxsLen = length auxsList
   whilePop :: forall sig2 m2. Has (State (Seq AnyNode)) sig2 m2 ⇒ (AnyNode → m2 ()) → m2 ()
   whilePop f = get @(Seq AnyNode) >>= \case
     (a :<| as) → put as *> f a *> whilePop f
     _ → pure ()
-  hdlNode :: forall sig2 m2. Has (Eval :+: State Int :+: State (Seq AnyNode) :+: Writer (RevList AnyNode)) sig2 m2 ⇒ AnyNode → m2 ()
+  hdlNode :: forall sig2 m2. Has (Eval :+: State Word32 :+: State (Seq AnyNode) :+: Writer (RevList AnyNode)) sig2 m2 ⇒ AnyNode → m2 ()
   hdlNode origN = do
     n ← either (fmap Left . travPorts hdlPort) (fmap Right . travPorts hdlPort) origN
     tell @(RevList AnyNode) [n]
-  hdlPort :: forall a sig2 m2. Has (Eval :+: State Int :+: State (Seq AnyNode)) sig2 m2 ⇒ DecPolarity a => WireEnd a -> m2 (WireEnd a)
+  hdlPort :: forall a sig2 m2. Has (Eval :+: State Word32 :+: State (Seq AnyNode)) sig2 m2 ⇒ DecPolarity a => WireEnd a -> m2 (WireEnd a)
   hdlPort wire0Id = do
     (wireId, thisM) ← contractWire wire0Id
     case thisM of
       Nothing → pure $ WireEnd wireId
       Just this → do
         modify @(Seq AnyNode) $ \q → q :|> either (\Refl → Right this) (\Refl → Left this) (decPolarity $ Proxy @a)
-        state @Int \len → (len+1, WireEnd (-(1 + len + auxsLen)))
+        state @Word32 \len → (len + 1, packHV $ HWInternalPri len)
 
 useFreeVar :: Has (Writer FreeVars :+: Eval) sig m ⇒ P.Ident → m (WireEnd Neg)
 useFreeVar ident = do
@@ -350,12 +404,17 @@ useFreeVar ident = do
   tell $ FreeVars $ HM.singleton ident (p :| [])
   pure n
 
+-- censor + listen
+intercept :: forall w m sig a. (Has (Writer w) sig m, Monoid w) => m a → m (w, a)
+intercept = censor @w (const mempty) . listen @w
+
 compile :: Has (Writer FreeVars :+: Eval) sig m => P.ExprT → m (WireEnd Neg)
 compile = \case
-  P.Lam arg bod → do
-    (occ, bod') ← catchFree arg $ compile bod
-    occ' ← shareBetween occ
-    primary $ Lam occ' bod'
+  P.Node captures pos val → do
+    (freesInBod, val') ← intercept @FreeVars $ compile val
+    -- Just compile into a heavy package, failing if free vars mismatch.
+    -- The resulting heavy package
+    undefined
   P.Let ((name, val) :| defs) bod → do
     (occInBod, bod') ← catchFree name $ compile case defs of
       [] → bod
@@ -363,29 +422,29 @@ compile = \case
     case occInBod of
       [] → pure ()
       _ → do
-        (freesInVal, val') ← censor @FreeVars (const mempty) $ listen @FreeVars $ compile val
+        (freesInVal, val') ← intercept @FreeVars $ compile val
         val'' ← runEmpty
           do -- fallback
             tell freesInVal
             pure val'
           pure
           do
-            -- TODO: Affine check
-            -- E.guard $ not $ isAffine occInBod -- No need to package if ever used just once
             E.guard $ sum (length <$> unFreeVars freesInVal) <= 8 -- Cannot package when >8 auxs.
             E.guard =<< isPrimary val'
             let auxs = toList (unFreeVars freesInVal) >>= \(n, l) → (n,) <$> toList l
             for_ auxs \(_, aux) → E.guard . not =<< isPrimary aux
             -- Wrap
-  --           traceM "Wrapping..."
             heavyPackage ← mkHeavy (snd <$> auxs) val'
-  --           traceM "Done wrapping."
             heavyId ← fresh
             modify $ IM.insert heavyId heavyPackage
 
-            primary =<< StaticHeavy (fromIntegral heavyId) . fromList <$> for auxs \(i, _) → useFreeVar i
+            primary =<< StaticHeavy (fromIntegral heavyId) . fromList <$> for auxs \(i, _) → Left <$> useFreeVar i
         link val'' =<< shareBetween occInBod
     pure bod'
+  P.Lam arg bod → do
+    (occ, bod') ← catchFree arg $ compile bod
+    occ' ← shareBetween occ
+    primary $ Lam occ' bod'
   P.Op a op b → do
     a' ← compile a
     b' ← compile b
@@ -458,7 +517,7 @@ serNet (a, b) = serNode a *> for_ b \(c, d) → serNode c *> serNode d
 --   in concatWith (\x y → x <> "\n----\n" <> y) entries <> line
 -- debugReadInt → 
 
-type EvalC a = StateC (IntMap (Either Int AnyNode)) (StateC (IntMap StaticHeavyPackage) (FreshC IO)) a
+type EvalC a = StateC (IntMap (Either Word32 AnyNode)) (StateC (IntMap StaticHeavyPackage) (FreshC IO)) a
 
 runEvalC :: EvalC a → IO a
 runEvalC = evalFresh 0 . evalState IM.empty . evalState IM.empty

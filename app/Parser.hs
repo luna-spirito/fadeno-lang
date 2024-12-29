@@ -56,15 +56,24 @@ operator =
       '/' → pure Div
       _ → failed
 
+{-
+Reserved symbols:
+<space> ( ) { } [ ] \\ \n ,
+Reserved keywords/operators:
++ - / * (-ident)*+?> let in
+-}
+
 ident ∷ Parser' Ident
 ident = token do
-  result ← byteStringOf (skipSome $ satisfy \x → x /= '\\' && x /= ' ' && x /= '\n' && x /= '=' && x /= '(' && x /= ')')
+  result ← byteStringOf (skipSome $ satisfy \x → not $ x `elem` ['\\', ' ', '\n', '=', '(', ')'])
   guard $ not $ result `elem` ["let", "in", "+", "-", "/", "*"]
   pure $ Ident result
 
 data ExprT
-  = Lam !Ident ExprT
+  =
+  Node ![Ident] !Bool !ExprT
   | Let !(NonEmpty (Ident, ExprT)) !ExprT
+  | Lam !Ident ExprT
   | Op !ExprT !OpT !ExprT
   | App !ExprT !ExprT
   | Nat !Word32
@@ -131,6 +140,13 @@ parseMath0 =
 someNonEmpty :: Alternative f ⇒ f a → f (NonEmpty a)
 someNonEmpty f = (:|) <$> f <*> many f
 
+parseNode :: Parser' ExprT
+parseNode = do
+  captures ← some $ $(char '-') *> ident
+  pos ← isJust <$> optional $(char '+')
+  $(char '>')
+  Node captures pos <$> parseTop
+
 parseLet ∷ Parser' ExprT
 parseLet = do
   defs ← someNonEmpty do
@@ -148,11 +164,11 @@ parseLet = do
 parseTop ∷ Parser' ExprT
 parseTop =
   token $
-    parseLet
-      <|> token ($(char '\\'))
-      *> (Lam <$> ident <*> parseTop)
-        <|> parseMath0
-        <|> (err =<< getPos)
+    parseNode
+      <|> parseLet
+      <|> (token ($(char '\\')) *> (Lam <$> ident <*> parseTop))
+      <|> parseMath0
+      <|> (err =<< getPos)
 
 pIdent ∷ Ident → Doc AnsiStyle
 pIdent (Ident x) = pretty $ decodeUtf8Lenient x
