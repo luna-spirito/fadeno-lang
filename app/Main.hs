@@ -10,12 +10,12 @@ import Control.Carrier.State.Church
 import Control.Effect.Fresh (fresh, Fresh)
 import Control.Effect.Writer (Writer, censor, listen, tell)
 import Data.Kind (Type)
-import Data.List (uncons)
+import Data.List (uncons, intercalate)
 import GHC.Exts (IsList (..))
 import Parser qualified as P
 import RIO hiding (link, ask, runReader, toList)
 import RIO.HashMap qualified as HM
-import qualified Data.IntMap as IM
+import qualified Data.IntMap.Strict as IM
 import qualified RIO.Partial as P
 import Control.Carrier.Reader (ReaderC, runReader)
 import Control.Effect.Reader (ask)
@@ -24,15 +24,17 @@ import Control.Carrier.Empty.Church (runEmpty)
 import qualified Control.Effect.Empty as E
 import Type.Reflection ((:~:) (..))
 import qualified RIO.Vector as V
-import Control.Effect.Lift (Lift, sendIO)
+import Control.Effect.Lift (Lift, sendIO, sendM)
 import Control.Carrier.Fresh.Church (FreshC, evalFresh)
-import Control.Carrier.Error.Church (runError)
-import Control.Effect.Throw (throwError)
-import Control.Carrier.Writer.Church (runWriter, execWriter)
-import RIO.Text (intercalate)
+import Control.Carrier.Writer.Church (runWriter, execWriter, WriterC)
 import RIO.Seq  (Seq(..))
 import Data.Bits (unsafeShiftL, (.|.), unsafeShiftR, (.&.))
-import Data.Serialize (Putter)
+import Data.Serialize (putWord8, PutM, putWord32be, putWord64be, execPut, runPutMBuilder, putBuilder)
+import Control.Carrier.Accum.Church (evalAccum)
+import Control.Carrier.Lift (LiftC, runM)
+import qualified RIO.Seq as S
+import Data.ByteString.Builder (toLazyByteString)
+import Control.Effect.Accum (look, add)
 
 {-
 Whenever a node interacts with a negative package, DO NOT UNWRAP.
@@ -76,7 +78,7 @@ we do guarantee that we do it only when it preserves optimality.
 No phasings. Instead, each time a specialisation occurs (i. e. you interact with negative package), DO NOT UNWRAP it.
 -}
 
-newtype RevList a = UnsafeRevList [a] deriving (Functor)
+newtype RevList a = UnsafeRevList [a] deriving (Functor, Show)
 
 instance Semigroup (RevList a) where
   UnsafeRevList a <> UnsafeRevList b = UnsafeRevList $ b <> a
@@ -115,14 +117,38 @@ data Node :: Polarity → Type where
   Op1 :: !P.OpT → !(WireEnd Pos) → !(Word32) → Node Neg
   Era :: Node Neg
   Nul :: Node Pos
-  StaticHeavy :: !Word32 → !(Vector AnyWireEnd) → Node Pos
+  StaticHeavy :: !HeavyId → !(Vector AnyWireEnd) → Node Pos
   Debug :: Node Neg
+
+instance Show (Node a) where
+  show = \case
+    App {} → "App"
+    Lam {} → "Lam"
+    Dup {} → "Dup"
+    Sup {} → "Sup"
+    Word32 {} → "Word32"
+    Op2 {} → "Op2"
+    Op1 {} → "Op1"
+    Era {} → "Era"
+    Nul {} → "Nul"
+    StaticHeavy {} → "StaticHeavy"
+    Debug {} → "Debug"
 
 type AnyNode = Either (Node Neg) (Node Pos)
 
+newtype HeavyId = HeavyId Word32
+
+-- | Extension over WireEnd that also allows to serialise wires to primary ports;
+-- wires to heavy's auxiliary ports, both persistent and temporary (the ones used for multi-operand nodes introduced by -op1-op2+>).
+data HeavyWireEnd (pol :: Polarity)
+  = HWAux !(WireEnd pol)
+  | HWPri !Word32
+
+type AnyHeavyWireEnd = Either (HeavyWireEnd Neg) (HeavyWireEnd Pos)
+
 -- Format of heavy package differs between -lang and -jit.
 -- First elements of the auxs vector contains persistent aux, last — temporary ones. In normal order.
-data StaticHeavyPackage = StaticHeavyPackage !Int !Bool !(WireEnd Neg) !(Vector AnyWireEnd) !(Vector AnyNode)
+data StaticHeavyPackage = StaticHeavyPackage !Int !Bool !(HeavyWireEnd Neg) !(Vector AnyHeavyWireEnd) !(Vector AnyNode)
 
 type Eval = State (IntMap (Either Word32 AnyNode)) :+: State (IntMap StaticHeavyPackage) :+: Fresh :+: Lift IO
 
@@ -232,14 +258,6 @@ primary n = do
     Left Refl → move n neg $> pos
     Right Refl → move n pos $> neg
 
--- | Extension over WireEnd that also allows to serialise wires to primary ports;
--- wires to heavy's auxiliary ports, both persistent and temporary (the ones used for multi-operand nodes introduced by -op1-op2+>).
-data HeavyWireEnd (pol :: Polarity)
-  = HWAux !(WireEnd pol)
-  | HWPri !Word32
-  -- | HWPersistentAux !Word32
-  -- | HWTemporaryAux !Word32
-
 packHV :: HeavyWireEnd a → WireEnd a
 packHV hv =
   let (tag, val) = case hv of
@@ -259,8 +277,8 @@ unpackHV (WireEnd x) =
     -- 4 → HWTemporaryAux val
     _ → error "unknown tag"
 
-instHeavy :: forall sig m. Has Eval sig m => Word32 → Vector AnyWireEnd → m (WireEnd Neg)
-instHeavy heavyId auxs = do
+instHeavy :: forall sig m. Has Eval sig m => HeavyId → Vector AnyWireEnd → m (WireEnd Neg)
+instHeavy (HeavyId heavyId) auxs = do
   StaticHeavyPackage persAuxsLen hasResAux mainWire auxWires ns ← P.fromJust . IM.lookup @StaticHeavyPackage (fromIntegral heavyId) <$> get
   let
     write :: forall a. DecPolarity a => Word32 → StateC (IntMap Word32) m (Node a)
@@ -270,7 +288,10 @@ instHeavy heavyId auxs = do
       _ → error "impossible"
     
     r :: forall a. DecPolarity a ⇒ WireEnd a → StateC (IntMap Word32) m (WireEnd a)
-    r hw0 = case unpackHV hw0 of
+    r = r' . unpackHV
+
+    r' :: forall a. DecPolarity a ⇒ HeavyWireEnd a → StateC (IntMap Word32) m (WireEnd a)
+    r' hw0 = case hw0 of
       HWAux (WireEnd wire0Id) → do
         wireIdM ← IM.lookup (fromIntegral wire0Id) <$> get
         WireEnd <$> case wireIdM of
@@ -285,10 +306,10 @@ instHeavy heavyId auxs = do
         either (\Refl → primary =<< write @Pos nodeId) (\Refl → primary =<< write @Neg nodeId) $ decPolarity $ Proxy @a
   evalState IM.empty do
     for_ (V.zip auxs auxWires) \case
-      (Left ext, Right int) → link ext =<< r int
-      (Right ext, Left int) → (`link` ext) =<< r int
+      (Left ext, Right int) → link ext =<< r' int
+      (Right ext, Left int) → (`link` ext) =<< r' int
       _ → error "impossible"
-    r mainWire
+    r' mainWire
 
 eval :: Has Eval sig m => Node Neg → Node Pos → m ()
 eval = curry \case
@@ -369,34 +390,37 @@ isPrimary (WireEnd wire0Id) = do
     Just (Right _) → pure True
     Nothing → pure False
 
+whilePop :: forall a sig m. Has (State (Seq a)) sig m ⇒ (a → m ()) → m ()
+whilePop f = get @(Seq a) >>= \case
+  (a :<| as) → put as *> f a *> whilePop f
+  _ → pure ()
+
 -- TODO: contract & retartget auxsList
 -- deferred?
 mkHeavy :: forall sig m. Has Eval sig m ⇒ WireEnd Neg → Vector AnyWireEnd → m StaticHeavyPackage
 mkHeavy = \main0 auxs0 → do
   (pkg, (ma, au)) ← runWriter @(RevList AnyNode) (curry pure) $ evalState @Word32 0 $ evalState @(Seq AnyNode) mempty do
-    m ← hdlPort main0
-    a ← for auxs0 $ either (fmap Left . hdlPort) (fmap Right . hdlPort)
+    m ← hdlPort' main0
+    a ← for auxs0 $ either (fmap Left . hdlPort') (fmap Right . hdlPort')
     whilePop hdlNode
     pure (m, a)
   pure $ StaticHeavyPackage (V.length au) False ma au $ fromList $ toList pkg
   where
   -- auxsLen = length auxsList
-  whilePop :: forall sig2 m2. Has (State (Seq AnyNode)) sig2 m2 ⇒ (AnyNode → m2 ()) → m2 ()
-  whilePop f = get @(Seq AnyNode) >>= \case
-    (a :<| as) → put as *> f a *> whilePop f
-    _ → pure ()
   hdlNode :: forall sig2 m2. Has (Eval :+: State Word32 :+: State (Seq AnyNode) :+: Writer (RevList AnyNode)) sig2 m2 ⇒ AnyNode → m2 ()
   hdlNode origN = do
     n ← either (fmap Left . travPorts hdlPort) (fmap Right . travPorts hdlPort) origN
     tell @(RevList AnyNode) [n]
   hdlPort :: forall a sig2 m2. Has (Eval :+: State Word32 :+: State (Seq AnyNode)) sig2 m2 ⇒ DecPolarity a => WireEnd a -> m2 (WireEnd a)
-  hdlPort wire0Id = do
+  hdlPort = fmap packHV . hdlPort'
+  hdlPort' :: forall a sig2 m2. Has (Eval :+: State Word32 :+: State (Seq AnyNode)) sig2 m2 ⇒ DecPolarity a => WireEnd a -> m2 (HeavyWireEnd a)
+  hdlPort' wire0Id = do
     (wireId, thisM) ← contractWire wire0Id
     case thisM of
-      Nothing → pure $ WireEnd wireId
+      Nothing → pure $ HWAux $ WireEnd wireId
       Just this → do
         modify @(Seq AnyNode) $ \q → q :|> either (\Refl → Right this) (\Refl → Left this) (decPolarity $ Proxy @a)
-        state @Word32 \len → (len + 1, packHV $ HWPri len)
+        state @Word32 \len → (len + 1, HWPri len)
 
 useFreeVar :: Has (Writer FreeVars :+: Eval) sig m ⇒ P.Ident → m (WireEnd Neg)
 useFreeVar ident = do
@@ -438,7 +462,7 @@ compile = \case
             heavyId ← fresh
             modify $ IM.insert heavyId heavyPackage
 
-            primary =<< StaticHeavy (fromIntegral heavyId) . fromList <$> for auxs \(i, _) → Left <$> useFreeVar i
+            primary =<< StaticHeavy (HeavyId $ fromIntegral heavyId) . fromList <$> for auxs \(i, _) → Left <$> useFreeVar i
         link val'' =<< shareBetween occInBod
     pure bod'
   P.Lam arg bod → do
@@ -459,90 +483,215 @@ compile = \case
     pure retn
   P.Nat x → primary $ Word32 x
   P.Var ident → useFreeVar ident
-            
-serHeavy :: Putter StaticHeavyPackage
-serHeavy = undefined
-{-
-serOp ∷ Putter P.OpT
-serOp =
-  putWord8 . \case
+
+data Sizing a = SizeNul | SizeInline !Word32 | Size !a
+  deriving Functor
+
+-- | Returns total size in dwords and amount of data slots.
+sizing :: Node a → Sizing (Word8, Word8)
+sizing = \case
+  App {} → j 2 0
+  Lam {} → j 2 0
+  Dup {} → j 2 0
+  Sup {} → j 2 0
+  Word32 l → SizeInline l
+  Op2 {} → j 2 0
+  Op1 {} → j 2 1
+  Era → SizeNul
+  Nul → SizeNul
+  StaticHeavy _ auxs → Size (fromIntegral $ V.length auxs + 1, 1)
+  Debug → SizeNul
+  where j a b = Size (a, b)
+
+packW16 :: (Word8, Word8) → Int
+packW16 (a, b) = (fromIntegral a `unsafeShiftL` 8) .|. fromIntegral b
+
+unpackW16 :: Int → (Word8, Word8)
+unpackW16 x = (fromIntegral $ x `unsafeShiftR` 8, fromIntegral x)
+
+-- | Returns subpacks and position of each input node in the respective subpack.
+serPartitionSubpacks :: Vector AnyNode → (IntMap (Word32, RevList AnyNode), Vector Word32)
+serPartitionSubpacks nodes = runIdentity $ runState @(IntMap (Word32, RevList AnyNode)) (curry pure) mempty $
+  for nodes \node → either sizing sizing node & \case
+    Size s →
+      state @(IntMap (Word32, RevList AnyNode)) \subpacks →
+        let
+          subpackId = packW16 s
+          (oldSize, oldMembers) = fromMaybe (0, []) $ IM.lookup subpackId subpacks
+        in (IM.insert subpackId (oldSize + 1, oldMembers `revSnoc` node) subpacks, oldSize)
+    _ → pure 0
+
+-- | Returns packs (each containing subpacks) and position of each input node.
+serPartitionPacks :: Vector AnyNode → (IntMap (Word32, RevList (Word8, Word32, RevList AnyNode)), Word32 → Sizing (Word8, Word32))
+serPartitionPacks nodes =
+  let
+    (subpacks, nodeOffsetInSubpack) = serPartitionSubpacks nodes
+    (packs, subpackOffsetInPack) = runIdentity $ runState (curry pure) mempty $ flip IM.traverseWithKey subpacks \(unpackW16 -> (packId, datas)) (size, subpack) →
+      state @(IntMap (Word32, RevList (Word8, Word32, RevList AnyNode))) \oldPacks →
+        let (oldPackSize, oldPackSubpacks) = fromMaybe (0, mempty) $ IM.lookup (fromIntegral packId) oldPacks
+        in (IM.insert (fromIntegral packId) (oldPackSize + size, oldPackSubpacks `revSnoc` (datas, size, subpack)) oldPacks, oldPackSize)
+  in (packs, \nodeId →
+    either sizing sizing (P.fromJust (nodes V.!? fromIntegral nodeId))
+    <&> \(packId, subpackId) → (packId, P.fromJust (IM.lookup (fromIntegral $ packW16 (packId, subpackId)) subpackOffsetInPack)
+      + P.fromJust (nodeOffsetInSubpack V.!? fromIntegral nodeId)))
+
+type HeavySerM = StateC Word32 (StateC (RevList (Word32, HeavyId)) (LiftC PutM))
+
+serW32 :: Word32 → HeavySerM ()
+serW32 x = do
+  modify @Word32 (+1)
+  sendM $ putWord32be x
+
+serW64 :: Word64 → HeavySerM ()
+serW64 x = do
+  modify @Word32 (+2)
+  sendM $ putWord64be x
+
+serTravSlots_ :: forall f a. Applicative f ⇒ (Word8 → Either AnyHeavyWireEnd (HeavySerM ()) → f ()) → Node a → f ()
+serTravSlots_ f = \case
+  App a b → p 0 a *> p 1 b
+  Lam a b → p 0 a *> p 1 b
+  Dup _ a b → p 0 a *> p 1 b
+  Sup _ a b → p 0 a *> p 1 b
+  Word32 _ → pure ()
+  Op2 _ a b → p 0 a *> p 1 b
+  Op1 _ a b → p 0 a *> f 1 (Right $ serW64 $ fromIntegral b)
+  Era → pure ()
+  Nul → pure ()
+  StaticHeavy heavyId b → sequenceA_ (zipWith (\i → either (p i) (p i)) [0..] $ toList b)
+    *> f (fromIntegral $ V.length b) (Right do
+      pos ← get @Word32
+      modify $ (`revSnoc` (pos, heavyId))
+      serW64 0)
+  Debug → pure ()
+  where
+  p :: forall b. DecPolarity b => Word8 → WireEnd b → f ()
+  p i = f i . Left . either (\Refl → Left . unpackHV) (\Refl → Right . unpackHV) (decPolarity (Proxy @b))
+
+serHdlWires :: Vector AnyNode → IntMap (Word32, Word8)
+serHdlWires = \nodes → runIdentity $ execWriter $ flip V.imapM_ nodes \nodeId →
+  let
+    f :: Node a → WriterC (IntMap (Word32, Word8)) Identity ()
+    f = serTravSlots_ \portId → \case
+      Left (Right (HWAux (WireEnd wire))) →
+        tell $ IM.singleton (fromIntegral wire) (fromIntegral nodeId :: Word32, portId)
+      _ → pure ()
+  in either f f
+
+packMeta :: Word8 → Word32 → Word32
+packMeta a b = (fromIntegral a `unsafeShiftL` 24) .|. b
+
+serMeta :: Node a → Word32
+serMeta = uncurry packMeta . \case
+  App {} → (4, 0)
+  Lam {} → (4, 0)
+  Dup l _ _ → (5, l)
+  Sup l _ _ → (5, l)
+  Word32 _ → (6, 0)
+  Op2 op _ _ → (7, serOp op)
+  Op1 op _ _ → (8, serOp op)
+  Era → (3, 0)
+  Nul → (3, 0)
+  StaticHeavy _ x → (10, fromIntegral $ V.length x)
+  Debug → (100, 0)
+  where
+  serOp :: P.OpT → Word32
+  serOp = \case
     P.Add → 0
     P.Sub → 1
     P.Mul → 2
     P.Div → 3
 
-serNode ∷ Putter (Port pol)
-serNode port =
+serHeavy :: StaticHeavyPackage → PutM (RevList (Word32, HeavyId))
+serHeavy (StaticHeavyPackage _hpersAux _hspecRes hmain0 hauxs hnodes) = do
+  let auxForWire = serHdlWires hnodes
+  let (packs, nodeIdToPos) = serPartitionPacks hnodes
+  let packToVirt = IM.fromList $ zip (IM.keys packs) [0..]
   let
-    (tag, val) = case port of
-      FreeN x → (0, putWord32be $ fromIntegral x)
-      FreeP x → (0, putWord32be $ fromIntegral x)
-      App a b → (1, serNode a *> serNode b)
-      Lam a b → (1, serNode a *> serNode b)
-      Dup l a b → (2, putWord32be l *> serNode a *> serNode b)
-      Sup l a b → (2, putWord32be l *> serNode a *> serNode b)
-      Word32 w → (3, putWord32be w)
-      Op2 op a b → (4, serOp op *> serNode a *> serNode b)
-      Era → (5, pure ())
-      Nul → (5, pure ())
-      -- Chu a b c d → (6, serNode a *> serNode b *> serNode c *> serNode d)
-   in
-    putWord8 tag *> val
+    ((subst, res_val_size), res_val) = runPutMBuilder $ runM $ runState (curry pure) [] $ execState 0 do
+      for_ packs \(packSize, _subpacks) → serW32 packSize
+      let
+        mkRef (a :: Word8) (b :: Word32) (c :: Word8) = (P.fromJust (IM.lookup (fromIntegral a) packToVirt) `unsafeShiftL` 29) .|. (b `unsafeShiftL` 3) .|. fromIntegral c
+        varFor (wireId :: Word32) =
+          let
+            (ab, c) = P.fromJust $ IM.lookup (fromIntegral wireId) auxForWire
+          in case nodeIdToPos ab of
+            Size (a, b) → mkRef a b c
+            _ → error "impossible"
+        serPort :: forall a. DecPolarity a ⇒ HeavyWireEnd a → HeavySerM ()
+        serPort = \case
+            HWAux (WireEnd a) → either (\Refl → serW32 (packMeta 1 0) *> serW32 (varFor a)) (\Refl → serW32 (packMeta 2 0)) $ decPolarity $ Proxy @a
+            HWPri nodeId → do
+              serW32 $ either serMeta serMeta $ P.fromJust $ hnodes V.!? fromIntegral nodeId
+              case nodeIdToPos nodeId of
+                SizeNul → pure ()
+                SizeInline x → serW32 x
+                Size (a, b) → serW32 $ mkRef a b 0
+      for_ packs \(_packSize, toList → subpacks) →
+        for_ subpacks \(datas, num, toList → nodes) → do
+          serW32 $ (fromIntegral datas `unsafeShiftL` 29) .|. num
+          let f = serTravSlots_ \_ → \case
+                Left x → either serPort serPort x
+                Right x → x
+          for_ nodes $ either f f
+      serPort hmain0
+      for_ hauxs $ either serPort serPort
+  putWord32be res_val_size
+  putWord32be $ fromIntegral $ foldr (\k acc → (acc `unsafeShiftL` 4) .|. k) 0 $ IM.keys packs
+  putWord8 $ foldr (\k acc → (acc `unsafeShiftL` 1) .|. either (const 0) (const 1) k) 0 $ hauxs
+  putWord8 $ fromIntegral $ IM.size packs
+  putBuilder res_val
+  pure subst
 
-serNet ∷ Putter (Port Pos, [(Port Neg, Port Pos)])
-serNet (a, b) = serNode a *> for_ b \(c, d) → serNode c *> serNode d
--}
-
--- debugShow :: (Port Pos, [(Port Neg, Port Pos)])
--- debugShow (a, b)
--- prettyNode :: Node pol -> Doc AnsiStyle
--- prettyNode port =
---   let (tag :: Doc AnsiStyle, sub :: [Doc AnsiStyle]) = case port of
---         App a b → ("App", [prettyNode a, prettyNode b])
---         Lam a b → ("Lam", [prettyNode a, prettyNode b])
---         Dup l a b → ("Dup " <> pretty l, [prettyNode a, prettyNode b])
---         Sup l a b → ("Sup " <> pretty l, [prettyNode a, prettyNode b])
---         Word32 b → ("Word32" <+> pretty b, [])
---         Op2 op a b → ("Op2" <+> P.pOp op, [prettyNode a, prettyNode b])
---         Era → ("Era", [])
---         Nul → ("Nul", [])
---         -- Chu _ _ _ _ → undefined
---         -- FreeN x → ("FreeN" <+> pretty x, [])
---         -- FreeP x → ("FreeP" <+> pretty x, [])
---   in tag <> if null sub then mempty else nest 1 (line <> vsep sub)
-
--- debugRun :: 
-
--- printNet :: (Node Pos, [(Node Neg, Node Pos)]) → IO ()
--- printNet (a, b) = renderIO stdout $ layoutSmart defaultLayoutOptions $
---   let entries = prettyNode a : (b <&> \(c, d) -> vsep [prettyNode c, "~", prettyNode d])
---   in concatWith (\x y → x <> "\n----\n" <> y) entries <> line
--- debugReadInt → 
+serHeavyRec :: StaticHeavyPackage → EvalC LByteString
+serHeavyRec rootHeavy = fmap toLazyByteString $ evalState (S.empty @HeavyId) $ evalAccum (IM.empty @Word32) $ execWriter @Builder do
+  let
+    ser h = do
+      let (UnsafeRevList subst, res) = runPutMBuilder $ serHeavy h
+      tell res
+      tell $ execPut $ putWord32be $ fromIntegral $ length subst -- sorry
+      for_ subst \(pos, HeavyId heavyId) → do
+        heavyIdToVirtId ← look
+        virtId ← case IM.lookup (fromIntegral heavyId) heavyIdToVirtId of
+          Nothing → do
+            let v = fromIntegral $ IM.size heavyIdToVirtId
+            add $ IM.singleton (fromIntegral heavyId) v
+            modify $ (:|> HeavyId heavyId)
+            pure v
+          Just v → pure v
+        tell $ execPut $ putWord32be pos *> putWord32be virtId
+  ser rootHeavy
+  whilePop \(HeavyId heavyId) → do
+    heavy ← P.fromJust . IM.lookup (fromIntegral heavyId) <$> get
+    ser heavy
 
 type EvalC a = StateC (IntMap (Either Word32 AnyNode)) (StateC (IntMap StaticHeavyPackage) (FreshC IO)) a
 
 runEvalC :: EvalC a → IO a
 runEvalC = evalFresh 0 . evalState IM.empty . evalState IM.empty
 
-compileFile :: FilePath → EvalC (Either Text (WireEnd Neg))
-compileFile fileName = runError (pure . Left) (pure . Right) do
-  parsed ← either throwError pure =<< lift (sendIO $ P.parseFile fileName)
+compileFile :: FilePath → EvalC (WireEnd Neg)
+compileFile fileName = do
+  parsed ← either (error . show) pure =<< lift (sendIO $ P.parseFile fileName)
   runWriter @FreeVars
     (\(FreeVars frees) res → do
       unless (HM.null frees) $
-        throwError $
+        error $
           "Unknown identifiers: "
-            <> intercalate ", " (decodeUtf8Lenient . P.unIdent . fst <$> toList frees)
+            <> intercalate ", " (show . P.unIdent . fst <$> toList frees)
       pure res
     )
     $ compile parsed
 
-compileFileRun :: FilePath → EvalC (Either Text ())
-compileFileRun fileName = compileFile fileName >>= either (pure . Left) \res →
-  move Debug res $> Right ()
+compileFileRun :: FilePath → EvalC ()
+compileFileRun fileName = compileFile fileName >>= move Debug
 
--- compileFileToFile :: FilePath → IO (Either Text ())
--- compileFileToFile file = compileFile (file <> ".fad") >>= traverse (writeFileBinary (file <> ".fadobj") . runPut . serNet)
+compileFileToFile :: FilePath → IO ()
+compileFileToFile file = runEvalC do
+  pri ← compileFile (file <> ".fad") 
+  root ← mkHeavy pri []
+  fadobj ← serHeavyRec root
+  writeFileBinary (file <> ".fadobj") $ toStrictBytes fadobj
 
 main ∷ IO ()
 main = pure ()
