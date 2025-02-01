@@ -35,6 +35,8 @@ import Control.Carrier.Lift (LiftC, runM)
 import qualified RIO.Seq as S
 import Data.ByteString.Builder (toLazyByteString)
 import Control.Effect.Accum (look, add)
+import qualified Data.ByteString.Char8 as BS
+import System.IO (print)
 
 {-
 Whenever a node interacts with a negative package, DO NOT UNWRAP.
@@ -78,6 +80,12 @@ we do guarantee that we do it only when it preserves optimality.
 No phasings. Instead, each time a specialisation occurs (i. e. you interact with negative package), DO NOT UNWRAP it.
 -}
 
+-- TODO: Currently identifiers with `/` are reserved.
+-- Correct type-checking also depends on this. This is absolutely horrible.
+-- TODO: just calm down and use freaking substitutions.
+-- You can't guarantee correctness of the mess you've written if you
+-- continue to do things this way.
+
 newtype RevList a = UnsafeRevList [a] deriving (Functor, Show)
 
 instance Semigroup (RevList a) where
@@ -95,6 +103,176 @@ instance IsList (RevList a) where
   type Item (RevList a) = a
   fromList ls = UnsafeRevList $ reverse ls
   toList (UnsafeRevList ls) = reverse ls
+
+-- Check
+
+-- | "Type of" TermT
+data TTermT = T P.TermT | Kind deriving Show -- Actually should be merged with TermT definition, but Haskell.
+
+-- | Context stores values and the type of introduced bindings.
+type CtxT = HashMap P.Ident (Maybe P.TermT, TTermT)
+
+data SEntry = SScope | SExVar
+-- | For meta-variables
+type SolveM = StateC (IntMap [P.MetaVar']) (FreshC IO)
+
+scoped :: SolveM P.TermT → SolveM P.TermT
+scoped act = do
+  modify @(IntMap [P.MetaVar']) \scopes → IM.insert (IM.size scopes) [] scopes
+  ty ← act
+  exs ← state @(IntMap [P.MetaVar']) \scopes →
+    (IM.deleteMax scopes, snd $ fromMaybe (error "Internal error: Scope disappeared") $ IM.lookupMax scopes)
+  foldM
+    (\ty' (P.MetaVar' x) → do
+      var ← fresh
+      let var' = P.Ident $ BS.pack $ "/" <> show var
+      sendIO $ writeIORef x $ Left $ P.Var var'
+      -- TODO: not just Ty!
+      pure $ P.Forall var' P.Ty ty')
+    ty
+    exs
+
+delMeta :: Int → P.MetaVar' → SolveM ()
+delMeta scope var =
+  modify @(IntMap [P.MetaVar']) \scopes →
+    IM.adjust (filter (/= var)) scope scopes
+
+insMeta :: Int → P.MetaVar' → SolveM ()
+insMeta scope var =
+  modify @(IntMap [P.MetaVar']) \scopes →
+    IM.adjust (var:) scope scopes
+
+pushExVarInto :: Int → SolveM P.MetaVar'
+pushExVarInto scope = do 
+  metaVar' ← fmap P.MetaVar' $ sendIO $ newIORef $ Right $ scope
+  insMeta scope metaVar'
+  pure metaVar'
+
+pushExVar :: SolveM P.TermT
+pushExVar = do
+  scope ← (\x → x - 1) . IM.size <$> get @(IntMap [P.MetaVar'])
+  P.MetaVar <$> pushExVarInto scope
+
+normalize :: HashMap P.Ident P.TermT → P.TermT → P.TermT
+normalize binds = \case
+  P.Let ((name, val) :| bs) into →
+    normalize
+      (HM.insert name (normalize binds val) binds)
+      case bs of
+        [] → into
+        (b1:b2) → P.Let (b1 :| b2) into
+  P.Lam arg bod → P.Lam arg $ normalize binds bod
+  P.Op a op b → error "todo"
+  P.App f a → 
+    let a' = normalize binds a in
+    case normalize binds f of
+      P.Lam arg bod → normalize (HM.insert arg a' binds) bod
+      f' → P.App f' a'
+  P.NatLit x → P.NatLit x
+  P.Var x → case HM.lookup x binds of
+    Nothing → P.Var x
+    Just x' → x'
+  P.Forall x a b → P.Forall x (normalize binds a) $ normalize (HM.delete x binds) b
+  P.U32 → P.U32
+  P.Pi aM b c → P.Pi aM (normalize binds b) (normalize (maybe id HM.delete aM binds) c)
+  P.Ty → P.Ty
+  P.MetaVar x → P.MetaVar x
+
+data InferMode a where
+  Infer :: InferMode TTermT
+  Check :: TTermT → InferMode ()
+
+infer :: CtxT → P.TermT → InferMode a → SolveM a
+infer ctx = curry \case
+  (P.Let ((name, val0) :| bs) into, mode) → do
+    valT ← infer ctx val0 Infer
+    let val = normalize (HM.mapMaybe fst ctx) val0
+    -- TODO: annotations. Normalize'em
+    infer
+      (HM.insert name (Just val, valT) ctx)
+      (case bs of
+        [] → into
+        (b1:b2) → P.Let (b1 :| b2) into)
+      mode
+  (P.Lam arg bod, Infer) →
+    T <$> scoped do
+      inT ← pushExVar
+      outT ← pushExVar
+      infer (HM.insert arg (Nothing, T inT) ctx) bod $ Check $ T outT
+      pure $ P.Pi Nothing inT outT
+  (P.Lam arg bod, Check (T (P.Pi inNameM inT outT))) → do
+    -- TODO: This substitution is obviously not correc if `outT` already *for some reason* contains P.Var arg.
+    let outT' = maybe outT (\inName → normalize (HM.singleton inName $ P.Var arg) outT) inNameM
+    infer (HM.insert arg (Nothing, T inT) ctx) bod $ Check $ T outT'
+  (P.Op a _op b, Infer) → do
+    infer ctx a $ Check $ T P.U32
+    infer ctx b $ Check $ T P.U32
+    pure $ T P.U32
+  (P.App f a, Infer) → do
+    inT ← infer ctx a Infer
+    T <$> scoped do
+      outT ← pushExVar
+      infer ctx f $ Check $ T $ P.Pi Nothing (case inT of
+        Kind → error ""
+        T inT' → inT') outT
+      pure outT
+  (P.NatLit _, Infer) → pure $ T P.U32
+  (P.Var x, Infer) → case HM.lookup x ctx of
+    Nothing → error $ "Unknown var " <> show x
+    Just (_, ty) → pure ty
+  (x, Infer) → error $ "TODO " <> show x
+  (term, Check c) → do
+    ty ← infer ctx term Infer
+    subtype ty c
+
+instMeta :: Int → P.MetaVar' → P.TermT → SolveM ()
+instMeta scope1 (P.MetaVar' var1) = instMeta' where
+  write scope var val = do
+    sendIO $ writeIORef var $ Left val
+    delMeta scope (P.MetaVar' var)
+  instMeta' = \case
+    P.MetaVar (P.MetaVar' var2)
+      | var1 == var2 → pure ()
+      | otherwise → sendIO (readIORef var2) >>= \case
+        Left t → instMeta scope1 (P.MetaVar' var1) t
+        Right scope2 →
+          let (early, (lateScope, late)) = if scope1 <= scope2
+              then (var1, (scope2, var2))
+              else (var2, (scope1, var1))
+          in write lateScope late $ P.MetaVar $ P.MetaVar' early
+    P.U32 → write scope1 var1 P.U32
+    P.Pi inNameM inT outT → do
+      a ← pushExVarInto scope1
+      b ← pushExVarInto scope1
+      write scope1 var1 $ P.Pi inNameM (P.MetaVar a) (P.MetaVar b)
+      instMeta scope1 a inT *> instMeta scope1 b outT
+    x → error $ "instMeta " <> show x
+
+-- | a <: b
+subtype :: TTermT -> TTermT -> SolveM ()
+subtype = curry \case
+  (T (P.MetaVar a), T bT) → subtypeMeta subtype a bT
+  (T aT, T (P.MetaVar b)) → subtypeMeta (flip subtype) b aT
+  -- (T (P.Pi inName))
+  (aT, bT) → error $ show aT <> " <: " <> show bT
+  where
+    subtypeMeta subf (P.MetaVar' a) bT = 
+      sendIO (readIORef a) >>= \case
+        Left aT → subf (T aT) $ T bT
+        Right scope → instMeta scope (P.MetaVar' a) bT
+
+runSolveM :: SolveM a → IO a
+runSolveM = evalFresh 0 . evalState mempty
+
+checkFile :: FilePath → IO ()
+checkFile file = do
+  term ← P.parseFileOrDie file
+  ttermt ← runSolveM $ infer [] term Infer
+  case ttermt of
+    Kind → print @String "Kind"
+    T ty → P.printTermT ty
+
+-- IC
 
 data Polarity = Pos | Neg
 
@@ -273,8 +451,6 @@ unpackHV (WireEnd x) =
   in case tag of
     0 → HWAux $ WireEnd val
     1 → HWPri val
-    -- 2 → HWPersistentAux val
-    -- 4 → HWTemporaryAux val
     _ → error "unknown tag"
 
 instHeavy :: forall sig m. Has Eval sig m => HeavyId → Vector AnyWireEnd → m (WireEnd Neg)
@@ -422,6 +598,19 @@ mkHeavy = \main0 auxs0 → do
         modify @(Seq AnyNode) $ \q → q :|> either (\Refl → Right this) (\Refl → Left this) (decPolarity $ Proxy @a)
         state @Word32 \len → (len + 1, HWPri len)
 
+{-
+
+First of all, *I want Unicode*, but that's going to kill us I'm afraid.
+
+Terms constructs of my abomination:
+  forall X | T — impedicative quantification (`forall` from Fall From Grace)
+  forall x : T | T' — type for erased lambdas.
+  ** X : T | T' — type for dependent functions.
+  \x y — a lambda
+  \x A — a type for dependent function
+-}
+
+
 useFreeVar :: Has (Writer FreeVars :+: Eval) sig m ⇒ P.Ident → m (WireEnd Neg)
 useFreeVar ident = do
   (n, p) ← newWire
@@ -432,13 +621,18 @@ useFreeVar ident = do
 intercept :: forall w m sig a. (Has (Writer w) sig m, Monoid w) => m a → m (w, a)
 intercept = censor @w (const mempty) . listen @w
 
-compile :: Has (Writer FreeVars :+: Eval) sig m => P.ExprT → m (WireEnd Neg)
+-- compile2 :: (Has (Writer FreeVars :+: Eval) sig m) ⇒ P.TermT → m (m (WireEnd Neg))
+-- compile2 = \case
+
+
+
+compile :: Has (Writer FreeVars :+: Eval) sig m => P.TermT → m (WireEnd Neg)
 compile = \case
-  P.Node captures pos val → do
-    (freesInBod, val') ← intercept @FreeVars $ compile val
-    -- Just compile into a heavy package, failing if free vars mismatch.
-    -- The resulting heavy package
-    undefined
+  -- P.Node captures pos val → do
+  --   (freesInBod, val') ← intercept @FreeVars $ compile val
+  --   -- Just compile into a heavy package, failing if free vars mismatch.
+  --   -- The resulting heavy package
+  --   undefined
   P.Let ((name, val) :| defs) bod → do
     (occInBod, bod') ← catchFree name $ compile case defs of
       [] → bod
@@ -481,7 +675,7 @@ compile = \case
     (retn, retp) ← newWire
     move (App x' retp) f'
     pure retn
-  P.Nat x → primary $ Word32 x
+  P.NatLit x → primary $ Word32 x
   P.Var ident → useFreeVar ident
 
 data Sizing a = SizeNul | SizeInline !Word32 | Size !a

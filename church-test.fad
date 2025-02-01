@@ -1,2 +1,0 @@
-let sum = builtins/church 0 (\x x + 1)
-in sum 15

@@ -1,6 +1,0 @@
-let empty = \cons \empty empty
-let push = \x \l
-  let res = \cons \empty cons x (l cons empty)
-  in res
-let sum = \l l (\x \acc acc + x) 0
-in \x sum (builtins/church 0 (push 3) x)
