@@ -18,8 +18,9 @@ data OpT
   | Div
   deriving (Show, Eq, Ord)
 
-newtype Ident = Ident {unIdent ∷ ByteString}
-  deriving (Show, Eq, Ord, Hashable)
+data Ident = Ident !ByteString | UIdent !Int
+  deriving (Show, Eq, Ord, Generic)
+instance Hashable Ident
 
 type Parser' = Parser Pos
 
@@ -213,7 +214,9 @@ parseTop =
       <|> (err =<< getPos)
 
 pIdent ∷ Ident → Doc AnsiStyle
-pIdent (Ident x) = pretty $ decodeUtf8Lenient x
+pIdent = \case
+  Ident x → pretty $ decodeUtf8Lenient x
+  UIdent x → "/" <> pretty x
 
 pOp ∷ OpT → Doc AnsiStyle
 pOp = \case
@@ -255,8 +258,8 @@ isSimple =
    in
     runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
 
-pExpr ∷ Int → TermT → Doc AnsiStyle
-pExpr oldPrec =
+pTermT ∷ Int → TermT → Doc AnsiStyle
+pTermT oldPrec =
   withPrec oldPrec . \case
     Lam arg x →
       ( 0
@@ -265,14 +268,14 @@ pExpr oldPrec =
               _
                 | isSimple x → " "
                 | otherwise → line
-         in annotate (color Magenta) "\\" <> pIdent arg <> "." <> sep <> pExpr 0 x
+         in annotate (color Magenta) "\\" <> pIdent arg <> "." <> sep <> pTermT 0 x
       )
     Let defs i →
       ( 1
-      , vsep (toList defs <&> \(name, val) → pIdent name <+> annotate (color Cyan) "=" <> softline <> nest 2 (pExpr 0 val))
+      , vsep (toList defs <&> \(name, val) → pIdent name <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTermT 0 val))
           <> line
           <> annotate (color Cyan) "in"
-          <+> nest 2 (pExpr 1 i)
+          <+> nest 2 (pTermT 1 i)
       )
     Op a op b →
       let prec = case op of
@@ -280,16 +283,21 @@ pExpr oldPrec =
             Sub → 2
             Mul → 3
             Div → 3
-       in (prec, pExpr prec a <+> pOp op <+> pExpr prec b)
-    Forall name kind ty -> (4, annotate (color Cyan) "forall" <+> pIdent name <+> ":" <+> pExpr 4 kind <> "." <+> pExpr 4 ty)
-    Pi inName inTy outTy -> (4, maybe mempty (\x -> pIdent x <+> ": ") inName <> pExpr 5 inTy <+> "->" <+> pExpr 4 outTy)
-    App lam arg → (5, pExpr 5 lam <+> pExpr 6 arg)
+       in (prec, pTermT prec a <+> pOp op <+> pTermT prec b)
+    Forall name kind ty -> (4,
+      let
+        kind' = case kind of
+          Ty → mempty
+          _ → " :" <+> pTermT 4 kind
+      in annotate (color Cyan) "forall" <+> pIdent name <> kind' <> "." <+> pTermT 4 ty)
+    Pi inName inTy outTy -> (4, maybe mempty (\x -> pIdent x <+> ": ") inName <> pTermT 5 inTy <+> "->" <+> pTermT 4 outTy)
+    App lam arg → (5, pTermT 5 lam <+> pTermT 6 arg)
     Ty -> (6, "Type")
     U32 -> (6, "U32")
     NatLit x → (6, pretty x)
     Var x → (6, pIdent x)
     MetaVar (MetaVar' x) → case unsafePerformIO (readIORef x) of
-      Left t → (oldPrec, pExpr oldPrec t) 
+      Left t → (oldPrec, pTermT oldPrec t) 
       Right i → (6, "(meta " <> pretty i <> ")")
 
 parse ∷ ByteString → Either Text TermT
@@ -305,4 +313,4 @@ parseFileOrDie ∷ FilePath → IO TermT
 parseFileOrDie x = either (error . show) id <$> parseFile x
 
 printTermT ∷ TermT → IO ()
-printTermT expr = renderIO stdout $ layoutSmart defaultLayoutOptions $ pExpr 0 expr <> line
+printTermT expr = renderIO stdout $ layoutSmart defaultLayoutOptions $ pTermT 0 expr <> line

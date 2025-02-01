@@ -116,6 +116,9 @@ data SEntry = SScope | SExVar
 -- | For meta-variables
 type SolveM = StateC (IntMap [P.MetaVar']) (FreshC IO)
 
+freshIdent :: SolveM P.Ident
+freshIdent = P.UIdent <$> fresh
+
 scoped :: SolveM P.TermT → SolveM P.TermT
 scoped act = do
   modify @(IntMap [P.MetaVar']) \scopes → IM.insert (IM.size scopes) [] scopes
@@ -153,40 +156,70 @@ pushExVar = do
   scope ← (\x → x - 1) . IM.size <$> get @(IntMap [P.MetaVar'])
   P.MetaVar <$> pushExVarInto scope
 
-normalize :: HashMap P.Ident P.TermT → P.TermT → P.TermT
+writeMeta :: Int → P.MetaVar' → P.TermT → SolveM ()
+writeMeta scope (P.MetaVar' var) val = do
+  sendIO $ writeIORef var $ Left val
+  delMeta scope (P.MetaVar' var)
+
+instMeta :: Int → P.MetaVar' → P.TermT → SolveM ()
+instMeta scope1 (P.MetaVar' var1) = instMeta' where
+  instMeta' = \case
+    P.MetaVar (P.MetaVar' var2)
+      | var1 == var2 → pure ()
+      | otherwise → sendIO (readIORef var2) >>= \case
+        Left t → instMeta scope1 (P.MetaVar' var1) t
+        Right scope2 →
+          let (early, (lateScope, late)) = if scope1 <= scope2
+              then (var1, (scope2, var2))
+              else (var2, (scope1, var1))
+          in writeMeta lateScope (P.MetaVar' late) $ P.MetaVar $ P.MetaVar' early
+    P.U32 → writeMeta scope1 (P.MetaVar' var1) P.U32
+    P.Pi inNameM inT outT → do
+      a ← pushExVarInto scope1
+      b ← pushExVarInto scope1
+      writeMeta scope1 (P.MetaVar' var1) $ P.Pi inNameM (P.MetaVar a) (P.MetaVar b)
+      instMeta scope1 a inT *> instMeta scope1 b outT
+    x → error $ "instMeta " <> show (P.pTermT 0 x)
+
+normalize :: Has (Lift IO) sig m ⇒ HashMap P.Ident P.TermT → P.TermT → m P.TermT
 normalize binds = \case
-  P.Let ((name, val) :| bs) into →
+  P.Let ((name, val) :| bs) into → do
+    val' ← normalize binds val
     normalize
-      (HM.insert name (normalize binds val) binds)
+      (HM.insert name val' binds)
       case bs of
         [] → into
         (b1:b2) → P.Let (b1 :| b2) into
-  P.Lam arg bod → P.Lam arg $ normalize binds bod
+  P.Lam arg bod → P.Lam arg <$> normalize binds bod
   P.Op a op b → error "todo"
-  P.App f a → 
-    let a' = normalize binds a in
-    case normalize binds f of
+  P.App f a → do
+    a' ← normalize binds a
+    f' ← normalize binds f
+    case f' of
       P.Lam arg bod → normalize (HM.insert arg a' binds) bod
-      f' → P.App f' a'
-  P.NatLit x → P.NatLit x
-  P.Var x → case HM.lookup x binds of
+      _ → pure $ P.App f' a'
+  P.NatLit x → pure $ P.NatLit x
+  P.Var x → pure $ case HM.lookup x binds of
     Nothing → P.Var x
     Just x' → x'
-  P.Forall x a b → P.Forall x (normalize binds a) $ normalize (HM.delete x binds) b
-  P.U32 → P.U32
-  P.Pi aM b c → P.Pi aM (normalize binds b) (normalize (maybe id HM.delete aM binds) c)
-  P.Ty → P.Ty
-  P.MetaVar x → P.MetaVar x
+  P.Forall x a b → P.Forall x <$> normalize binds a <*> normalize (HM.delete x binds) b
+  P.U32 → pure P.U32
+  P.Pi aM b c → P.Pi aM <$> normalize binds b <*> normalize (maybe id HM.delete aM binds) c
+  P.Ty → pure P.Ty
+  old@(P.MetaVar (P.MetaVar' var)) → sendIO (readIORef var) >>= \case
+    Left t → normalize binds t
+    Right _ → pure old
 
 data InferMode a where
   Infer :: InferMode TTermT
   Check :: TTermT → InferMode ()
 
+-- (\f. \x. f (f x))
 infer :: CtxT → P.TermT → InferMode a → SolveM a
 infer ctx = curry \case
   (P.Let ((name, val0) :| bs) into, mode) → do
     valT ← infer ctx val0 Infer
-    let val = normalize (HM.mapMaybe fst ctx) val0
+    val ← normalize (HM.mapMaybe fst ctx) val0
     -- TODO: annotations. Normalize'em
     infer
       (HM.insert name (Just val, valT) ctx)
@@ -197,25 +230,48 @@ infer ctx = curry \case
   (P.Lam arg bod, Infer) →
     T <$> scoped do
       inT ← pushExVar
-      outT ← pushExVar
-      infer (HM.insert arg (Nothing, T inT) ctx) bod $ Check $ T outT
-      pure $ P.Pi Nothing inT outT
+      outT ← infer (HM.insert arg (Nothing, T inT) ctx) bod Infer
+      pure case outT of
+        Kind → error ""
+        T outT' → P.Pi Nothing inT outT'
   (P.Lam arg bod, Check (T (P.Pi inNameM inT outT))) → do
-    -- TODO: This substitution is obviously not correc if `outT` already *for some reason* contains P.Var arg.
-    let outT' = maybe outT (\inName → normalize (HM.singleton inName $ P.Var arg) outT) inNameM
-    infer (HM.insert arg (Nothing, T inT) ctx) bod $ Check $ T outT'
+    (val, outT') ← case inNameM of
+      Nothing → pure (Nothing, outT)
+      Just inName → do
+        arg' ← freshIdent
+        outT' ← normalize (HM.singleton inName $ P.Var arg') outT
+        pure (Just $ P.Var arg', outT')
+    infer (HM.insert arg (val, T inT) ctx) bod $ Check $ T outT'
   (P.Op a _op b, Infer) → do
     infer ctx a $ Check $ T P.U32
     infer ctx b $ Check $ T P.U32
     pure $ T P.U32
   (P.App f a, Infer) → do
-    inT ← infer ctx a Infer
-    T <$> scoped do
-      outT ← pushExVar
-      infer ctx f $ Check $ T $ P.Pi Nothing (case inT of
-        Kind → error ""
-        T inT' → inT') outT
-      pure outT
+    let
+      inferApp = \case
+        T (P.Pi inNameM inT outT) → do
+          infer ctx a $ Check $ T inT
+          case inNameM of
+            Nothing → pure outT
+            Just inName → do
+              a' ← normalize (HM.mapMaybe fst ctx) a
+              normalize (HM.singleton inName a') outT
+        T (P.MetaVar (P.MetaVar' var)) → sendIO (readIORef var) >>= \case
+          Left t → inferApp $ T t
+          Right scope → do
+            -- I'm not satisfied by this solution, but instMeta solution is
+            -- even more verbose since it accepts full TermT as input.
+            inT ← P.MetaVar <$> pushExVarInto scope
+            outT ← P.MetaVar <$> pushExVarInto scope
+            writeMeta scope (P.MetaVar' var) (P.Pi Nothing inT outT)
+            infer ctx a $ Check $ T inT
+            pure outT
+        T (P.Forall xName P.Ty bod) → scoped do -- not just Ty!
+          x ← pushExVar
+          bod' ← normalize (HM.singleton xName x) bod
+          inferApp $ T bod'
+        t → error $ "inferApp " <> show t
+    fmap T . inferApp =<< infer ctx f Infer
   (P.NatLit _, Infer) → pure $ T P.U32
   (P.Var x, Infer) → case HM.lookup x ctx of
     Nothing → error $ "Unknown var " <> show x
@@ -223,30 +279,13 @@ infer ctx = curry \case
   (x, Infer) → error $ "TODO " <> show x
   (term, Check c) → do
     ty ← infer ctx term Infer
+    -- traceM $ (case ty of
+    --   Kind → "Kind"
+    --   T t' → tshow $ P.pTermT 0 t') <> " <: " <>
+    --   (case c of
+    --     Kind → "Kind"
+    --     T c' → tshow $ P.pTermT 0 c')
     subtype ty c
-
-instMeta :: Int → P.MetaVar' → P.TermT → SolveM ()
-instMeta scope1 (P.MetaVar' var1) = instMeta' where
-  write scope var val = do
-    sendIO $ writeIORef var $ Left val
-    delMeta scope (P.MetaVar' var)
-  instMeta' = \case
-    P.MetaVar (P.MetaVar' var2)
-      | var1 == var2 → pure ()
-      | otherwise → sendIO (readIORef var2) >>= \case
-        Left t → instMeta scope1 (P.MetaVar' var1) t
-        Right scope2 →
-          let (early, (lateScope, late)) = if scope1 <= scope2
-              then (var1, (scope2, var2))
-              else (var2, (scope1, var1))
-          in write lateScope late $ P.MetaVar $ P.MetaVar' early
-    P.U32 → write scope1 var1 P.U32
-    P.Pi inNameM inT outT → do
-      a ← pushExVarInto scope1
-      b ← pushExVarInto scope1
-      write scope1 var1 $ P.Pi inNameM (P.MetaVar a) (P.MetaVar b)
-      instMeta scope1 a inT *> instMeta scope1 b outT
-    x → error $ "instMeta " <> show x
 
 -- | a <: b
 subtype :: TTermT -> TTermT -> SolveM ()
@@ -254,6 +293,7 @@ subtype = curry \case
   (T (P.MetaVar a), T bT) → subtypeMeta subtype a bT
   (T aT, T (P.MetaVar b)) → subtypeMeta (flip subtype) b aT
   -- (T (P.Pi inName))
+  (T P.U32, T P.U32) → pure ()
   (aT, bT) → error $ show aT <> " <: " <> show bT
   where
     subtypeMeta subf (P.MetaVar' a) bT = 
@@ -872,7 +912,7 @@ compileFile fileName = do
       unless (HM.null frees) $
         error $
           "Unknown identifiers: "
-            <> intercalate ", " (show . P.unIdent . fst <$> toList frees)
+            <> intercalate ", " (show . P.pIdent . fst <$> toList frees)
       pure res
     )
     $ compile parsed

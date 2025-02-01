@@ -1,1 +1,2 @@
-(\f. \x. f (f x))
+mkPair = (\x. \y. \f. f x y)
+in mkPair 3 4
