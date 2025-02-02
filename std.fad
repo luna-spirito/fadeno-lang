@@ -1,3 +1,6 @@
-: A : Type -> A -> forall z. (B : Type -> B -> z) -> z
-pair = \x y f. f x y
-in pair
+/: A : Type -> A -> A
+id = \xT. \x. x
+
+/: A : Type -> forall B. B -> B
+test = id
+in test

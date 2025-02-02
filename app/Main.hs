@@ -89,6 +89,7 @@ No phasings. Instead, each time a specialisation occurs (i. e. you interact with
 -- TODO: just calm down and use freaking substitutions.
 -- You can't guarantee correctness of the mess you've written if you
 -- continue to do things this way.
+-- TODO: meaningful names for compiler-generated Vars, UniVars, ExVars
 
 newtype RevList a = UnsafeRevList [a] deriving (Functor, Show)
 
@@ -126,10 +127,6 @@ stackError e = do
   stackLog "<panic>"
   throwError e
 
--- └─ for final branches
--- ├─ for continuing branches
--- │ for vertical lines
-
 pStacks :: [StackEntry] → Doc AnsiStyle
 pStacks = \case
   [] → mempty
@@ -141,20 +138,13 @@ pStack = \(StackEntry x xs) → x <> nest 2 (pStacks xs) where
 
 -- Check
 
--- | "Type of" TermT
-data TTermT = T P.TermT | Kind deriving Show -- Actually should be merged with TermT definition, but Haskell.
-
-pTTerm :: TTermT → Doc AnsiStyle
-pTTerm Kind = "Kind"
-pTTerm (T ty) = P.pTerm 0 ty
-
 -- | Context stores values and the type of introduced bindings.
-type CtxT = HashMap P.Ident (Maybe P.TermT, TTermT)
+type CtxT = HashMap P.Ident (Maybe P.TermT, P.TTermT)
 
 data SEntry = SScope | SExVar
 -- | For meta-variables
 type SolveM = StateC
-  (IntMap [P.MetaVar'])
+  (IntMap [P.ExVar'])
   (FreshC
     (ErrorC
       (Doc AnsiStyle)
@@ -167,12 +157,12 @@ freshIdent = P.UIdent <$> fresh
 
 scoped :: SolveM P.TermT → SolveM P.TermT
 scoped act = do
-  modify @(IntMap [P.MetaVar']) \scopes → IM.insert (IM.size scopes) [] scopes
+  modify @(IntMap [P.ExVar']) \scopes → IM.insert (IM.size scopes) [] scopes
   ty ← act
-  exs ← state @(IntMap [P.MetaVar']) \scopes →
+  exs ← state @(IntMap [P.ExVar']) \scopes →
     (IM.deleteMax scopes, snd $ fromMaybe (error "Internal error: Scope disappeared") $ IM.lookupMax scopes)
   foldM
-    (\ty' (P.MetaVar' x) → do
+    (\ty' (P.ExVar' x) → do
       var ← fresh
       let var' = P.Ident $ BS.pack $ "/" <> show var
       sendIO $ writeIORef x $ Left $ P.Var var'
@@ -184,55 +174,63 @@ scoped act = do
 -- Assumes that all existentias are resolved if they are ever used.
 scoped_ :: SolveM a → SolveM a
 scoped_ act = do
-  modify @(IntMap [P.MetaVar']) \scopes → IM.insert (IM.size scopes) [] scopes
+  modify @(IntMap [P.ExVar']) \scopes → IM.insert (IM.size scopes) [] scopes
   res ← act
-  modify @(IntMap [P.MetaVar']) IM.deleteMax
+  modify @(IntMap [P.ExVar']) IM.deleteMax
   pure res
 
-delMeta :: Int → P.MetaVar' → SolveM ()
+delMeta :: Int → P.ExVar' → SolveM ()
 delMeta scope var =
-  modify @(IntMap [P.MetaVar']) \scopes →
+  modify @(IntMap [P.ExVar']) \scopes →
     IM.adjust (filter (/= var)) scope scopes
 
-insMeta :: Int → P.MetaVar' → SolveM ()
+insMeta :: Int → P.ExVar' → SolveM ()
 insMeta scope var =
-  modify @(IntMap [P.MetaVar']) \scopes →
+  modify @(IntMap [P.ExVar']) \scopes →
     IM.adjust (var:) scope scopes
 
-pushExVarInto :: Int → SolveM P.MetaVar'
+pushExVarInto :: Int → SolveM P.ExVar'
 pushExVarInto scope = do 
-  metaVar' ← fmap P.MetaVar' $ sendIO $ newIORef $ Right $ scope
+  metaVar' ← fmap P.ExVar' $ sendIO $ newIORef $ Right $ scope
   insMeta scope metaVar'
   pure metaVar'
 
 pushExVar :: SolveM P.TermT
 pushExVar = do
-  scope ← (\x → x - 1) . IM.size <$> get @(IntMap [P.MetaVar'])
-  P.MetaVar <$> pushExVarInto scope
+  scope ← (\x → x - 1) . IM.size <$> get @(IntMap [P.ExVar'])
+  P.ExVar <$> pushExVarInto scope
 
-writeMeta :: Int → P.MetaVar' → P.TermT → SolveM ()
-writeMeta scope (P.MetaVar' var) val = do
+pushUniVar :: P.TTermT → SolveM P.TermT
+pushUniVar ty = do
+  -- Pushed ephemerally.
+  scope ← (\x → x - 1) . IM.size <$> get @(IntMap [P.ExVar'])
+  ident ← freshIdent
+  pure $ P.UniVar ident scope ty
+
+writeMeta :: Int → P.ExVar' → P.TermT → SolveM ()
+writeMeta scope (P.ExVar' var) val = do
   sendIO $ writeIORef var $ Left val
-  delMeta scope (P.MetaVar' var)
+  delMeta scope (P.ExVar' var)
 
-instMeta :: Int → P.MetaVar' → P.TermT → SolveM ()
-instMeta scope1 (P.MetaVar' var1) = instMeta' where
+instMeta :: Int → P.ExVar' → P.TermT → SolveM ()
+instMeta scope1 (P.ExVar' var1) = instMeta' where
   instMeta' = \case
-    P.MetaVar (P.MetaVar' var2)
+    P.ExVar (P.ExVar' var2)
       | var1 == var2 → pure ()
       | otherwise → sendIO (readIORef var2) >>= \case
-        Left t → instMeta scope1 (P.MetaVar' var1) t
+        Left t → instMeta scope1 (P.ExVar' var1) t
         Right scope2 →
           let (early, (lateScope, late)) = if scope1 <= scope2
               then (var1, (scope2, var2))
               else (var2, (scope1, var1))
-          in writeMeta lateScope (P.MetaVar' late) $ P.MetaVar $ P.MetaVar' early
-    P.Var x → writeMeta scope1 (P.MetaVar' var1) $ P.Var x
-    P.U32 → writeMeta scope1 (P.MetaVar' var1) P.U32
+          in writeMeta lateScope (P.ExVar' late) $ P.ExVar $ P.ExVar' early
+    uni@(P.UniVar _ scope2 _)
+      | scope1 <= scope2 → writeMeta scope1 (P.ExVar' var1) uni
+    P.U32 → writeMeta scope1 (P.ExVar' var1) P.U32
     P.Pi inNameM inT outT → do
       a ← pushExVarInto scope1
       b ← pushExVarInto scope1
-      writeMeta scope1 (P.MetaVar' var1) $ P.Pi inNameM (P.MetaVar a) (P.MetaVar b)
+      writeMeta scope1 (P.ExVar' var1) $ P.Pi inNameM (P.ExVar a) (P.ExVar b)
       instMeta scope1 a inT *> instMeta scope1 b outT
     x → stackError $ "instMeta " <> P.pTerm 0 x
 
@@ -261,27 +259,33 @@ normalize binds = \case
   P.U32 → pure P.U32
   P.Pi aM b c → P.Pi aM <$> normalize binds b <*> normalize (maybe id HM.delete aM binds) c
   P.Ty → pure P.Ty
-  old@(P.MetaVar (P.MetaVar' var)) → sendIO (readIORef var) >>= \case
+  old@(P.ExVar (P.ExVar' var)) → sendIO (readIORef var) >>= \case
     Left t → normalize binds t
     Right _ → pure old
+  old@(P.UniVar {}) → pure old
 
 data InferMode a where
-  Infer :: InferMode TTermT
-  Check :: TTermT → InferMode ()
+  Infer :: InferMode P.TTermT
+  Check :: P.TTermT → InferMode ()
 
--- (\f. \x. f (f x))
+{-
+: A : Type -> A -> forall z. (B : Type -> B -> z) -> z
+pair = \x y f. f x y
+in pair U32 4 (\a b. a|b)
+-}
+
 infer :: CtxT → P.TermT → InferMode a → SolveM a
 infer ctx = curry \case
-  (term, Check (T (P.Forall xName P.Ty yT))) → do -- TODO: Not just Ty!
-    x' ← P.Var <$> freshIdent
+  (term, Check (P.T (P.Forall xName xTy yT))) → scoped_ do
+    x' ← pushUniVar $ P.T xTy
     yT' ← normalize (HM.singleton xName x') yT    
-    infer ctx term $ Check $ T yT'
+    infer ctx term $ Check $ P.T yT'
   (P.Let ((name, tyM, val) :| bs) into, mode) → do
     let normCtx = HM.mapMaybe fst ctx
     ty ← stackScope ("let" <+> P.pIdent name) case tyM of
       Nothing → infer ctx val Infer
       Just ty → do
-        ty' ← T <$> normalize normCtx ty
+        ty' ← P.T <$> normalize normCtx ty
         infer ctx val $ Check ty'
         pure ty'
     val' ← normalize normCtx val
@@ -294,90 +298,91 @@ infer ctx = curry \case
       bs'
       mode
   (P.Lam arg bod, Infer) →
-    T <$> scoped do
+    P.T <$> scoped do
       inT ← pushExVar
-      outT ← infer (HM.insert arg (Nothing, T inT) ctx) bod Infer
+      outT ← infer (HM.insert arg (Nothing, P.T inT) ctx) bod Infer
       pure case outT of
-        Kind → error ""
-        T outT' → P.Pi Nothing inT outT'
-  (P.Lam arg bod, Check (T (P.Pi inNameM inT outT))) → do
-    (val, outT') ← case inNameM of
-      Nothing → pure (Nothing, outT)
-      Just inName → do
-        arg' ← freshIdent
-        outT' ← normalize (HM.singleton inName $ P.Var arg') outT
-        pure (Just $ P.Var arg', outT')
-    infer (HM.insert arg (val, T inT) ctx) bod $ Check $ T outT'
+        P.Kind → error ""
+        P.T outT' → P.Pi Nothing inT outT'
+  (P.Lam arg bod, Check (P.T (P.Pi inNameM inT outT))) → do
+    let inferBod val outT' = infer (HM.insert arg (val, P.T inT) ctx) bod $ Check $ P.T outT'
+    case inNameM of
+      Nothing → inferBod Nothing outT
+      Just inName → scoped_ do
+        arg' ← pushUniVar $ P.T inT
+        outT' ← normalize (HM.singleton inName arg') outT
+        inferBod (Just arg') outT'
+    -- infer (HM.insert arg (val, P.T inT) ctx) bod $ Check $ P.T outT'
   (P.Op a _op b, Infer) → do
-    infer ctx a $ Check $ T P.U32
-    infer ctx b $ Check $ T P.U32
-    pure $ T P.U32
+    infer ctx a $ Check $ P.T P.U32
+    infer ctx b $ Check $ P.T P.U32
+    pure $ P.T P.U32
   (P.App f a, Infer) → do
     let
       inferApp = \case
-        T (P.Pi inNameM inT outT) → do
-          infer ctx a $ Check $ T inT
+        P.T (P.Pi inNameM inT outT) → do
+          infer ctx a $ Check $ P.T inT
           case inNameM of
             Nothing → pure outT
             Just inName → do
               a' ← normalize (HM.mapMaybe fst ctx) a
               normalize (HM.singleton inName a') outT
-        T (P.MetaVar (P.MetaVar' var)) → sendIO (readIORef var) >>= \case
-          Left t → inferApp $ T t
+        P.T (P.ExVar (P.ExVar' var)) → sendIO (readIORef var) >>= \case
+          Left t → inferApp $ P.T t
           Right scope → do
             -- I'm not satisfied by this solution, but instMeta solution is
             -- even more verbose since it accepts full TermT as input.
-            inT ← P.MetaVar <$> pushExVarInto scope
-            outT ← P.MetaVar <$> pushExVarInto scope
-            writeMeta scope (P.MetaVar' var) (P.Pi Nothing inT outT)
-            infer ctx a $ Check $ T inT
+            inT ← P.ExVar <$> pushExVarInto scope
+            outT ← P.ExVar <$> pushExVarInto scope
+            writeMeta scope (P.ExVar' var) (P.Pi Nothing inT outT)
+            infer ctx a $ Check $ P.T inT
             pure outT
-        T (P.Forall xName P.Ty bod) → scoped do -- not just Ty!
+        P.T (P.Forall xName P.Ty bod) → scoped do -- not just Ty!
           x ← pushExVar
           bod' ← normalize (HM.singleton xName x) bod
-          inferApp $ T bod'
-        t → stackError $ "inferApp " <> pTTerm t
-    fmap T . inferApp =<< infer ctx f Infer
-  (P.NatLit _, Infer) → pure $ T P.U32
+          inferApp $ P.T bod'
+        t → stackError $ "inferApp " <> P.pTTerm t
+    fmap P.T . inferApp =<< infer ctx f Infer
+  (P.NatLit _, Infer) → pure $ P.T P.U32
   (P.Var x, Infer) → case HM.lookup x ctx of
     Nothing → stackError $ "Unknown var " <> P.pIdent x
     Just (_, ty) → pure ty
-  (P.U32, Infer) → pure $ T P.Ty
+  (P.U32, Infer) → pure $ P.T P.Ty
   (x, Infer) → stackError $ "infer todo: " <> P.pTerm 0 x
-  (term, Check c) → stackScope ("check via infer :" <+> pTTerm c) do
+  (term, Check c) → stackScope ("check via infer :" <+> P.pTTerm c) do
     ty ← infer ctx term Infer
     subtype ty c
 
 -- | a <: b
-subtype :: TTermT -> TTermT -> SolveM ()
-subtype = \a b → stackScope (pTTerm a <+> "<:" <+> pTTerm b) $ subtype' (a, b)
+subtype :: P.TTermT -> P.TTermT -> SolveM ()
+subtype = \a b → stackScope (P.pTTerm a <+> annotate (color Cyan) "<:" <+> P.pTTerm b) $ subtype' (a, b)
   where
   subtype' = \case
-    (T (P.MetaVar a), T bT) → subtypeMeta subtype a bT
-    (T aT, T (P.MetaVar b)) → subtypeMeta (flip subtype) b aT
-    (T (P.Var (P.UIdent a)), T (P.Var (P.UIdent b)))
+    (P.T (P.ExVar a), P.T bT) → subtypeMeta subtype a bT
+    (P.T aT, P.T (P.ExVar b)) → subtypeMeta (flip subtype) b aT
+    (P.T (P.UniVar a _ _), P.T (P.UniVar b _ _))
       | a == b → pure ()
-    (T (P.Forall xName P.Ty aT), T bT) → do
-      x' ← P.Var <$> freshIdent
+    (P.T (P.Forall xName xTy aT), P.T bT) → scoped_ do
+      x' ← pushUniVar $ P.T xTy
       aT' ← normalize (HM.singleton xName x') aT
-      subtype (T aT') (T bT)
-    (T aT, T (P.Forall xName P.Ty bT)) → scoped_ do -- TODO: not just Ty
+      subtype (P.T aT') (P.T bT)
+    (P.T aT, P.T (P.Forall xName P.Ty bT)) → scoped_ do -- TODO: not just Ty
       xTy ← pushExVar
       bT' ← normalize (HM.singleton xName xTy) bT
-      subtype (T aT) (T bT')
-    (T (P.Pi aNameM a b), T (P.Pi cNameM c d)) → do
-      e ← P.Var <$> freshIdent
+      subtype (P.T aT) (P.T bT')
+    (P.T (P.Pi aNameM a b), P.T (P.Pi cNameM c d)) → scoped_ do
+      subtype (P.T c) (P.T a)
+      e ← pushUniVar $ P.T c
       b' ← maybe pure (\aName → normalize $ HM.singleton aName e) aNameM b
       d' ← maybe pure (\cName → normalize $ HM.singleton cName e) cNameM d
-      subtype (T c) (T a)
-      subtype (T b') (T d')
-    (T P.U32, T P.U32) → pure ()
-    (T P.Ty, T P.Ty) → pure ()
-    (aT, bT) → stackError $ pTTerm aT <+> "<:" <+> pTTerm bT
-  subtypeMeta subf (P.MetaVar' a) bT = 
+      subtype (P.T b') (P.T d')
+    (P.T P.U32, P.T P.U32) → pure ()
+    (P.T P.Ty, P.T P.Ty) → pure ()
+    (aT, bT) → stackError $ P.pTTerm aT <+> "<:" <+> P.pTTerm bT
+  subtypeMeta subf (P.ExVar' a) bT = 
     sendIO (readIORef a) >>= \case
-      Left aT → subf (T aT) $ T bT
-      Right scope → instMeta scope (P.MetaVar' a) bT
+      Left aT → subf (P.T aT) $ P.T bT
+      Right scope → instMeta scope (P.ExVar' a) bT
 
 runSolveM :: SolveM a → IO ([StackEntry], Either (Doc AnsiStyle) a)
 runSolveM = runWriter (\w a → pure (toList @(RevList _) w, a)) .
@@ -391,7 +396,7 @@ checkFile file = do
     Left e → 
       annotate (color Red) "error: " <> e -- no newline since it is created by pStacks
       <> pStacks stacks
-    Right r → pTTerm r
+    Right r → P.pTTerm r
 
 -- IC
 

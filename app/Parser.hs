@@ -83,13 +83,6 @@ To the above constructs, Cedille adds the following, discussed more below:
   ∀ x : T . T’ – the dependent type for functions taking in an erased argument x of type T (aka implicit product) 
 -}
 
-newtype MetaVar' = MetaVar' (IORef (Either TermT Int)) deriving Eq
-
-instance Show MetaVar' where
-  show (MetaVar' x) = case unsafePerformIO $ readIORef x of
-    Left t → show t
-    Right n → show n
-
 data TermT
   -- Term-level
   = Let !(NonEmpty (Ident, Maybe TermT, TermT)) !TermT
@@ -106,9 +99,21 @@ data TermT
   | Pi !(Maybe Ident) !TermT !TermT
   -- ^ Cedille: Π x : T | T’ / Fadeno: x : T -> T'
   | Ty -- ★
-  | MetaVar !MetaVar' -- Actually belongs in TTermT
-  -- | 
+  | ExVar !ExVar' -- Actually belongs in TTermT
+  | UniVar !Ident !Int !TTermT -- Actually belongs in TTermT
   deriving (Show, Eq)
+
+-- TODO: I'm stupid so I don't know whether you need to keep a type (kind) of ExVar?
+newtype ExVar' = ExVar' (IORef (Either TermT Int)) deriving Eq
+
+instance Show ExVar' where
+  show (ExVar' x) = case unsafePerformIO $ readIORef x of
+    Left t → show t
+    Right n → show n
+
+-- | "Type of" TermT
+data TTermT = T TermT | Kind deriving (Eq, Show) -- Actually should be merged with TermT definition, but Haskell.
+
 
 infxr ∷ Parser' a → Parser' (a → a → a) → Parser' a
 infxr a oper = do
@@ -212,7 +217,7 @@ parseLet ∷ Parser' TermT
 parseLet = do
   defs ← someNonEmpty do
     ty ← optional do
-      token $(char ':')
+      token $(string "/:")
       parseMath0
     name ← ident
     token $(char '=')
@@ -294,17 +299,18 @@ pTerm oldPrec =
   withPrec oldPrec . \case
     Lam arg x →
       ( 0
-      , let sep = case x of
-              Lam _ _ → " "
-              _
-                | isSimple x → " "
-                | otherwise → line
+      , let
+          sep = case x of
+            Lam _ _ → " "
+            _
+              | isSimple x → " "
+              | otherwise → line
          in annotate (color Magenta) "\\" <> pIdent arg <> "." <> sep <> pTerm 0 x
       )
     Let defs i →
       ( 1
       , vsep (toList defs <&> \(name, tyM, val) →
-          maybe mempty (\ty → ":" <+> pTerm 2 ty <> line) tyM -- TODO: split if complicated type
+          maybe mempty (\ty → "/:" <+> pTerm 2 ty <> line) tyM -- TODO: split if complicated type
           <> pIdent name
           <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTerm 0 val))
         <> line
@@ -330,9 +336,14 @@ pTerm oldPrec =
     U32 -> (6, "U32")
     NatLit x → (6, pretty x)
     Var x → (6, pIdent x)
-    MetaVar (MetaVar' x) → case unsafePerformIO (readIORef x) of
+    ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
       Left t → (oldPrec, pTerm oldPrec t) 
-      Right i → (6, "(meta " <> pretty i <> ")")
+      Right i → (6, "(exi of" <+> pretty i <> ")")
+    UniVar x y t → (6, "(uni" <+> pIdent x <+> "of" <+> pretty y <+> ":" <+> pTTerm t <> ")")
+
+pTTerm :: TTermT → Doc AnsiStyle
+pTTerm Kind = "Kind"
+pTTerm (T ty) = pTerm 0 ty
 
 parse ∷ ByteString → Either Text TermT
 parse inp = case runParser (parseTop <* eof) inp of
