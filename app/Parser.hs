@@ -130,51 +130,56 @@ infxl a oper = a >>= infxl'
     )
       <|> pure prev
 
--- Syntax is *a little* ambigious.
--- dTrEq: whether input is denied from having a trailing =.
--- Usually set to True, but in case of parsing a type of a let-binding
--- it is set to False.
--- Sorry. I'm very sorry.
+-- Syntax is *a little* ambigious. I'm very sorry.
 
 -- 6
-parsePrim ∷ Bool → Parser' TermT
-parsePrim dTrEq = token $
+parsePrim ∷ Parser' TermT
+parsePrim = token $
   (U32 <$ $(string "U32"))
   <|> (Ty <$ $(string "Type"))
   <|> (NatLit <$> number)
-  <|> (Var <$> notFollowedBy ident (token $ (guard dTrEq *> $(char '=')) <|> $(char ':')))
+  <|> (Var <$> notFollowedBy ident (token $(char '=')))
   <|> ($(char '(')
       *> parseTop
       <* $(char ')'))
 
 -- 5
 -- Tokens???
-parseApp ∷ Bool → Parser' TermT
-parseApp dTrEq = infxl (parsePrim dTrEq) (pure App)
+parseApp ∷ Parser' TermT
+parseApp = infxl parsePrim (pure App)
 
 -- 4
-parseTy :: Bool → Parser' TermT
-parseTy dTrEq =
+parseTy :: Parser' TermT
+parseTy =
   (do
     token $(string "forall")
-    name ← ident
-    kind ← (token $(char ':') *> parseTy dTrEq) <|> pure Ty
+    let
+      kind = do
+        token $(char ':') 
+        parseTy
+      manyEntry = ((,Ty) <$> ident)
+        <|> ($(char '(') *> ((,) <$> ident <*> kind) <* $(char ')'))
+    binds ←
+      some manyEntry
+      <|> ((\a b → [(a, b)]) <$> ident <*>  kind)
+    -- name ← ident
+    -- kind ← (token $(char ':') *> parseTy) <|> pure Ty
     $(char '.')
-    into ← parseTy dTrEq
-    pure $ Forall name kind into)
+    into ← parseTy
+    pure $ foldr (uncurry Forall) into binds)
   <|> (do
     inName <- optional $ (ident <* $(char ':'))
-    inTy <- parseApp dTrEq
+    inTy <- parseApp
     token $(string "->")
-    outT ← parseTy dTrEq
+    outT ← parseTy
     pure $ Pi inName inTy outT)
-  <|> parseApp dTrEq
+  <|> parseApp
 
 -- 3
-parseMath1 ∷ Bool → Parser' TermT
-parseMath1 dTrEq =
+parseMath1 ∷ Parser' TermT
+parseMath1 =
   infxr
-    (parseTy dTrEq)
+    parseTy
     ( operator >>= \case
         Mul → pure \x → Op x Mul
         Div → pure \x → Op x Div
@@ -182,10 +187,10 @@ parseMath1 dTrEq =
     )
 
 -- 2
-parseMath0 ∷ Bool → Parser' TermT
-parseMath0 dTrEq =
+parseMath0 ∷ Parser' TermT
+parseMath0 =
   infxr
-    (parseMath1 dTrEq)
+    parseMath1
     ( operator >>= \case
         Add → pure \x → Op x Add
         Sub → pure \x → Op x Sub
@@ -206,10 +211,10 @@ someNonEmpty f = (:|) <$> f <*> many f
 parseLet ∷ Parser' TermT
 parseLet = do
   defs ← someNonEmpty do
-    name ← ident
     ty ← optional do
       token $(char ':')
-      parseMath0 False
+      parseMath0
+    name ← ident
     token $(char '=')
     expr ← parseTop
     pure (name, ty, expr)
@@ -219,13 +224,23 @@ parseLet = do
       pure $ Let defs val
     )
 
+-- 0
+parseLam :: Parser' TermT
+parseLam = token do
+  $(char '\\')
+  idents ← some ident
+  $(char '.')
+  bod ← parseTop
+  pure $ foldr Lam bod idents
+
+-- 0
 parseTop ∷ Parser' TermT
 parseTop =
   token $
     -- parseNode
       {-<|>-} parseLet
-      <|> (token ($(char '\\')) *> (Lam <$> ident <* $(char '.') <*> parseTop))
-      <|> parseMath0 True
+      <|> parseLam
+      <|> parseMath0
       <|> (err =<< getPos)
 
 pIdent ∷ Ident → Doc AnsiStyle
@@ -273,8 +288,9 @@ isSimple =
    in
     runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
 
-pTermT ∷ Int → TermT → Doc AnsiStyle
-pTermT oldPrec =
+-- TODO: Concise syntax for `\` and `forall`
+pTerm ∷ Int → TermT → Doc AnsiStyle
+pTerm oldPrec =
   withPrec oldPrec . \case
     Lam arg x →
       ( 0
@@ -283,17 +299,17 @@ pTermT oldPrec =
               _
                 | isSimple x → " "
                 | otherwise → line
-         in annotate (color Magenta) "\\" <> pIdent arg <> "." <> sep <> pTermT 0 x
+         in annotate (color Magenta) "\\" <> pIdent arg <> "." <> sep <> pTerm 0 x
       )
     Let defs i →
       ( 1
       , vsep (toList defs <&> \(name, tyM, val) →
-        pIdent name
-        <> maybe mempty (\ty → " :" <+> pTermT 2 ty) tyM -- TODO: split if complicated type
-        <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTermT 0 val))
-          <> line
-          <> annotate (color Cyan) "in"
-          <+> nest 2 (pTermT 1 i)
+          maybe mempty (\ty → ":" <+> pTerm 2 ty <> line) tyM -- TODO: split if complicated type
+          <> pIdent name
+          <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTerm 0 val))
+        <> line
+        <> annotate (color Cyan) "in"
+        <+> nest 2 (pTerm 1 i)
       )
     Op a op b →
       let prec = case op of
@@ -301,21 +317,21 @@ pTermT oldPrec =
             Sub → 2
             Mul → 3
             Div → 3
-       in (prec, pTermT prec a <+> pOp op <+> pTermT prec b)
+       in (prec, pTerm prec a <+> pOp op <+> pTerm prec b)
     Forall name kind ty -> (4,
       let
         kind' = case kind of
           Ty → mempty
-          _ → " :" <+> pTermT 4 kind
-      in annotate (color Cyan) "forall" <+> pIdent name <> kind' <> "." <+> pTermT 4 ty)
-    Pi inName inTy outTy -> (4, maybe mempty (\x -> pIdent x <+> ": ") inName <> pTermT 5 inTy <+> "->" <+> pTermT 4 outTy)
-    App lam arg → (5, pTermT 5 lam <+> pTermT 6 arg)
+          _ → " :" <+> pTerm 4 kind
+      in annotate (color Cyan) "forall" <+> pIdent name <> kind' <> "." <+> pTerm 4 ty)
+    Pi inName inTy outTy -> (4, maybe mempty (\x -> pIdent x <+> ": ") inName <> pTerm 5 inTy <+> "->" <+> pTerm 4 outTy)
+    App lam arg → (5, pTerm 5 lam <+> pTerm 6 arg)
     Ty -> (6, "Type")
     U32 -> (6, "U32")
     NatLit x → (6, pretty x)
     Var x → (6, pIdent x)
     MetaVar (MetaVar' x) → case unsafePerformIO (readIORef x) of
-      Left t → (oldPrec, pTermT oldPrec t) 
+      Left t → (oldPrec, pTerm oldPrec t) 
       Right i → (6, "(meta " <> pretty i <> ")")
 
 parse ∷ ByteString → Either Text TermT
@@ -330,5 +346,5 @@ parseFile x = parse <$> readFileBinary x
 parseFileOrDie ∷ FilePath → IO TermT
 parseFileOrDie x = either (error . show) id <$> parseFile x
 
-printTermT ∷ TermT → IO ()
-printTermT expr = renderIO stdout $ layoutSmart defaultLayoutOptions $ pTermT 0 expr <> line
+printTerm ∷ TermT → IO ()
+printTerm expr = renderIO stdout $ layoutSmart defaultLayoutOptions $ pTerm 0 expr <> line

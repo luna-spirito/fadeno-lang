@@ -188,7 +188,7 @@ instMeta scope1 (P.MetaVar' var1) = instMeta' where
       b ← pushExVarInto scope1
       writeMeta scope1 (P.MetaVar' var1) $ P.Pi inNameM (P.MetaVar a) (P.MetaVar b)
       instMeta scope1 a inT *> instMeta scope1 b outT
-    x → error $ "instMeta " <> show (P.pTermT 0 x)
+    x → error $ "instMeta " <> show (P.pTerm 0 x)
 
 normalize :: Has (Lift IO) sig m ⇒ HashMap P.Ident P.TermT → P.TermT → m P.TermT
 normalize binds = \case
@@ -291,7 +291,7 @@ infer ctx = curry \case
   (P.Var x, Infer) → case HM.lookup x ctx of
     Nothing → error $ "Unknown var " <> show x
     Just (_, ty) → pure ty
-  (x, Infer) → error $ "TODO " <> show x
+  -- (x, Infer) → error $ "TODO " <> show x
   (term, Check c) → do
     ty ← infer ctx term Infer
     -- traceM $ (case ty of
@@ -340,7 +340,7 @@ checkFile file = do
   ttermt ← runSolveM $ infer [] term Infer
   case ttermt of
     Kind → print @String "Kind"
-    T ty → P.printTermT ty
+    T ty → P.printTerm ty
 
 -- IC
 
