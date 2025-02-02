@@ -83,6 +83,8 @@ To the above constructs, Cedille adds the following, discussed more below:
   ∀ x : T . T’ – the dependent type for functions taking in an erased argument x of type T (aka implicit product) 
 -}
 
+data Quantifier = Forall | Exists deriving (Show, Eq)
+
 data TermT
   -- Term-level
   = Let !(NonEmpty (Ident, Maybe TermT, TermT)) !TermT
@@ -93,7 +95,7 @@ data TermT
   | NatLit !Word32
   -- Type-level
   | Var !Ident
-  | Forall !Ident !TermT !TermT
+  | Quantification !Quantifier !Ident !TermT !TermT
   -- ^ Cedille: forall X : 𝒌 | T / Fadeno: forall X : 𝒌. T
   | U32
   | Pi !(Maybe Ident) !TermT !TermT
@@ -157,7 +159,7 @@ parseApp = infxl parsePrim (pure App)
 parseTy :: Parser' TermT
 parseTy =
   (do
-    token $(string "forall")
+    q ← token $ ($(string "forall") $> Forall) <|> ($(string "exists") $> Exists)
     let
       kind = do
         token $(char ':') 
@@ -171,7 +173,7 @@ parseTy =
     -- kind ← (token $(char ':') *> parseTy) <|> pure Ty
     $(char '.')
     into ← parseTy
-    pure $ foldr (uncurry Forall) into binds)
+    pure $ foldr (uncurry $ Quantification q) into binds)
   <|> (do
     inName <- optional $ (ident <* $(char ':'))
     inTy <- parseApp
@@ -287,7 +289,7 @@ isSimple =
       NatLit _ → ping
       Var _ → ping
       Ty → ping
-      Forall _ b c -> ping *> complexity b *> complexity c
+      Quantification q _ b c -> ping *> complexity b *> complexity c
       Pi _ b c -> ping *> complexity b *> complexity c
       U32 -> ping
    in
@@ -324,12 +326,15 @@ pTerm oldPrec =
             Mul → 3
             Div → 3
        in (prec, pTerm prec a <+> pOp op <+> pTerm prec b)
-    Forall name kind ty -> (4,
+    Quantification q name kind ty -> (4,
       let
         kind' = case kind of
           Ty → mempty
           _ → " :" <+> pTerm 4 kind
-      in annotate (color Cyan) "forall" <+> pIdent name <> kind' <> "." <+> pTerm 4 ty)
+        q' = case q of
+          Forall → "forall"
+          Exists → "exists"
+      in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm 4 ty)
     Pi inName inTy outTy -> (4, maybe mempty (\x -> pIdent x <+> ": ") inName <> pTerm 5 inTy <+> "->" <+> pTerm 4 outTy)
     App lam arg → (5, pTerm 5 lam <+> pTerm 6 arg)
     Ty -> (6, "Type")

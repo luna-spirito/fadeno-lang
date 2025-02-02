@@ -1,6 +1,7 @@
 /: A : Type -> A -> A
 id = \xT. \x. x
 
-/: A : Type -> forall B. B -> B
+/: Type -> exists B. B -> B
 test = id
+
 in test

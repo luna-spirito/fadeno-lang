@@ -167,7 +167,7 @@ scoped act = do
       let var' = P.Ident $ BS.pack $ "/" <> show var
       sendIO $ writeIORef x $ Left $ P.Var var'
       -- TODO: not just Ty!
-      pure $ P.Forall var' P.Ty ty')
+      pure $ P.Quantification P.Forall var' P.Ty ty')
     ty
     exs
 
@@ -225,7 +225,7 @@ instMeta scope1 (P.ExVar' var1) = instMeta' where
               else (var2, (scope1, var1))
           in writeMeta lateScope (P.ExVar' late) $ P.ExVar $ P.ExVar' early
     uni@(P.UniVar _ scope2 _)
-      | scope1 <= scope2 → writeMeta scope1 (P.ExVar' var1) uni
+      | scope2 <= scope1 → writeMeta scope1 (P.ExVar' var1) uni
     P.U32 → writeMeta scope1 (P.ExVar' var1) P.U32
     P.Pi inNameM inT outT → do
       a ← pushExVarInto scope1
@@ -255,7 +255,7 @@ normalize binds = \case
   P.Var x → pure $ case HM.lookup x binds of
     Nothing → P.Var x
     Just x' → x'
-  P.Forall x a b → P.Forall x <$> normalize binds a <*> normalize (HM.delete x binds) b
+  P.Quantification q x a b → P.Quantification q x <$> normalize binds a <*> normalize (HM.delete x binds) b
   P.U32 → pure P.U32
   P.Pi aM b c → P.Pi aM <$> normalize binds b <*> normalize (maybe id HM.delete aM binds) c
   P.Ty → pure P.Ty
@@ -276,10 +276,15 @@ in pair U32 4 (\a b. a|b)
 
 infer :: CtxT → P.TermT → InferMode a → SolveM a
 infer ctx = curry \case
-  (term, Check (P.T (P.Forall xName xTy yT))) → scoped_ do
+  (term, Check (P.T (P.Quantification P.Forall xName xTy yT))) → scoped_ do
     x' ← pushUniVar $ P.T xTy
     yT' ← normalize (HM.singleton xName x') yT    
     infer ctx term $ Check $ P.T yT'
+  -- TODO: breaks.
+  -- (term, Check (P.T (P.Quantification P.Exists xName P.Ty yT))) → scoped_ do -- TODO: not just for Ty!
+  --   x' ← pushExVar
+  --   yT' ← normalize (HM.singleton xName x') yT
+  --   infer ctx term $ Check $ P.T yT'
   (P.Let ((name, tyM, val) :| bs) into, mode) → do
     let normCtx = HM.mapMaybe fst ctx
     ty ← stackScope ("let" <+> P.pIdent name) case tyM of
@@ -337,7 +342,7 @@ infer ctx = curry \case
             writeMeta scope (P.ExVar' var) (P.Pi Nothing inT outT)
             infer ctx a $ Check $ P.T inT
             pure outT
-        P.T (P.Forall xName P.Ty bod) → scoped do -- not just Ty!
+        P.T (P.Quantification P.Forall xName P.Ty bod) → scoped do -- not just Ty!
           x ← pushExVar
           bod' ← normalize (HM.singleton xName x) bod
           inferApp $ P.T bod'
@@ -355,21 +360,33 @@ infer ctx = curry \case
 
 -- | a <: b
 subtype :: P.TTermT -> P.TTermT -> SolveM ()
-subtype = \a b → stackScope (P.pTTerm a <+> annotate (color Cyan) "<:" <+> P.pTTerm b) $ subtype' (a, b)
+subtype = \a b →
+  stackScope (P.pTTerm a <+> annotate (color Cyan) "<:" <+> P.pTTerm b) do
+    a' ← unwrapExs a
+    b' ← unwrapExs b
+    subtype' (a', b')
   where
   subtype' = \case
-    (P.T (P.ExVar a), P.T bT) → subtypeMeta subtype a bT
-    (P.T aT, P.T (P.ExVar b)) → subtypeMeta (flip subtype) b aT
-    (P.T (P.UniVar a _ _), P.T (P.UniVar b _ _))
-      | a == b → pure ()
-    (P.T (P.Forall xName xTy aT), P.T bT) → scoped_ do
+    (P.T aT, P.T (P.Quantification P.Forall xName xTy bT)) → scoped_ do
+      x' ← pushUniVar $ P.T xTy
+      bT' ← normalize (HM.singleton xName x') bT
+      subtype (P.T aT) (P.T bT')
+    (P.T (P.Quantification P.Exists xName xTy aT), P.T bT) → scoped_ do
       x' ← pushUniVar $ P.T xTy
       aT' ← normalize (HM.singleton xName x') aT
       subtype (P.T aT') (P.T bT)
-    (P.T aT, P.T (P.Forall xName P.Ty bT)) → scoped_ do -- TODO: not just Ty
-      xTy ← pushExVar
-      bT' ← normalize (HM.singleton xName xTy) bT
+    (P.T (P.Quantification P.Forall xName P.Ty aT), P.T bT) → scoped_ do -- TODO: not just Ty
+      x' ← pushExVar
+      aT' ← normalize (HM.singleton xName x') aT
+      subtype (P.T aT') (P.T bT)
+    (P.T aT, P.T (P.Quantification P.Exists xName P.Ty bT)) → scoped_ do -- TODO: not just Ty
+      x' ← pushExVar -- TODO: deduplicate the whole scoped_/scoped pattern
+      bT' ← normalize (HM.singleton xName x') bT
       subtype (P.T aT) (P.T bT')
+    (P.T (P.ExVar a), P.T bT) → subtypeMeta a bT
+    (P.T aT, P.T (P.ExVar b)) → subtypeMeta b aT
+    (P.T (P.UniVar a _ _), P.T (P.UniVar b _ _))
+      | a == b → pure ()
     (P.T (P.Pi aNameM a b), P.T (P.Pi cNameM c d)) → scoped_ do
       subtype (P.T c) (P.T a)
       e ← pushUniVar $ P.T c
@@ -379,9 +396,15 @@ subtype = \a b → stackScope (P.pTTerm a <+> annotate (color Cyan) "<:" <+> P.p
     (P.T P.U32, P.T P.U32) → pure ()
     (P.T P.Ty, P.T P.Ty) → pure ()
     (aT, bT) → stackError $ P.pTTerm aT <+> "<:" <+> P.pTTerm bT
-  subtypeMeta subf (P.ExVar' a) bT = 
+  unwrapExs :: P.TTermT → SolveM P.TTermT
+  unwrapExs inp = case inp of
+    P.T (P.ExVar (P.ExVar' a)) → sendIO (readIORef a) >>= \case
+      Left i → unwrapExs $ P.T i
+      _ → pure inp
+    _ → pure inp
+  subtypeMeta (P.ExVar' a) bT = 
     sendIO (readIORef a) >>= \case
-      Left aT → subf (P.T aT) $ P.T bT
+      Left _ → error "Impossible"
       Right scope → instMeta scope (P.ExVar' a) bT
 
 runSolveM :: SolveM a → IO ([StackEntry], Either (Doc AnsiStyle) a)
