@@ -37,6 +37,10 @@ import Data.ByteString.Builder (toLazyByteString)
 import Control.Effect.Accum (look, add)
 import qualified Data.ByteString.Char8 as BS
 import System.IO (print)
+import Prettyprinter (Doc, annotate, line, nest, (<+>))
+import Control.Carrier.Error.Church (ErrorC, runError)
+import Prettyprinter.Render.Terminal (AnsiStyle, color, Color (..))
+import Control.Effect.Error (throwError, Throw)
 
 {-
 Whenever a node interacts with a negative package, DO NOT UNWRAP.
@@ -104,17 +108,59 @@ instance IsList (RevList a) where
   fromList ls = UnsafeRevList $ reverse ls
   toList (UnsafeRevList ls) = reverse ls
 
+-- censor + listen
+intercept :: forall w m sig a. (Has (Writer w) sig m, Monoid w) => m a → m (w, a)
+intercept = censor @w (const mempty) . listen @w
+
+-- | Debug stack
+data StackEntry = StackEntry !(Doc AnsiStyle) ![StackEntry]
+
+stackLog :: forall sig m. Has (Writer (RevList StackEntry)) sig m ⇒ Doc AnsiStyle → m ()
+stackLog x = tell @(RevList StackEntry) [StackEntry x []]
+
+stackScope :: forall sig m b. Has (Writer (RevList StackEntry)) sig m ⇒ Doc AnsiStyle → m b → m b
+stackScope name act = censor (\entries → [StackEntry name $ toList @(RevList _) entries]) act
+
+stackError :: forall e sig m a. Has (Writer (RevList StackEntry) :+: Throw e) sig m ⇒ e → m a
+stackError e = do
+  stackLog "<panic>"
+  throwError e
+
+-- └─ for final branches
+-- ├─ for continuing branches
+-- │ for vertical lines
+
+pStacks :: [StackEntry] → Doc AnsiStyle
+pStacks = \case
+  [] → mempty
+  [x] → line <> "└ " <> pStack x
+  (x:xs) → line <> "├ " <> pStack x <> pStacks xs
+
+pStack :: StackEntry → Doc AnsiStyle
+pStack = \(StackEntry x xs) → x <> nest 2 (pStacks xs) where
+
 -- Check
 
 -- | "Type of" TermT
 data TTermT = T P.TermT | Kind deriving Show -- Actually should be merged with TermT definition, but Haskell.
+
+pTTerm :: TTermT → Doc AnsiStyle
+pTTerm Kind = "Kind"
+pTTerm (T ty) = P.pTerm 0 ty
 
 -- | Context stores values and the type of introduced bindings.
 type CtxT = HashMap P.Ident (Maybe P.TermT, TTermT)
 
 data SEntry = SScope | SExVar
 -- | For meta-variables
-type SolveM = StateC (IntMap [P.MetaVar']) (FreshC IO)
+type SolveM = StateC
+  (IntMap [P.MetaVar'])
+  (FreshC
+    (ErrorC
+      (Doc AnsiStyle)
+      (WriterC
+        (RevList StackEntry)
+        IO)))
 
 freshIdent :: SolveM P.Ident
 freshIdent = P.UIdent <$> fresh
@@ -188,7 +234,7 @@ instMeta scope1 (P.MetaVar' var1) = instMeta' where
       b ← pushExVarInto scope1
       writeMeta scope1 (P.MetaVar' var1) $ P.Pi inNameM (P.MetaVar a) (P.MetaVar b)
       instMeta scope1 a inT *> instMeta scope1 b outT
-    x → error $ "instMeta " <> show (P.pTerm 0 x)
+    x → stackError $ "instMeta " <> P.pTerm 0 x
 
 normalize :: Has (Lift IO) sig m ⇒ HashMap P.Ident P.TermT → P.TermT → m P.TermT
 normalize binds = \case
@@ -226,21 +272,26 @@ data InferMode a where
 -- (\f. \x. f (f x))
 infer :: CtxT → P.TermT → InferMode a → SolveM a
 infer ctx = curry \case
+  (term, Check (T (P.Forall xName P.Ty yT))) → do -- TODO: Not just Ty!
+    x' ← P.Var <$> freshIdent
+    yT' ← normalize (HM.singleton xName x') yT    
+    infer ctx term $ Check $ T yT'
   (P.Let ((name, tyM, val) :| bs) into, mode) → do
     let normCtx = HM.mapMaybe fst ctx
-    ty ← case tyM of
+    ty ← stackScope ("let" <+> P.pIdent name) case tyM of
       Nothing → infer ctx val Infer
       Just ty → do
         ty' ← T <$> normalize normCtx ty
         infer ctx val $ Check ty'
         pure ty'
     val' ← normalize normCtx val
-    -- TODO: annotations. Normalize'em
-    infer
+    let
+      withBs' act = case bs of
+        [] → stackScope "in" (act into)
+        (b1:b2) → act $ P.Let (b1 :| b2) into
+    withBs' \bs' → infer
       (HM.insert name (Just val', ty) ctx)
-      (case bs of
-        [] → into
-        (b1:b2) → P.Let (b1 :| b2) into)
+      bs'
       mode
   (P.Lam arg bod, Infer) →
     T <$> scoped do
@@ -285,62 +336,62 @@ infer ctx = curry \case
           x ← pushExVar
           bod' ← normalize (HM.singleton xName x) bod
           inferApp $ T bod'
-        t → error $ "inferApp " <> show t
+        t → stackError $ "inferApp " <> pTTerm t
     fmap T . inferApp =<< infer ctx f Infer
   (P.NatLit _, Infer) → pure $ T P.U32
   (P.Var x, Infer) → case HM.lookup x ctx of
-    Nothing → error $ "Unknown var " <> show x
+    Nothing → stackError $ "Unknown var " <> P.pIdent x
     Just (_, ty) → pure ty
-  -- (x, Infer) → error $ "TODO " <> show x
-  (term, Check c) → do
+  (P.U32, Infer) → pure $ T P.Ty
+  (x, Infer) → stackError $ "infer todo: " <> P.pTerm 0 x
+  (term, Check c) → stackScope ("check via infer :" <+> pTTerm c) do
     ty ← infer ctx term Infer
-    -- traceM $ (case ty of
-    --   Kind → "Kind"
-    --   T t' → tshow $ P.pTermT 0 t') <> " <: " <>
-    --   (case c of
-    --     Kind → "Kind"
-    --     T c' → tshow $ P.pTermT 0 c')
     subtype ty c
 
 -- | a <: b
 subtype :: TTermT -> TTermT -> SolveM ()
-subtype = curry \case
-  (T (P.MetaVar a), T bT) → subtypeMeta subtype a bT
-  (T aT, T (P.MetaVar b)) → subtypeMeta (flip subtype) b aT
-  (T (P.Var (P.UIdent a)), T (P.Var (P.UIdent b)))
-    | a == b → pure ()
-  (T (P.Forall xName P.Ty aT), T bT) → do
-    x' ← P.Var <$> freshIdent
-    aT' ← normalize (HM.singleton xName x') aT
-    subtype (T aT') (T bT)
-  (T aT, T (P.Forall xName P.Ty bT)) → scoped_ do -- TODO: not just Ty
-    xTy ← pushExVar
-    bT' ← normalize (HM.singleton xName xTy) bT
-    subtype (T aT) (T bT')
-  (T (P.Pi aNameM a b), T (P.Pi cNameM c d)) → do
-    e ← P.Var <$> freshIdent
-    b' ← maybe pure (\aName → normalize $ HM.singleton aName e) aNameM b
-    d' ← maybe pure (\cName → normalize $ HM.singleton cName e) cNameM d
-    subtype (T c) (T a)
-    subtype (T b') (T d')
-  (T P.U32, T P.U32) → pure ()
-  (aT, bT) → error $ show aT <> " <: " <> show bT
+subtype = \a b → stackScope (pTTerm a <+> "<:" <+> pTTerm b) $ subtype' (a, b)
   where
-    subtypeMeta subf (P.MetaVar' a) bT = 
-      sendIO (readIORef a) >>= \case
-        Left aT → subf (T aT) $ T bT
-        Right scope → instMeta scope (P.MetaVar' a) bT
+  subtype' = \case
+    (T (P.MetaVar a), T bT) → subtypeMeta subtype a bT
+    (T aT, T (P.MetaVar b)) → subtypeMeta (flip subtype) b aT
+    (T (P.Var (P.UIdent a)), T (P.Var (P.UIdent b)))
+      | a == b → pure ()
+    (T (P.Forall xName P.Ty aT), T bT) → do
+      x' ← P.Var <$> freshIdent
+      aT' ← normalize (HM.singleton xName x') aT
+      subtype (T aT') (T bT)
+    (T aT, T (P.Forall xName P.Ty bT)) → scoped_ do -- TODO: not just Ty
+      xTy ← pushExVar
+      bT' ← normalize (HM.singleton xName xTy) bT
+      subtype (T aT) (T bT')
+    (T (P.Pi aNameM a b), T (P.Pi cNameM c d)) → do
+      e ← P.Var <$> freshIdent
+      b' ← maybe pure (\aName → normalize $ HM.singleton aName e) aNameM b
+      d' ← maybe pure (\cName → normalize $ HM.singleton cName e) cNameM d
+      subtype (T c) (T a)
+      subtype (T b') (T d')
+    (T P.U32, T P.U32) → pure ()
+    (T P.Ty, T P.Ty) → pure ()
+    (aT, bT) → stackError $ pTTerm aT <+> "<:" <+> pTTerm bT
+  subtypeMeta subf (P.MetaVar' a) bT = 
+    sendIO (readIORef a) >>= \case
+      Left aT → subf (T aT) $ T bT
+      Right scope → instMeta scope (P.MetaVar' a) bT
 
-runSolveM :: SolveM a → IO a
-runSolveM = evalFresh 0 . evalState mempty
+runSolveM :: SolveM a → IO ([StackEntry], Either (Doc AnsiStyle) a)
+runSolveM = runWriter (\w a → pure (toList @(RevList _) w, a)) .
+  runError (pure . Left) (pure . Right) . evalFresh 0 . evalState mempty
 
 checkFile :: FilePath → IO ()
 checkFile file = do
-  term ← P.parseFileOrDie file
-  ttermt ← runSolveM $ infer [] term Infer
-  case ttermt of
-    Kind → print @String "Kind"
-    T ty → P.printTerm ty
+  term ← P.parseFile file
+  (stacks, res) ← runSolveM (infer [] term Infer)
+  P.render case res of
+    Left e → 
+      annotate (color Red) "error: " <> e -- no newline since it is created by pStacks
+      <> pStacks stacks
+    Right r → pTTerm r
 
 -- IC
 
@@ -687,10 +738,6 @@ useFreeVar ident = do
   tell $ FreeVars $ HM.singleton ident (p :| [])
   pure n
 
--- censor + listen
-intercept :: forall w m sig a. (Has (Writer w) sig m, Monoid w) => m a → m (w, a)
-intercept = censor @w (const mempty) . listen @w
-
 compile :: Has (Writer FreeVars :+: Eval) sig m => P.TermT → m (WireEnd Neg)
 compile = \case
   -- P.Node captures pos val → do
@@ -931,7 +978,7 @@ runEvalC = evalFresh 0 . evalState IM.empty . evalState IM.empty
 
 compileFile :: FilePath → EvalC (WireEnd Neg)
 compileFile fileName = do
-  parsed ← either (error . show) pure =<< lift (sendIO $ P.parseFile fileName)
+  parsed ← sendIO $ P.parseFile fileName
   runWriter @FreeVars
     (\(FreeVars frees) res → do
       unless (HM.null frees) $

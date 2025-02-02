@@ -340,11 +340,11 @@ parse inp = case runParser (parseTop <* eof) inp of
   Err e → Left $ "Unable to parse at " <> tshow (posLineCols inp [e])
   _ → Left "Internal error: uncaught failure"
 
-parseFile ∷ FilePath → IO (Either Text TermT)
-parseFile x = parse <$> readFileBinary x
+parseFile ∷ FilePath → IO TermT
+parseFile x = either (error . show) id . parse <$> readFileBinary x
 
-parseFileOrDie ∷ FilePath → IO TermT
-parseFileOrDie x = either (error . show) id <$> parseFile x
+render :: Doc AnsiStyle -> IO ()
+render x = renderIO stdout $ layoutSmart defaultLayoutOptions $ x <> line
 
-printTerm ∷ TermT → IO ()
-printTerm expr = renderIO stdout $ layoutSmart defaultLayoutOptions $ pTerm 0 expr <> line
+formatFile :: FilePath → IO ()
+formatFile = render . pTerm 0 <=< parseFile
