@@ -92,16 +92,19 @@ instance Show MetaVar' where
 
 data TermT
   -- Term-level
-  = Let !(NonEmpty (Ident, TermT)) !TermT
+  = Let !(NonEmpty (Ident, Maybe TermT, TermT)) !TermT
+  -- ^ Annotations only allowed on Let.
   | Lam !Ident TermT
   | Op !TermT !OpT !TermT
   | App !TermT !TermT
   | NatLit !Word32
   -- Type-level
   | Var !Ident
-  | Forall !Ident !TermT !TermT -- Cedille: forall X : 𝒌 | T / Fadeno: forall X : 𝒌. T
+  | Forall !Ident !TermT !TermT
+  -- ^ Cedille: forall X : 𝒌 | T / Fadeno: forall X : 𝒌. T
   | U32
-  | Pi !(Maybe Ident) !TermT !TermT -- Cedille: Π x : T | T’ / Fadeno: x : T -> T'
+  | Pi !(Maybe Ident) !TermT !TermT
+  -- ^ Cedille: Π x : T | T’ / Fadeno: x : T -> T'
   | Ty -- ★
   | MetaVar !MetaVar' -- Actually belongs in TTermT
   -- | 
@@ -127,54 +130,62 @@ infxl a oper = a >>= infxl'
     )
       <|> pure prev
 
+-- Syntax is *a little* ambigious.
+-- dTrEq: whether input is denied from having a trailing =.
+-- Usually set to True, but in case of parsing a type of a let-binding
+-- it is set to False.
+-- Sorry. I'm very sorry.
+
 -- 6
-parsePrim ∷ Parser' TermT
-parsePrim = token $
+parsePrim ∷ Bool → Parser' TermT
+parsePrim dTrEq = token $
   (U32 <$ $(string "U32"))
   <|> (Ty <$ $(string "Type"))
   <|> (NatLit <$> number)
-  <|> (Var <$> notFollowedBy ident (token $ $(char '=') <|> $(char ':')))
+  <|> (Var <$> notFollowedBy ident (token $ (guard dTrEq *> $(char '=')) <|> $(char ':')))
   <|> ($(char '(')
       *> parseTop
       <* $(char ')'))
 
 -- 5
 -- Tokens???
-parseApp ∷ Parser' TermT
-parseApp = infxl parsePrim (pure App)
+parseApp ∷ Bool → Parser' TermT
+parseApp dTrEq = infxl (parsePrim dTrEq) (pure App)
 
 -- 4
-parseTy :: Parser' TermT
-parseTy =
+parseTy :: Bool → Parser' TermT
+parseTy dTrEq =
   (do
     token $(string "forall")
     name ← ident
-    kind ← (token $(char ':') *> parseTy) <|> pure Ty
+    kind ← (token $(char ':') *> parseTy dTrEq) <|> pure Ty
     $(char '.')
-    into ← parseTy
+    into ← parseTy dTrEq
     pure $ Forall name kind into)
   <|> (do
     inName <- optional $ (ident <* $(char ':'))
-    inTy <- parseApp
+    inTy <- parseApp dTrEq
     token $(string "->")
-    outT ← parseTy
+    outT ← parseTy dTrEq
     pure $ Pi inName inTy outT)
-  <|> parseApp
+  <|> parseApp dTrEq
 
-parseMath1 ∷ Parser' TermT
-parseMath1 =
+-- 3
+parseMath1 ∷ Bool → Parser' TermT
+parseMath1 dTrEq =
   infxr
-    parseTy
+    (parseTy dTrEq)
     ( operator >>= \case
         Mul → pure \x → Op x Mul
         Div → pure \x → Op x Div
         _ → empty
     )
 
-parseMath0 ∷ Parser' TermT
-parseMath0 =
+-- 2
+parseMath0 ∷ Bool → Parser' TermT
+parseMath0 dTrEq =
   infxr
-    parseMath1
+    (parseMath1 dTrEq)
     ( operator >>= \case
         Add → pure \x → Op x Add
         Sub → pure \x → Op x Sub
@@ -191,13 +202,17 @@ someNonEmpty f = (:|) <$> f <*> many f
   -- $(char '>')
   -- Node captures pos <$> parseTop
 
+-- 1
 parseLet ∷ Parser' TermT
 parseLet = do
   defs ← someNonEmpty do
     name ← ident
-    token $ $(char '=')
+    ty ← optional do
+      token $(char ':')
+      parseMath0 False
+    token $(char '=')
     expr ← parseTop
-    pure (name, expr)
+    pure (name, ty, expr)
   ( token do
       $(string "in")
       val ← parseTop
@@ -210,7 +225,7 @@ parseTop =
     -- parseNode
       {-<|>-} parseLet
       <|> (token ($(char '\\')) *> (Lam <$> ident <* $(char '.') <*> parseTop))
-      <|> parseMath0
+      <|> parseMath0 True
       <|> (err =<< getPos)
 
 pIdent ∷ Ident → Doc AnsiStyle
@@ -246,7 +261,7 @@ isSimple =
         else pure ()
     complexity = \case
       Lam _ x → ping *> complexity x
-      Let defs x → ping *> for defs (complexity . snd) *> complexity x
+      Let defs x → ping *> for_ defs (\(_, b, c) → for_ b complexity *> complexity c) *> complexity x
       Op a _ c → complexity a *> complexity c
       App f a → complexity f *> complexity a
       NatLit _ → ping
@@ -272,7 +287,10 @@ pTermT oldPrec =
       )
     Let defs i →
       ( 1
-      , vsep (toList defs <&> \(name, val) → pIdent name <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTermT 0 val))
+      , vsep (toList defs <&> \(name, tyM, val) →
+        pIdent name
+        <> maybe mempty (\ty → " :" <+> pTermT 2 ty) tyM -- TODO: split if complicated type
+        <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTermT 0 val))
           <> line
           <> annotate (color Cyan) "in"
           <+> nest 2 (pTermT 1 i)

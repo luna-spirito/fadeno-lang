@@ -135,6 +135,14 @@ scoped act = do
     ty
     exs
 
+-- Assumes that all existentias are resolved if they are ever used.
+scoped_ :: SolveM a → SolveM a
+scoped_ act = do
+  modify @(IntMap [P.MetaVar']) \scopes → IM.insert (IM.size scopes) [] scopes
+  res ← act
+  modify @(IntMap [P.MetaVar']) IM.deleteMax
+  pure res
+
 delMeta :: Int → P.MetaVar' → SolveM ()
 delMeta scope var =
   modify @(IntMap [P.MetaVar']) \scopes →
@@ -173,6 +181,7 @@ instMeta scope1 (P.MetaVar' var1) = instMeta' where
               then (var1, (scope2, var2))
               else (var2, (scope1, var1))
           in writeMeta lateScope (P.MetaVar' late) $ P.MetaVar $ P.MetaVar' early
+    P.Var x → writeMeta scope1 (P.MetaVar' var1) $ P.Var x
     P.U32 → writeMeta scope1 (P.MetaVar' var1) P.U32
     P.Pi inNameM inT outT → do
       a ← pushExVarInto scope1
@@ -183,7 +192,7 @@ instMeta scope1 (P.MetaVar' var1) = instMeta' where
 
 normalize :: Has (Lift IO) sig m ⇒ HashMap P.Ident P.TermT → P.TermT → m P.TermT
 normalize binds = \case
-  P.Let ((name, val) :| bs) into → do
+  P.Let ((name, _, val) :| bs) into → do
     val' ← normalize binds val
     normalize
       (HM.insert name val' binds)
@@ -217,12 +226,18 @@ data InferMode a where
 -- (\f. \x. f (f x))
 infer :: CtxT → P.TermT → InferMode a → SolveM a
 infer ctx = curry \case
-  (P.Let ((name, val0) :| bs) into, mode) → do
-    valT ← infer ctx val0 Infer
-    val ← normalize (HM.mapMaybe fst ctx) val0
+  (P.Let ((name, tyM, val) :| bs) into, mode) → do
+    let normCtx = HM.mapMaybe fst ctx
+    ty ← case tyM of
+      Nothing → infer ctx val Infer
+      Just ty → do
+        ty' ← T <$> normalize normCtx ty
+        infer ctx val $ Check ty'
+        pure ty'
+    val' ← normalize normCtx val
     -- TODO: annotations. Normalize'em
     infer
-      (HM.insert name (Just val, valT) ctx)
+      (HM.insert name (Just val', ty) ctx)
       (case bs of
         [] → into
         (b1:b2) → P.Let (b1 :| b2) into)
@@ -292,7 +307,22 @@ subtype :: TTermT -> TTermT -> SolveM ()
 subtype = curry \case
   (T (P.MetaVar a), T bT) → subtypeMeta subtype a bT
   (T aT, T (P.MetaVar b)) → subtypeMeta (flip subtype) b aT
-  -- (T (P.Pi inName))
+  (T (P.Var (P.UIdent a)), T (P.Var (P.UIdent b)))
+    | a == b → pure ()
+  (T (P.Forall xName P.Ty aT), T bT) → do
+    x' ← P.Var <$> freshIdent
+    aT' ← normalize (HM.singleton xName x') aT
+    subtype (T aT') (T bT)
+  (T aT, T (P.Forall xName P.Ty bT)) → scoped_ do -- TODO: not just Ty
+    xTy ← pushExVar
+    bT' ← normalize (HM.singleton xName xTy) bT
+    subtype (T aT) (T bT')
+  (T (P.Pi aNameM a b), T (P.Pi cNameM c d)) → do
+    e ← P.Var <$> freshIdent
+    b' ← maybe pure (\aName → normalize $ HM.singleton aName e) aNameM b
+    d' ← maybe pure (\cName → normalize $ HM.singleton cName e) cNameM d
+    subtype (T c) (T a)
+    subtype (T b') (T d')
   (T P.U32, T P.U32) → pure ()
   (aT, bT) → error $ show aT <> " <: " <> show bT
   where
@@ -661,11 +691,6 @@ useFreeVar ident = do
 intercept :: forall w m sig a. (Has (Writer w) sig m, Monoid w) => m a → m (w, a)
 intercept = censor @w (const mempty) . listen @w
 
--- compile2 :: (Has (Writer FreeVars :+: Eval) sig m) ⇒ P.TermT → m (m (WireEnd Neg))
--- compile2 = \case
-
-
-
 compile :: Has (Writer FreeVars :+: Eval) sig m => P.TermT → m (WireEnd Neg)
 compile = \case
   -- P.Node captures pos val → do
@@ -673,7 +698,7 @@ compile = \case
   --   -- Just compile into a heavy package, failing if free vars mismatch.
   --   -- The resulting heavy package
   --   undefined
-  P.Let ((name, val) :| defs) bod → do
+  P.Let ((name, _, val) :| defs) bod → do
     (occInBod, bod') ← catchFree name $ compile case defs of
       [] → bod
       d:ds → P.Let (d :| ds) bod

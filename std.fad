@@ -1,2 +1,4 @@
-mkPair = (\x. \y. \f. f x y)
-in mkPair 3 4
+const
+  : forall a. forall b. a -> b -> a
+  = \x. \y. x
+in const
