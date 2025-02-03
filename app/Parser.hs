@@ -58,13 +58,14 @@ operator =
       '/' → pure Div
       _ → failed
 
+-- TODO: block words from ident' as well?.. probably not.
 ident' :: Parser' ByteString
-ident' = byteStringOf (skipSome $ satisfy \x → not $ x `elem` ("\\ \n=().:" :: String))
+ident' = byteStringOf (skipSome $ satisfy \x → not $ x `elem` ("\\ \n=(){}[].:|/" :: String))
 
 ident ∷ Parser' Ident
 ident = token do
   result ← ident'
-  guard $ not $ result `elem` ["in", "+", "-", "/", "*", "U32", "->", "forall"]
+  guard $ not $ result `elem` ["in", "+", "-", "/", "*", "U32", "->", "forall", "Tag", "Type"]
   pure $ Ident result
 
 {-
@@ -96,21 +97,26 @@ data TermT
   | Op !TermT !OpT !TermT
   | App !TermT !TermT
   | NatLit !Word32
-  -- Type-level
+  | TagLit !ByteString
+  | Record ![(TermT, TermT)] !(Maybe TermT)
   | Sorry !Ident !TermT
   | Var !Ident
+  -- Type-level
   | Quantification !Quantifier !Ident !TermT !TermT
   -- ^ Cedille: forall X : 𝒌 | T / Fadeno: forall X : 𝒌. T
   | U32
+  | Tag
   | Pi !(Maybe Ident) !TermT !TermT
   -- ^ Cedille: Π x : T | T’ / Fadeno: x : T -> T'
   | Ty -- ★
-  | ExVar !ExVar' -- Actually belongs in TTermT
-  | UniVar !Ident !Int !TTermT -- Actually belongs in TTermT
+  -- Actually belongs in TTermT
+  | ExVar !ExVar'
+  | UniVar !Ident !Int !TTermT
   deriving (Show, Eq)
 
 -- TODO: I'm stupid so I don't know whether you need to keep a type (kind) of ExVar?
-newtype ExVar' = ExVar' (IORef (Either TermT Int)) deriving Eq
+-- Ident is just for debugging here.
+newtype ExVar' = ExVar' (IORef (Either TermT (Ident, Int))) deriving Eq
 
 instance Show ExVar' where
   show (ExVar' x) = case unsafePerformIO $ readIORef x of
@@ -143,12 +149,31 @@ infxl a oper = a >>= infxl'
 
 -- Syntax is *a little* ambigious. I'm very sorry.
 
+manySep :: Alternative f ⇒ f () → f a → f [a]
+manySep sep act = ((:) <$> act <*> manySep') <|> pure [] where
+  manySep' = ((:) <$> (sep *> act) <*> manySep') <|> pure []
+
 -- 6
 parsePrim ∷ Parser' TermT
 parsePrim = token $
   (U32 <$ $(string "U32"))
   <|> (Ty <$ $(string "Type"))
+  <|> (Tag <$ $(string "Tag"))
   <|> (NatLit <$> number)
+  <|> (TagLit <$> ($(char '.') *> ident'))
+  <|> (do
+    token $ $(char '{')
+    knownFields ← manySep (token $(char '|')) do
+      n ← parsePrim
+      token $ $(char '=')
+      v ← parseMath0
+      pure (n, v)
+    rest ← optional do
+      token $ $(string "||")
+      parseMath0
+    token $ $(char '}')
+    pure $ Record knownFields rest
+  )
   <|> (Var <$> notFollowedBy ident (token $(char '=')))
   <|> ($(char '(')
       *> parseTop
@@ -173,8 +198,6 @@ parseTy =
     binds ←
       some manyEntry
       <|> ((\a b → [(a, b)]) <$> ident <*>  kind)
-    -- name ← ident
-    -- kind ← (token $(char ':') *> parseTy) <|> pure Ty
     $(char '.')
     into ← parseTy
     pure $ foldr (uncurry $ Quantification q) into binds)
@@ -184,13 +207,16 @@ parseTy =
     token $ $(char ':')
     ty ← parseTy
     pure $ Sorry n ty)
-  <|> (do
+  <|> do -- Fused: parseApp <|> (->)
     inName <- optional $ (ident <* $(char ':'))
-    inTy <- parseApp
-    token $(string "->")
-    outT ← parseTy
-    pure $ Pi inName inTy outT)
-  <|> parseApp
+    inTy ← parseApp
+    ((do
+        token $ $(string "->")
+        outT ← parseTy
+        pure $ Pi inName inTy outT)
+      <|> (do
+        guard $ isNothing inName
+        pure inTy))
 
 -- 3
 parseMath1 ∷ Parser' TermT
@@ -282,6 +308,7 @@ withPrec oldPrec (newPrec, bod) =
 complexThreshold ∷ Int → Bool
 complexThreshold = (>= 5)
 
+-- Impure!
 isSimple ∷ TermT → Bool
 isSimple =
   let
@@ -297,12 +324,19 @@ isSimple =
       Op a _ c → complexity a *> complexity c
       App f a → complexity f *> complexity a
       NatLit _ → ping
+      TagLit _ → ping
+      Record x y → for_ x (\(a, b) → complexity a *> complexity b) *> for_ y complexity
       Sorry _ _ → ping
       Var _ → ping
       Ty → ping
-      Quantification q _ b c -> ping *> complexity b *> complexity c
+      Quantification _ _ b c -> ping *> complexity b *> complexity c
       Pi _ b c -> ping *> complexity b *> complexity c
-      U32 -> ping
+      U32 → ping
+      Tag → ping
+      ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
+        Left y → complexity y
+        Right _ → ping
+      UniVar _ _ _ → ping 
    in
     runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
 
@@ -351,11 +385,33 @@ pTerm oldPrec =
     App lam arg → (5, pTerm 5 lam <+> pTerm 6 arg)
     Ty -> (6, "Type")
     U32 -> (6, "U32")
+    Tag → (6, "Tag")
     NatLit x → (6, pretty x)
+    TagLit x → (6, "." <> pretty (decodeUtf8Lenient x))
+    record@Record {} → (6,
+      let
+        (knownFields, rest) =
+          let
+            f tail' = case tail' of
+              ExVar (ExVar' x)
+                | Left t ← unsafePerformIO (readIORef x) → f t
+              Record head'' tail'' → first (head'' <>) $ maybe ([], Nothing) f tail''
+              _ → ([], Just tail')
+          in f record
+        field (n, v) = pTerm 6 n <+> ":" <+> pTerm 2 v
+        -- TODO: separator other than " " if not isSimple.
+        renderRest = case rest of
+          Nothing → mempty
+          Just rest' → "|| " <> pTerm 2 rest'
+        renderFields = \case
+          [] → mempty
+          [x] → " " <> field x <> " "
+          x:xs → " " <> field x <> " |" <> renderFields xs
+      in "{" <> renderFields knownFields <> renderRest <> "}")
     Var x → (6, pIdent x)
     ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
       Left t → (oldPrec, pTerm oldPrec t) 
-      Right i → (6, "(exi of" <+> pretty i <> ")")
+      Right (n, i) → (6, "(exi" <+> pIdent n <+> "of" <+> pretty i <> ")")
     UniVar x y t → (6, "(uni" <+> pIdent x <+> "of" <+> pretty y <+> ":" <+> pTTerm t <> ")")
 
 pTTerm :: TTermT → Doc AnsiStyle

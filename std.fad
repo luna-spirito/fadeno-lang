@@ -1,5 +1,2 @@
-ST = sorry/ST : Type -> Type -> Type
-STRef = sorry/STRef : Type -> Type -> Type
-runST = sorry/runST : forall a. (forall s. ST s a) -> a
-newSTRef = sorry/newSTRef : forall s a. a -> ST s (STRef s a)
-in runST (newSTRef 0)
+test = { .test = 3 | .by = 8 }
+in test

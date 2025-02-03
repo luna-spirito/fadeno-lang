@@ -192,7 +192,8 @@ insMeta scope var =
 
 pushExVarInto :: Int → SolveM P.ExVar'
 pushExVarInto scope = do 
-  metaVar' ← fmap P.ExVar' $ sendIO $ newIORef $ Right $ scope
+  name ← freshIdent
+  metaVar' ← fmap P.ExVar' $ sendIO $ newIORef $ Right $ (name, scope)
   insMeta scope metaVar'
   pure metaVar'
 
@@ -221,7 +222,7 @@ instMeta scope1 (P.ExVar' var1) = instMeta' where
       | var1 == var2 → pure ()
       | otherwise → sendIO (readIORef var2) >>= \case
         Left t → instMeta scope1 (P.ExVar' var1) t
-        Right scope2 →
+        Right (_, scope2) →
           let (early, (lateScope, late)) = if scope1 <= scope2
               then (var1, (scope2, var2))
               else (var2, (scope1, var1))
@@ -236,6 +237,7 @@ instMeta scope1 (P.ExVar' var1) = instMeta' where
       instMeta scope1 f' f *> instMeta scope1 a' a
     P.U32 → writeMeta scope1 (P.ExVar' var1) P.U32
     P.Ty → writeMeta scope1 (P.ExVar' var1) P.Ty
+    P.Tag → writeMeta scope1 (P.ExVar' var1) P.Tag
     P.Pi inNameM inT outT → do
       a ← pushExVarInto scope1
       b ← pushExVarInto scope1
@@ -261,12 +263,21 @@ normalize binds = \case
       P.Lam arg bod → normalize (HM.insert arg a' binds) bod
       _ → pure $ P.App f' a'
   P.NatLit x → pure $ P.NatLit x
+  P.TagLit x → pure $ P.TagLit x
+  P.Record known rest → do
+    known' ← for known \(a, b) →
+      (,) <$> normalize binds a <*> normalize binds b
+    rest' ← for rest $ normalize binds
+    pure $ case rest' of
+      Just (P.Record known2 rest2) → P.Record (known' <> known2) rest2
+      _ → P.Record known' rest'
   P.Sorry n x → P.Sorry n <$> normalize binds x
   P.Var x → pure $ case HM.lookup x binds of
     Nothing → P.Var x
     Just x' → x'
   P.Quantification q x a b → P.Quantification q x <$> normalize binds a <*> normalize (HM.delete x binds) b
   P.U32 → pure P.U32
+  P.Tag → pure P.Tag
   P.Pi aM b c → P.Pi aM <$> normalize binds b <*> normalize (maybe id HM.delete aM binds) c
   P.Ty → pure P.Ty
   old@(P.ExVar (P.ExVar' var)) → sendIO (readIORef var) >>= \case
@@ -338,7 +349,7 @@ infer ctx = curry \case
               normalize (HM.singleton inName a') outT
         P.T (P.ExVar (P.ExVar' var)) → sendIO (readIORef var) >>= \case
           Left t → inferApp $ P.T t
-          Right scope → do
+          Right (_, scope) → do
             -- I'm not satisfied by this solution, but instMeta solution is
             -- even more verbose since it accepts full TermT as input.
             inT ← P.ExVar <$> pushExVarInto scope
@@ -353,11 +364,13 @@ infer ctx = curry \case
         t → stackError $ "inferApp " <> P.pTTerm t
     fmap P.T . inferApp =<< infer ctx f Infer
   (P.NatLit _, Infer) → pure $ P.T P.U32
+  (P.TagLit _, Infer) → pure $ P.T P.Tag
   (P.Sorry _ x, Infer) → P.T <$> normalize (HM.mapMaybe fst ctx) x -- TODO: dedup
   (P.Var x, Infer) → case HM.lookup x ctx of
     Nothing → stackError $ "Unknown var " <> P.pIdent x
     Just (_, ty) → pure ty
   (P.U32, Infer) → pure $ P.T P.Ty
+  (P.Tag, Infer) → pure $ P.T P.Ty
   (x, Infer) → stackError $ "infer todo: " <> P.pTerm 0 x
   (term, Check c) → stackScope ("check via infer :" <+> P.pTTerm c) do
     ty ← infer ctx term Infer
@@ -405,6 +418,7 @@ subtype = \a b →
       subtype (P.T d) (P.T b)
     (P.T P.U32, P.T P.U32) → pure ()
     (P.T P.Ty, P.T P.Ty) → pure ()
+    (P.T P.Tag, P.T P.Tag) → pure ()
     (aT, bT) → stackError $ P.pTTerm aT <+> "<:" <+> P.pTTerm bT
   unwrapExs :: P.TTermT → SolveM P.TTermT
   unwrapExs inp = case inp of
@@ -416,7 +430,7 @@ subtype = \a b →
   subtypeMeta (P.ExVar' a) bT = 
     sendIO (readIORef a) >>= \case
       Left _ → error "Impossible"
-      Right scope → instMeta scope (P.ExVar' a) bT
+      Right (_, scope) → instMeta scope (P.ExVar' a) bT
 
 runSolveM :: SolveM a → IO ([StackEntry], Either (Doc AnsiStyle) a)
 runSolveM = runWriter (\w a → pure (toList @(RevList _) w, a)) .
