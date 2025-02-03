@@ -37,7 +37,7 @@ import Data.ByteString.Builder (toLazyByteString)
 import Control.Effect.Accum (look, add)
 import qualified Data.ByteString.Char8 as BS
 import System.IO (print)
-import Prettyprinter (Doc, annotate, line, nest, (<+>))
+import Prettyprinter (Doc, annotate, line, nest, (<+>), pretty)
 import Control.Carrier.Error.Church (ErrorC, runError)
 import Prettyprinter.Render.Terminal (AnsiStyle, color, Color (..))
 import Control.Effect.Error (throwError, Throw)
@@ -90,6 +90,7 @@ No phasings. Instead, each time a specialisation occurs (i. e. you interact with
 -- You can't guarantee correctness of the mess you've written if you
 -- continue to do things this way.
 -- TODO: meaningful names for compiler-generated Vars, UniVars, ExVars
+-- TODO: Type of existential is not checked when instantiating.
 
 newtype RevList a = UnsafeRevList [a] deriving (Functor, Show)
 
@@ -124,7 +125,7 @@ stackScope name act = censor (\entries → [StackEntry name $ toList @(RevList _
 
 stackError :: forall e sig m a. Has (Writer (RevList StackEntry) :+: Throw e) sig m ⇒ e → m a
 stackError e = do
-  stackLog "<panic>"
+  stackLog "<panic!!!11>"
   throwError e
 
 pStacks :: [StackEntry] → Doc AnsiStyle
@@ -215,6 +216,7 @@ writeMeta scope (P.ExVar' var) val = do
 instMeta :: Int → P.ExVar' → P.TermT → SolveM ()
 instMeta scope1 (P.ExVar' var1) = instMeta' where
   instMeta' = \case
+    P.Sorry _ x → instMeta' x
     P.ExVar (P.ExVar' var2)
       | var1 == var2 → pure ()
       | otherwise → sendIO (readIORef var2) >>= \case
@@ -226,13 +228,20 @@ instMeta scope1 (P.ExVar' var1) = instMeta' where
           in writeMeta lateScope (P.ExVar' late) $ P.ExVar $ P.ExVar' early
     uni@(P.UniVar _ scope2 _)
       | scope2 <= scope1 → writeMeta scope1 (P.ExVar' var1) uni
+    -- TODO: refactor all of this!!!
+    P.App f a → do
+      f' ← pushExVarInto scope1
+      a' ← pushExVarInto scope1
+      writeMeta scope1 (P.ExVar' var1) $ P.App (P.ExVar f') (P.ExVar a')
+      instMeta scope1 f' f *> instMeta scope1 a' a
     P.U32 → writeMeta scope1 (P.ExVar' var1) P.U32
+    P.Ty → writeMeta scope1 (P.ExVar' var1) P.Ty
     P.Pi inNameM inT outT → do
       a ← pushExVarInto scope1
       b ← pushExVarInto scope1
       writeMeta scope1 (P.ExVar' var1) $ P.Pi inNameM (P.ExVar a) (P.ExVar b)
       instMeta scope1 a inT *> instMeta scope1 b outT
-    x → stackError $ "instMeta " <> P.pTerm 0 x
+    x → stackError $ "instMeta (of" <+> pretty scope1 <> ")" <+> P.pTerm 0 x
 
 normalize :: Has (Lift IO) sig m ⇒ HashMap P.Ident P.TermT → P.TermT → m P.TermT
 normalize binds = \case
@@ -252,6 +261,7 @@ normalize binds = \case
       P.Lam arg bod → normalize (HM.insert arg a' binds) bod
       _ → pure $ P.App f' a'
   P.NatLit x → pure $ P.NatLit x
+  P.Sorry n x → P.Sorry n <$> normalize binds x
   P.Var x → pure $ case HM.lookup x binds of
     Nothing → P.Var x
     Just x' → x'
@@ -267,12 +277,6 @@ normalize binds = \case
 data InferMode a where
   Infer :: InferMode P.TTermT
   Check :: P.TTermT → InferMode ()
-
-{-
-: A : Type -> A -> forall z. (B : Type -> B -> z) -> z
-pair = \x y f. f x y
-in pair U32 4 (\a b. a|b)
--}
 
 infer :: CtxT → P.TermT → InferMode a → SolveM a
 infer ctx = curry \case
@@ -349,6 +353,7 @@ infer ctx = curry \case
         t → stackError $ "inferApp " <> P.pTTerm t
     fmap P.T . inferApp =<< infer ctx f Infer
   (P.NatLit _, Infer) → pure $ P.T P.U32
+  (P.Sorry _ x, Infer) → P.T <$> normalize (HM.mapMaybe fst ctx) x -- TODO: dedup
   (P.Var x, Infer) → case HM.lookup x ctx of
     Nothing → stackError $ "Unknown var " <> P.pIdent x
     Just (_, ty) → pure ty
@@ -393,11 +398,17 @@ subtype = \a b →
       b' ← maybe pure (\aName → normalize $ HM.singleton aName e) aNameM b
       d' ← maybe pure (\cName → normalize $ HM.singleton cName e) cNameM d
       subtype (P.T b') (P.T d')
+    (P.T (P.App a b), P.T (P.App c d)) → do
+      subtype (P.T a) (P.T c)
+      subtype (P.T c) (P.T a)
+      subtype (P.T b) (P.T d)
+      subtype (P.T d) (P.T b)
     (P.T P.U32, P.T P.U32) → pure ()
     (P.T P.Ty, P.T P.Ty) → pure ()
     (aT, bT) → stackError $ P.pTTerm aT <+> "<:" <+> P.pTTerm bT
   unwrapExs :: P.TTermT → SolveM P.TTermT
   unwrapExs inp = case inp of
+    P.T (P.Sorry _ t) → unwrapExs $ P.T t
     P.T (P.ExVar (P.ExVar' a)) → sendIO (readIORef a) >>= \case
       Left i → unwrapExs $ P.T i
       _ → pure inp

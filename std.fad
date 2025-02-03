@@ -1,7 +1,5 @@
-/: A : Type -> A -> A
-id = \xT. \x. x
-
-/: Type -> exists B. B -> B
-test = id
-
-in test
+ST = sorry/ST : Type -> Type -> Type
+STRef = sorry/STRef : Type -> Type -> Type
+runST = sorry/runST : forall a. (forall s. ST s a) -> a
+newSTRef = sorry/newSTRef : forall s a. a -> ST s (STRef s a)
+in runST (newSTRef 0)

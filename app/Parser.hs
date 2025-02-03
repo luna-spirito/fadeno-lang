@@ -58,9 +58,12 @@ operator =
       '/' → pure Div
       _ → failed
 
+ident' :: Parser' ByteString
+ident' = byteStringOf (skipSome $ satisfy \x → not $ x `elem` ("\\ \n=().:" :: String))
+
 ident ∷ Parser' Ident
 ident = token do
-  result ← byteStringOf (skipSome $ satisfy \x → not $ x `elem` ("\\ \n=().:" :: String))
+  result ← ident'
   guard $ not $ result `elem` ["in", "+", "-", "/", "*", "U32", "->", "forall"]
   pure $ Ident result
 
@@ -94,6 +97,7 @@ data TermT
   | App !TermT !TermT
   | NatLit !Word32
   -- Type-level
+  | Sorry !Ident !TermT
   | Var !Ident
   | Quantification !Quantifier !Ident !TermT !TermT
   -- ^ Cedille: forall X : 𝒌 | T / Fadeno: forall X : 𝒌. T
@@ -174,6 +178,12 @@ parseTy =
     $(char '.')
     into ← parseTy
     pure $ foldr (uncurry $ Quantification q) into binds)
+  <|> (do
+    $(string "sorry/")
+    n ← Ident <$> ident'
+    token $ $(char ':')
+    ty ← parseTy
+    pure $ Sorry n ty)
   <|> (do
     inName <- optional $ (ident <* $(char ':'))
     inTy <- parseApp
@@ -287,6 +297,7 @@ isSimple =
       Op a _ c → complexity a *> complexity c
       App f a → complexity f *> complexity a
       NatLit _ → ping
+      Sorry _ _ → ping
       Var _ → ping
       Ty → ping
       Quantification q _ b c -> ping *> complexity b *> complexity c
@@ -335,6 +346,7 @@ pTerm oldPrec =
           Forall → "forall"
           Exists → "exists"
       in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm 4 ty)
+    Sorry x _ → (6, "sorry/" <> pIdent x) -- 4 since type is not rendered
     Pi inName inTy outTy -> (4, maybe mempty (\x -> pIdent x <+> ": ") inName <> pTerm 5 inTy <+> "->" <+> pTerm 4 outTy)
     App lam arg → (5, pTerm 5 lam <+> pTerm 6 arg)
     Ty -> (6, "Type")
