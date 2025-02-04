@@ -3,7 +3,7 @@ module Parser where
 import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.State.Church (evalState, get, modify)
 import Control.Effect.Empty qualified as E
-import FlatParse.Basic (Parser, Pos, Result (..), anyAsciiChar, byteStringOf, char, empty, err, failed, getPos, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSome, string, eof, notFollowedBy)
+import FlatParse.Basic (Parser, Pos, Result (..), anyAsciiChar, byteStringOf, char, empty, err, failed, getPos, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSome, string, eof, notFollowedBy, skipSatisfyAscii)
 import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, layoutSmart, line, nest, softline, vsep, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
 import RIO hiding (Reader, ask, local)
@@ -25,7 +25,9 @@ instance Hashable Ident
 type Parser' = Parser Pos
 
 space ∷ Parser' ()
-space = skipMany (satisfyAscii (\x → x == ' ' || x == '\n'))
+space = skipMany $
+  skipSatisfyAscii (\x → x == ' ' || x == '\n')
+  <|> ($(string "//") *> skipMany (satisfyAscii (/= '\n')))
 
 token ∷ Parser' a → Parser' a
 token x = space *> x <* space
@@ -59,13 +61,14 @@ operator =
       _ → failed
 
 -- TODO: block words from ident' as well?.. probably not.
+-- TODO: Convert blocklists to functions
 ident' :: Parser' ByteString
 ident' = byteStringOf (skipSome $ satisfy \x → not $ x `elem` ("\\ \n=(){}[].:|/" :: String))
 
 ident ∷ Parser' Ident
 ident = token do
   result ← ident'
-  guard $ not $ result `elem` ["in", "+", "-", "/", "*", "U32", "->", "forall", "Tag", "Type"]
+  guard $ not $ result `elem` ["in", "+", "-", "/", "*", "U32", "->", "forall", "Tag", "Type", "Record"]
   pure $ Ident result
 
 {-
@@ -88,6 +91,7 @@ To the above constructs, Cedille adds the following, discussed more below:
 -}
 
 data Quantifier = Forall | Exists deriving (Show, Eq)
+data Fields = FRow | FRecord deriving (Show, Eq)
 
 data TermT
   -- Term-level
@@ -98,7 +102,7 @@ data TermT
   | App !TermT !TermT
   | NatLit !Word32
   | TagLit !ByteString
-  | Record ![(TermT, TermT)] !(Maybe TermT)
+  | FieldsLit !Fields ![(TermT, TermT)] !(Maybe TermT)
   | Sorry !Ident !TermT
   | Var !Ident
   -- Type-level
@@ -106,6 +110,8 @@ data TermT
   -- ^ Cedille: forall X : 𝒌 | T / Fadeno: forall X : 𝒌. T
   | U32
   | Tag
+  | Row !TermT -- classifies FieldsLit FRow.
+  | Record !TermT -- classifies FieldsLit FRecord.
   | Pi !(Maybe Ident) !TermT !TermT
   -- ^ Cedille: Π x : T | T’ / Fadeno: x : T -> T'
   | Ty -- ★
@@ -149,10 +155,6 @@ infxl a oper = a >>= infxl'
 
 -- Syntax is *a little* ambigious. I'm very sorry.
 
-manySep :: Alternative f ⇒ f () → f a → f [a]
-manySep sep act = ((:) <$> act <*> manySep') <|> pure [] where
-  manySep' = ((:) <$> (sep *> act) <*> manySep') <|> pure []
-
 -- 6
 parsePrim ∷ Parser' TermT
 parsePrim = token $
@@ -163,17 +165,29 @@ parsePrim = token $
   <|> (TagLit <$> ($(char '.') *> ident'))
   <|> (do
     token $ $(char '{')
-    knownFields ← manySep (token $(char '|')) do
-      n ← parsePrim
-      token $ $(char '=')
-      v ← parseMath0
-      pure (n, v)
+    let
+      parseField = do
+        n ← parsePrim
+        fields ← token $ ($(char '=') $> FRecord) <|> ($(char ':') $> FRow)
+        v ← parseTop
+        pure ((n, v), fields)
+      parseMany = do
+        (x, fields1) ← parseField
+        xs ← many do
+          token $(char '|')
+          (res, fields2) ← parseField
+          guard $ fields1 == fields2
+          pure res
+        pure (fields1, x:xs)
+      parseEmpty = do
+        fields ← token $ ($(char ':') $> FRow) <|> pure FRecord
+        pure (fields, [])
+    (fields, knownFields) ← parseMany <|> parseEmpty
     rest ← optional do
       token $ $(string "||")
       parseMath0
-    token $ $(char '}')
-    pure $ Record knownFields rest
-  )
+    token $(char '}')
+    pure $ FieldsLit fields knownFields rest)
   <|> (Var <$> notFollowedBy ident (token $(char '=')))
   <|> ($(char '(')
       *> parseTop
@@ -207,6 +221,12 @@ parseTy =
     token $ $(char ':')
     ty ← parseTy
     pure $ Sorry n ty)
+  <|> (do
+    token $ $(string "Record")
+    Record <$> parsePrim)
+  <|> (do
+    token $ $(string "Row")
+    Row <$> parsePrim)
   <|> do -- Fused: parseApp <|> (->)
     inName <- optional $ (ident <* $(char ':'))
     inTy ← parseApp
@@ -325,7 +345,10 @@ isSimple =
       App f a → complexity f *> complexity a
       NatLit _ → ping
       TagLit _ → ping
-      Record x y → for_ x (\(a, b) → complexity a *> complexity b) *> for_ y complexity
+      FieldsLit _ x y →
+        for_ x (\(a, b) → complexity a *> complexity b) *> for_ y complexity
+      Row x → ping *> complexity x
+      Record x → ping *> complexity x
       Sorry _ _ → ping
       Var _ → ping
       Ty → ping
@@ -352,7 +375,11 @@ pTerm oldPrec =
             _
               | isSimple x → " "
               | otherwise → line
-         in annotate (color Magenta) "\\" <> pIdent arg <> "." <> sep <> pTerm 0 x
+         in
+          annotate (color Magenta) "\\"
+          <> pIdent arg
+          <> annotate (color Magenta) "."
+          <> sep <> pTerm 0 x
       )
     Let defs i →
       ( 1
@@ -380,7 +407,9 @@ pTerm oldPrec =
           Forall → "forall"
           Exists → "exists"
       in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm 4 ty)
-    Sorry x _ → (6, "sorry/" <> pIdent x) -- 4 since type is not rendered
+    Sorry x _ → (6, "sorry/" <> pIdent x) -- 6 and not 4 since type is not rendered
+    Record x → (4, "Record" <+> pTerm 6 x)
+    Row x → (4, "Row" <+> pTerm 6 x)
     Pi inName inTy outTy -> (4, maybe mempty (\x -> pIdent x <+> ": ") inName <> pTerm 5 inTy <+> "->" <+> pTerm 4 outTy)
     App lam arg → (5, pTerm 5 lam <+> pTerm 6 arg)
     Ty -> (6, "Type")
@@ -388,23 +417,29 @@ pTerm oldPrec =
     Tag → (6, "Tag")
     NatLit x → (6, pretty x)
     TagLit x → (6, "." <> pretty (decodeUtf8Lenient x))
-    record@Record {} → (6,
+    record@(FieldsLit fields _ _) → (6,
       let
         (knownFields, rest) =
           let
             f tail' = case tail' of
               ExVar (ExVar' x)
                 | Left t ← unsafePerformIO (readIORef x) → f t
-              Record head'' tail'' → first (head'' <>) $ maybe ([], Nothing) f tail''
+              FieldsLit fields'' head'' tail''
+                | fields == fields'' → first (head'' <>) $ maybe ([], Nothing) f tail''
               _ → ([], Just tail')
           in f record
-        field (n, v) = pTerm 6 n <+> ":" <+> pTerm 2 v
+        sep = case fields of
+          FRecord → "="
+          FRow → ":"
+        field (n, v) = pTerm 6 n <+> sep <+> pTerm 0 v
         -- TODO: separator other than " " if not isSimple.
         renderRest = case rest of
           Nothing → mempty
-          Just rest' → "|| " <> pTerm 2 rest'
+          Just rest' → "|| " <> pTerm 2 rest' <> " "
         renderFields = \case
-          [] → mempty
+          [] → case fields of
+            FRecord → mempty
+            FRow → ":"
           [x] → " " <> field x <> " "
           x:xs → " " <> field x <> " |" <> renderFields xs
       in "{" <> renderFields knownFields <> renderRest <> "}")

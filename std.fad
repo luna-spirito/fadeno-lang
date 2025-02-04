@@ -1,2 +1,1 @@
-test = { .test = 3 | .by = 8 }
-in test
+\z. { .x = 3 || z }

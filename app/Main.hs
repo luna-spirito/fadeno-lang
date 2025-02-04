@@ -236,13 +236,21 @@ instMeta scope1 (P.ExVar' var1) = instMeta' where
       writeMeta scope1 (P.ExVar' var1) $ P.App (P.ExVar f') (P.ExVar a')
       instMeta scope1 f' f *> instMeta scope1 a' a
     P.U32 → writeMeta scope1 (P.ExVar' var1) P.U32
-    P.Ty → writeMeta scope1 (P.ExVar' var1) P.Ty
     P.Tag → writeMeta scope1 (P.ExVar' var1) P.Tag
+    P.Row a → do
+      a' ← pushExVarInto scope1
+      writeMeta scope1 (P.ExVar' var1) $ P.Row (P.ExVar a')
+      instMeta scope1 a' a
+    P.Record a → do
+      a' ← pushExVarInto scope1
+      writeMeta scope1 (P.ExVar' var1) $ P.Record (P.ExVar a')
+      instMeta scope1 a' a
     P.Pi inNameM inT outT → do
       a ← pushExVarInto scope1
       b ← pushExVarInto scope1
       writeMeta scope1 (P.ExVar' var1) $ P.Pi inNameM (P.ExVar a) (P.ExVar b)
       instMeta scope1 a inT *> instMeta scope1 b outT
+    P.Ty → writeMeta scope1 (P.ExVar' var1) P.Ty
     x → stackError $ "instMeta (of" <+> pretty scope1 <> ")" <+> P.pTerm 0 x
 
 normalize :: Has (Lift IO) sig m ⇒ HashMap P.Ident P.TermT → P.TermT → m P.TermT
@@ -264,13 +272,18 @@ normalize binds = \case
       _ → pure $ P.App f' a'
   P.NatLit x → pure $ P.NatLit x
   P.TagLit x → pure $ P.TagLit x
-  P.Record known rest → do
-    known' ← for known \(a, b) →
-      (,) <$> normalize binds a <*> normalize binds b
-    rest' ← for rest $ normalize binds
+  P.FieldsLit fields known rest → do
+    let
+      normalizeF =
+        normalize case fields of
+          P.FRecord → binds
+          P.FRow → HM.delete (P.Ident "self") binds
+    known' ← for known \(name, val) → (,) <$> normalizeF name <*> normalizeF val
+    rest' ← for rest normalizeF
     pure $ case rest' of
-      Just (P.Record known2 rest2) → P.Record (known' <> known2) rest2
-      _ → P.Record known' rest'
+      Just (P.FieldsLit fields2 known2 rest2)
+        | fields == fields2 → P.FieldsLit fields (known' <> known2) rest2
+      _ → P.FieldsLit fields known' rest'
   P.Sorry n x → P.Sorry n <$> normalize binds x
   P.Var x → pure $ case HM.lookup x binds of
     Nothing → P.Var x
@@ -278,6 +291,8 @@ normalize binds = \case
   P.Quantification q x a b → P.Quantification q x <$> normalize binds a <*> normalize (HM.delete x binds) b
   P.U32 → pure P.U32
   P.Tag → pure P.Tag
+  P.Record x → P.Record <$> normalize binds x
+  P.Row x → P.Record <$> normalize binds x
   P.Pi aM b c → P.Pi aM <$> normalize binds b <*> normalize (maybe id HM.delete aM binds) c
   P.Ty → pure P.Ty
   old@(P.ExVar (P.ExVar' var)) → sendIO (readIORef var) >>= \case
@@ -305,6 +320,8 @@ infer ctx = curry \case
     ty ← stackScope ("let" <+> P.pIdent name) case tyM of
       Nothing → infer ctx val Infer
       Just ty → do
+        infer ctx ty $ Check $ P.T P.Ty
+        -- TODO: check ty' to be a type?
         ty' ← P.T <$> normalize normCtx ty
         infer ctx val $ Check ty'
         pure ty'
@@ -325,14 +342,15 @@ infer ctx = curry \case
         P.Kind → error ""
         P.T outT' → P.Pi Nothing inT outT'
   (P.Lam arg bod, Check (P.T (P.Pi inNameM inT outT))) → do
-    let inferBod val outT' = infer (HM.insert arg (val, P.T inT) ctx) bod $ Check $ P.T outT'
+    inT' ← normalize (HM.mapMaybe fst ctx) inT
+    let inferBod val outT' = infer (HM.insert arg (val, P.T inT') ctx) bod $ Check $ P.T outT'
     case inNameM of
       Nothing → inferBod Nothing outT
       Just inName → scoped_ do
-        arg' ← pushUniVar $ P.T inT
+        arg' ← pushUniVar $ P.T inT'
         outT' ← normalize (HM.singleton inName arg') outT
         inferBod (Just arg') outT'
-    -- infer (HM.insert arg (val, P.T inT) ctx) bod $ Check $ P.T outT'
+    -- infer (HM.insert arg (val, P.T inT') ctx) bod $ Check $ P.T outT'
   (P.Op a _op b, Infer) → do
     infer ctx a $ Check $ P.T P.U32
     infer ctx b $ Check $ P.T P.U32
@@ -361,16 +379,79 @@ infer ctx = curry \case
           x ← pushExVar
           bod' ← normalize (HM.singleton xName x) bod
           inferApp $ P.T bod'
+        P.T (P.Quantification P.Exists xName xTy bod) → scoped do
+          x ← pushUniVar $ P.T xTy
+          bod' ← normalize (HM.singleton xName x) bod
+          inferApp $ P.T bod'
         t → stackError $ "inferApp " <> P.pTTerm t
     fmap P.T . inferApp =<< infer ctx f Infer
   (P.NatLit _, Infer) → pure $ P.T P.U32
   (P.TagLit _, Infer) → pure $ P.T P.Tag
+  (P.FieldsLit P.FRow known rest, Check (P.T (P.Row ty))) → do
+    let
+      norm = normalize (HM.mapMaybe fst ctx)
+      extSelf field = HM.adjust
+        (\case
+          (Nothing, P.T (P.FieldsLit P.FRecord existing Nothing)) →
+            (Nothing, P.T $ P.FieldsLit P.FRecord (field:existing) Nothing)
+          _ → (Nothing, P.T $ P.FieldsLit P.FRecord [field] Nothing))
+        (P.Ident "self")
+    ctx' ← foldM
+      (\ctx' (name, val) → do
+        infer ctx' name $ Check $ P.T P.Tag
+        infer ctx' val $ Check $ P.T ty
+        name' ← norm name
+        val' ← norm val
+        pure $ extSelf (name', val') ctx')
+      ctx
+      known
+    for_ rest \rest' → infer ctx' rest' $ Check $ P.T $ P.Row ty
+  (P.FieldsLit P.FRow known rest, Infer) → scoped_ do
+    ty ← pushExVar
+    -- TODO: rewrite (and use here) `scoped` and add type annotation to existentials!
+    -- This annotation is of Kind. `scoped` must default to Type here.
+    -- EDIT: I'm stupid not to understand why impredicative quantification is not allowed over kinds.
+    -- In my understanding, if `forall (x : Type). ...` : `Type`, then
+    -- `forall (x : Kind). ...` : `Kind`.
+    infer ctx (P.FieldsLit P.FRow known rest) $ Check $ P.T $ P.Row ty
+    pure $ P.T $ P.Row ty
+  (P.FieldsLit P.FRecord knownVal rest, Infer) → do
+    knownTy ← for knownVal \(name, val) → do
+      infer ctx name $ Check $ P.T P.Tag
+      ty ← infer ctx val Infer
+      case ty of
+        P.Kind → stackError @(Doc AnsiStyle) "todo term:type:kind error"
+        P.T ty' → pure (name, ty')
+    rest' ← for rest \rest' → scoped_ do
+      row ← pushExVar
+      -- TODO: !!!!
+      infer ctx rest' $ Check $ P.T $ P.Record row
+      pure row
+    pure $ P.T $ P.FieldsLit P.FRow knownTy rest'
+  -- TODO: Check for FRecord
   (P.Sorry _ x, Infer) → P.T <$> normalize (HM.mapMaybe fst ctx) x -- TODO: dedup
   (P.Var x, Infer) → case HM.lookup x ctx of
     Nothing → stackError $ "Unknown var " <> P.pIdent x
     Just (_, ty) → pure ty
   (P.U32, Infer) → pure $ P.T P.Ty
   (P.Tag, Infer) → pure $ P.T P.Ty
+  (P.Row t, Infer) → do
+    infer ctx t $ Check P.Kind
+    pure P.Kind
+  (P.Record t, Infer) → do
+    infer ctx t $ Check $ P.T $ P.Row P.Ty
+    pure $ P.Kind
+  (P.Pi inNameM x y, Infer) → do
+    xT ← infer ctx x Infer
+    yT ← infer (maybe id (`HM.insert` (Nothing, P.T x)) inNameM ctx) y Infer
+    case (xT, yT) of
+      (P.Kind, _) → pure P.Kind
+      (_, P.Kind) → pure P.Kind
+      (P.T _, P.T _) → do
+        subtype xT $ P.T P.Ty
+        subtype yT $ P.T P.Ty
+        pure $ P.T P.Ty
+  (P.Ty, Infer) → pure P.Kind
   (x, Infer) → stackError $ "infer todo: " <> P.pTerm 0 x
   (term, Check c) → stackScope ("check via infer :" <+> P.pTTerm c) do
     ty ← infer ctx term Infer
@@ -385,6 +466,7 @@ subtype = \a b →
     subtype' (a', b')
   where
   subtype' = \case
+    (_, P.Kind) → pure ()
     (P.T aT, P.T (P.Quantification P.Forall xName xTy bT)) → scoped_ do
       x' ← pushUniVar $ P.T xTy
       bT' ← normalize (HM.singleton xName x') bT
