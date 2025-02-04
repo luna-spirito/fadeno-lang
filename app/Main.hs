@@ -163,12 +163,21 @@ scoped act = do
   exs ← state @(IntMap [P.ExVar']) \scopes →
     (IM.deleteMax scopes, snd $ fromMaybe (error "Internal error: Scope disappeared") $ IM.lookupMax scopes)
   foldM
-    (\ty' (P.ExVar' x) → do
-      var ← fresh
-      let var' = P.Ident $ BS.pack $ "/" <> show var
-      sendIO $ writeIORef x $ Left $ P.Var var'
-      -- TODO: not just Ty!
-      pure $ P.Quantification P.Forall var' P.Ty ty')
+    (\ty' (P.ExVar' x) →
+      let
+        ofT xTy = do
+          variable ← fresh
+          let variable' = P.Ident $ BS.pack $ "/" <> show variable
+          sendIO $ writeIORef x $ Left $ P.Var variable'
+          -- TODO: extract name for new variable from the existential.
+          pure $ P.Quantification P.Forall variable' xTy ty'
+      in sendIO (readIORef x) >>= \case
+        Left t → stackError $ "Internal error: Resolved existential wasn't marked as such:" <+> P.pTerm 0 t
+        Right (_, (_, Just (P.Kind))) → do
+          sendIO $ writeIORef x $ Left P.Ty
+          pure ty'
+        Right (_, (_, Just (P.T xTy))) → ofT xTy
+        Right (_, (_, Nothing)) → ofT P.Ty)
     ty
     exs
 
@@ -181,26 +190,28 @@ scoped_ act = do
   pure res
 
 delMeta :: Int → P.ExVar' → SolveM ()
-delMeta scope var =
+delMeta scope var = do
+  stackLog "del"
   modify @(IntMap [P.ExVar']) \scopes →
     IM.adjust (filter (/= var)) scope scopes
 
 insMeta :: Int → P.ExVar' → SolveM ()
-insMeta scope var =
+insMeta scope var = do
+  stackLog "ins"
   modify @(IntMap [P.ExVar']) \scopes →
     IM.adjust (var:) scope scopes
 
-pushExVarInto :: Int → SolveM P.ExVar'
-pushExVarInto scope = do 
+pushExVarInto :: Int → Maybe P.TTermT → SolveM P.ExVar'
+pushExVarInto scope t = do
   name ← freshIdent
-  metaVar' ← fmap P.ExVar' $ sendIO $ newIORef $ Right $ (name, scope)
+  metaVar' ← fmap P.ExVar' $ sendIO $ newIORef $ Right $ (name, (scope, t))
   insMeta scope metaVar'
   pure metaVar'
 
-pushExVar :: SolveM P.TermT
-pushExVar = do
+pushExVar :: Maybe P.TTermT → SolveM P.TermT
+pushExVar t = do
   scope ← (\x → x - 1) . IM.size <$> get @(IntMap [P.ExVar'])
-  P.ExVar <$> pushExVarInto scope
+  P.ExVar <$> pushExVarInto scope t
 
 pushUniVar :: P.TTermT → SolveM P.TermT
 pushUniVar ty = do
@@ -209,12 +220,51 @@ pushUniVar ty = do
   ident ← freshIdent
   pure $ P.UniVar ident scope ty
 
-writeMeta :: Int → P.ExVar' → P.TermT → SolveM ()
-writeMeta scope (P.ExVar' var) val = do
+-- Writes & checks
+writeMeta :: (Int, Maybe P.TTermT) → P.ExVar' → P.TermT → SolveM ()
+writeMeta (scope, ty) (P.ExVar' var) val = do
+  for_ ty $ infer [] val . Check
+  stackLog $ "?" <> P.pTerm 0 (P.ExVar $ P.ExVar' var) <+> "=" <+> P.pTerm 0 val
   sendIO $ writeIORef var $ Left val
   delMeta scope (P.ExVar' var)
 
-instMeta :: Int → P.ExVar' → P.TermT → SolveM ()
+instMeta :: (Int, Maybe P.TTermT) → P.ExVar' → P.TermT → SolveM ()
+instMeta = uncurry \scope1 →
+  let
+    instMeta' :: P.TermT → SolveM P.TermT
+    instMeta' = \case
+      P.Sorry _ x → instMeta' x
+      P.ExVar (P.ExVar' var2) → sendIO (readIORef var2) >>= \case
+        Left t → instMeta' t
+        Right (_, (scope2, t2)) →
+          if scope2 <= scope1
+            then pure $ P.ExVar (P.ExVar' var2)
+            else do
+              var1 ← P.ExVar <$> pushExVarInto scope1 t2
+              writeMeta (scope2, t2) (P.ExVar' var2) var1
+              pure var1
+      uni@(P.UniVar _ scope2 _)
+        | scope2 <= scope1 → pure uni
+      P.App f a → P.App <$> instMeta' f <*> instMeta' a
+      P.U32 → pure P.U32
+      P.Tag → pure P.Tag
+      P.Row x → P.Row <$> instMeta' x
+      P.Record x → P.Record <$> instMeta' x
+      P.Pi inNameM inT outT → P.Pi inNameM <$> instMeta' inT <*> instMeta' outT
+      P.Ty → pure P.Ty
+      x → stackError $ "instMeta (of" <+> pretty scope1 <> ")" <+> P.pTerm 0 x
+  in \t1 (P.ExVar' var1) val →
+    let r = writeMeta (scope1, t1) (P.ExVar' var1) =<< instMeta' val
+    in case val of
+      P.ExVar (P.ExVar' var2) →
+        if var1 == var2
+          then pure ()
+          else sendIO (readIORef var2) >>= \case
+            Left val' → instMeta (scope1, t1) (P.ExVar' var1) val'
+            _ → r
+      _ → r
+
+{-
 instMeta scope1 (P.ExVar' var1) = instMeta' where
   instMeta' = \case
     P.Sorry _ x → instMeta' x
@@ -252,6 +302,7 @@ instMeta scope1 (P.ExVar' var1) = instMeta' where
       instMeta scope1 a inT *> instMeta scope1 b outT
     P.Ty → writeMeta scope1 (P.ExVar' var1) P.Ty
     x → stackError $ "instMeta (of" <+> pretty scope1 <> ")" <+> P.pTerm 0 x
+-}
 
 normalize :: Has (Lift IO) sig m ⇒ HashMap P.Ident P.TermT → P.TermT → m P.TermT
 normalize binds = \case
@@ -320,7 +371,6 @@ infer ctx = curry \case
     ty ← stackScope ("let" <+> P.pIdent name) case tyM of
       Nothing → infer ctx val Infer
       Just ty → do
-        infer ctx ty $ Check $ P.T P.Ty
         -- TODO: check ty' to be a type?
         ty' ← P.T <$> normalize normCtx ty
         infer ctx val $ Check ty'
@@ -336,7 +386,7 @@ infer ctx = curry \case
       mode
   (P.Lam arg bod, Infer) →
     P.T <$> scoped do
-      inT ← pushExVar
+      inT ← pushExVar Nothing
       outT ← infer (HM.insert arg (Nothing, P.T inT) ctx) bod Infer
       pure case outT of
         P.Kind → error ""
@@ -367,16 +417,16 @@ infer ctx = curry \case
               normalize (HM.singleton inName a') outT
         P.T (P.ExVar (P.ExVar' var)) → sendIO (readIORef var) >>= \case
           Left t → inferApp $ P.T t
-          Right (_, scope) → do
+          Right (_, (mScope, mT)) → do
             -- I'm not satisfied by this solution, but instMeta solution is
             -- even more verbose since it accepts full TermT as input.
-            inT ← P.ExVar <$> pushExVarInto scope
-            outT ← P.ExVar <$> pushExVarInto scope
-            writeMeta scope (P.ExVar' var) (P.Pi Nothing inT outT)
+            inT ← P.ExVar <$> pushExVarInto mScope Nothing
+            outT ← P.ExVar <$> pushExVarInto mScope Nothing
+            writeMeta (mScope, mT) (P.ExVar' var) (P.Pi Nothing inT outT)
             infer ctx a $ Check $ P.T inT
             pure outT
-        P.T (P.Quantification P.Forall xName P.Ty bod) → scoped do -- not just Ty!
-          x ← pushExVar
+        P.T (P.Quantification P.Forall xName xTy bod) → scoped do -- not just Ty!
+          x ← pushExVar $ Just $ P.T xTy
           bod' ← normalize (HM.singleton xName x) bod
           inferApp $ P.T bod'
         P.T (P.Quantification P.Exists xName xTy bod) → scoped do
@@ -407,27 +457,32 @@ infer ctx = curry \case
       known
     for_ rest \rest' → infer ctx' rest' $ Check $ P.T $ P.Row ty
   (P.FieldsLit P.FRow known rest, Infer) → scoped_ do
-    ty ← pushExVar
-    -- TODO: rewrite (and use here) `scoped` and add type annotation to existentials!
-    -- This annotation is of Kind. `scoped` must default to Type here.
-    -- EDIT: I'm stupid not to understand why impredicative quantification is not allowed over kinds.
-    -- In my understanding, if `forall (x : Type). ...` : `Type`, then
-    -- `forall (x : Kind). ...` : `Kind`.
+    ty ← pushExVar $ Just P.Kind
     infer ctx (P.FieldsLit P.FRow known rest) $ Check $ P.T $ P.Row ty
     pure $ P.T $ P.Row ty
-  (P.FieldsLit P.FRecord knownVal rest, Infer) → do
-    knownTy ← for knownVal \(name, val) → do
-      infer ctx name $ Check $ P.T P.Tag
-      ty ← infer ctx val Infer
-      case ty of
-        P.Kind → stackError @(Doc AnsiStyle) "todo term:type:kind error"
-        P.T ty' → pure (name, ty')
-    rest' ← for rest \rest' → scoped_ do
-      row ← pushExVar
-      -- TODO: !!!!
-      infer ctx rest' $ Check $ P.T $ P.Record row
-      pure row
-    pure $ P.T $ P.FieldsLit P.FRow knownTy rest'
+    -- TODO: rewrite (and use here) `scoped` and add type annotation to existentials!
+  -- (P.FieldsLit P.FRow known rest, Infer) → scoped_ do
+  --   ty ← pushExVar
+  --   -- TODO: rewrite (and use here) `scoped` and add type annotation to existentials!
+  --   -- This annotation is of Kind. `scoped` must default to Type here.
+  --   -- EDIT: I'm stupid not to understand why impredicative quantification is not allowed over kinds.
+  --   -- In my understanding, if `forall (x : Type). ...` : `Type`, then
+  --   -- `forall (x : Kind). ...` : `Kind`.
+  --   infer ctx (P.FieldsLit P.FRow known rest) $ Check $ P.T $ P.Row ty
+  --   pure $ P.T $ P.Row ty
+  -- (P.FieldsLit P.FRecord knownVal rest, Infer) → do
+  --   knownTy ← for knownVal \(name, val) → do
+  --     infer ctx name $ Check $ P.T P.Tag
+  --     ty ← infer ctx val Infer
+  --     case ty of
+  --       P.Kind → stackError @(Doc AnsiStyle) "todo term:type:kind error"
+  --       P.T ty' → pure (name, ty')
+  --   rest' ← for rest \rest' → scoped_ do
+  --     row ← pushExVar
+  --     -- TODO: !!!!
+  --     infer ctx rest' $ Check $ P.T $ P.Record row
+  --     pure row
+    -- pure $ P.T $ P.FieldsLit P.FRow knownTy rest'
   -- TODO: Check for FRecord
   (P.Sorry _ x, Infer) → P.T <$> normalize (HM.mapMaybe fst ctx) x -- TODO: dedup
   (P.Var x, Infer) → case HM.lookup x ctx of
@@ -475,12 +530,12 @@ subtype = \a b →
       x' ← pushUniVar $ P.T xTy
       aT' ← normalize (HM.singleton xName x') aT
       subtype (P.T aT') (P.T bT)
-    (P.T (P.Quantification P.Forall xName P.Ty aT), P.T bT) → scoped_ do -- TODO: not just Ty
-      x' ← pushExVar
+    (P.T (P.Quantification P.Forall xName xTy aT), P.T bT) → scoped_ do -- TODO: not just Ty
+      x' ← pushExVar $ Just $ P.T xTy
       aT' ← normalize (HM.singleton xName x') aT
       subtype (P.T aT') (P.T bT)
-    (P.T aT, P.T (P.Quantification P.Exists xName P.Ty bT)) → scoped_ do -- TODO: not just Ty
-      x' ← pushExVar -- TODO: deduplicate the whole scoped_/scoped pattern
+    (P.T aT, P.T (P.Quantification P.Exists xName xTy bT)) → scoped_ do -- TODO: not just Ty
+      x' ← pushExVar $ Just $ P.T xTy -- TODO: deduplicate the whole scoped_/scoped pattern
       bT' ← normalize (HM.singleton xName x') bT
       subtype (P.T aT) (P.T bT')
     (P.T (P.ExVar a), P.T bT) → subtypeMeta a bT

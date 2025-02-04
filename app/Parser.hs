@@ -120,9 +120,8 @@ data TermT
   | UniVar !Ident !Int !TTermT
   deriving (Show, Eq)
 
--- TODO: I'm stupid so I don't know whether you need to keep a type (kind) of ExVar?
 -- Ident is just for debugging here.
-newtype ExVar' = ExVar' (IORef (Either TermT (Ident, Int))) deriving Eq
+newtype ExVar' = ExVar' (IORef (Either TermT (Ident, (Int, Maybe TTermT)))) deriving Eq
 
 instance Show ExVar' where
   show (ExVar' x) = case unsafePerformIO $ readIORef x of
@@ -446,7 +445,7 @@ pTerm oldPrec =
     Var x → (6, pIdent x)
     ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
       Left t → (oldPrec, pTerm oldPrec t) 
-      Right (n, i) → (6, "(exi" <+> pIdent n <+> "of" <+> pretty i <> ")")
+      Right (n, (i, t)) → (6, "(exi" <+> pIdent n <+> "of" <+> pretty i <> maybe mempty (\t' → " :" <+> pTTerm t') t <+> ")")
     UniVar x y t → (6, "(uni" <+> pIdent x <+> "of" <+> pretty y <+> ":" <+> pTTerm t <> ")")
 
 pTTerm :: TTermT → Doc AnsiStyle
