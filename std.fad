@@ -1,1 +1,3 @@
-Row Type -> Row Type
+/: Record { .x : Type | .y : U32 }
+test = { .x = U32 | .y = 6 }
+in test

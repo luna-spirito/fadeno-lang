@@ -68,7 +68,7 @@ ident' = byteStringOf (skipSome $ satisfy \x → not $ x `elem` ("\\ \n=(){}[].:
 ident ∷ Parser' Ident
 ident = token do
   result ← ident'
-  guard $ not $ result `elem` ["in", "+", "-", "/", "*", "U32", "->", "forall", "Tag", "Type", "Record"]
+  guard $ not $ result `elem` ["in", "+", "-", "/", "*", "U32", "->", "forall", "Tag", "Type", "Row", "Record"]
   pure $ Ident result
 
 {-
@@ -196,12 +196,19 @@ parsePrim = token $
 -- Tokens???
 parseApp ∷ Parser' TermT
 parseApp = infxl parsePrim (pure App)
+  <|> (do -- needs a new level?
+    token $ $(string "Row")
+    Row <$> parsePrim)
+  <|> (do
+    token $ $(string "Record")
+    Record <$> parsePrim)
 
 -- 4
 parseTy :: Parser' TermT
 parseTy =
   (do
     q ← token $ ($(string "forall") $> Forall) <|> ($(string "exists") $> Exists)
+    -- TODO: unify syntax with how Pi works?
     let
       kind = do
         token $(char ':') 
@@ -210,7 +217,7 @@ parseTy =
         <|> ($(char '(') *> ((,) <$> ident <*> kind) <* $(char ')'))
     binds ←
       some manyEntry
-      <|> ((\a b → [(a, b)]) <$> ident <*>  kind)
+      <|> ((\a b → [(a, b)]) <$> ident <*> kind)
     $(char '.')
     into ← parseTy
     pure $ foldr (uncurry $ Quantification q) into binds)
@@ -220,12 +227,6 @@ parseTy =
     token $ $(char ':')
     ty ← parseTy
     pure $ Sorry n ty)
-  <|> (do
-    token $ $(string "Record")
-    Record <$> parsePrim)
-  <|> (do
-    token $ $(string "Row")
-    Row <$> parsePrim)
   <|> do -- Fused: parseApp <|> (->)
     inName <- optional $ (ident <* $(char ':'))
     inTy ← parseApp
@@ -407,10 +408,10 @@ pTerm oldPrec =
           Exists → "exists"
       in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm 4 ty)
     Sorry x _ → (6, "sorry/" <> pIdent x) -- 6 and not 4 since type is not rendered
-    Record x → (4, "Record" <+> pTerm 6 x)
-    Row x → (4, "Row" <+> pTerm 6 x)
     Pi inName inTy outTy -> (4, maybe mempty (\x -> pIdent x <+> ": ") inName <> pTerm 5 inTy <+> "->" <+> pTerm 4 outTy)
     App lam arg → (5, pTerm 5 lam <+> pTerm 6 arg)
+    Row x → (5, "Row" <+> pTerm 6 x)
+    Record x → (5, "Record" <+> pTerm 6 x)
     Ty -> (6, "Type")
     U32 -> (6, "U32")
     Tag → (6, "Tag")
@@ -445,7 +446,7 @@ pTerm oldPrec =
     Var x → (6, pIdent x)
     ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
       Left t → (oldPrec, pTerm oldPrec t) 
-      Right (n, (i, t)) → (6, "(exi" <+> pIdent n <+> "of" <+> pretty i <> maybe mempty (\t' → " :" <+> pTTerm t') t <+> ")")
+      Right (n, (i, t)) → (6, "(exi" <+> pIdent n <+> "of" <+> pretty i <> maybe mempty (\t' → " :" <+> pTTerm t') t <> ")")
     UniVar x y t → (6, "(uni" <+> pIdent x <+> "of" <+> pretty y <+> ":" <+> pTTerm t <> ")")
 
 pTTerm :: TTermT → Doc AnsiStyle
