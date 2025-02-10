@@ -225,9 +225,8 @@ parseTy =
       manyEntry = ((,Ty) <$> ident)
         <|> ($(char '(') *> ((,) <$> ident <*> kind) <* $(char ')'))
     binds ←
-      some manyEntry
-      <|> ((\a b → [(a, b)]) <$> ident <*> kind)
-    $(char '.')
+      (some manyEntry <* token $(char '.'))
+      <|> ((traceM "here" *> (\a b → [(a, b)]) <$> ident <*> kind) <* token $(char '.'))
     into ← parseTy
     pure $ foldr (uncurry $ Quantification q) into binds)
   <|> (do

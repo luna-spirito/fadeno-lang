@@ -495,6 +495,7 @@ infer ctx = curry \case
       Nothing → infer ctx val Infer
       Just ty → do
         -- TODO: check ty' to be a type?
+        void $ infer ctx ty Infer
         ty' ← P.T <$> normalize ctx ty
         infer ctx val $ Check ty'
         pure ty'
@@ -604,11 +605,9 @@ infer ctx = curry \case
         row'' ← normalize (HM.insert (P.Ident "self") (P.FieldsLit P.FRecord [(name', val')] Nothing) $ HM.mapMaybe fst ctx) $ uncurry (P.FieldsLit P.FRow) row'
         infer ctx (P.FieldsLit P.FRecord fields rest) $ Check $ P.T $ P.Record row''
       x → stackError @(Doc AnsiStyle) $ "FRecord: " <> pretty (show x)
-  --   stackLog $ "Checking that has field" <+> P.pTerm 0 name <+> "in" <+> P.pTerm 0 row
-  --       stackLog $ "Rest:" <+> P.pTerm 0 (uncurry (P.FieldsLit P.FRow) row')
   (P.Access record name, Infer) → P.T <$> scoped do
     row ← pushExVar $ Just $ P.T $ P.Row P.Ty
-    infer ctx record $ Check $ P.T $ P.Record row
+    stackScope "hi" $ infer ctx record $ Check $ P.T $ P.Record row
     lookupField True name ([], Just row) >>= \case
       LookupFound x _ → do
         selfLazy' ← fmap LazyTerm $ sendIO $ newIORef $ normalize ctx record
@@ -624,12 +623,11 @@ infer ctx = curry \case
     Nothing → stackError $ "Unknown var " <> P.pIdent x
     Just (_, ty) → pure ty
   (P.Quantification _ name kind ty, mode) → do
+    infer ctx kind $ Check P.Kind
     kind' ← normalize (HM.mapMaybe fst ctx) kind
-    tyT ← infer (HM.insert name (Nothing, P.T kind') ctx) ty mode
-    case (mode, tyT) of
-      (Infer, P.T x) → pure $ P.T x
-      (Check (P.T _), ()) → pure ()
-      _ → stackError @(Doc AnsiStyle) "todo term:type:kind"
+    -- TODO: investigate correctness. This allows things like:
+    -- `forall x. Type -> x` : Kind
+    infer (HM.insert name (Nothing, P.T kind') ctx) ty mode
   (P.U32, Infer) → pure $ P.T P.Ty
   (P.Tag, Infer) → pure $ P.T P.Ty
   (P.Row t, Infer) → do
@@ -657,7 +655,7 @@ infer ctx = curry \case
     Right (origN, (origS, Nothing)) → case mode of
       Infer → pure P.Kind
       Check ty2 → sendIO (writeIORef i $ Right (origN, (origS, Just ty2)))
-  (x, Infer) → stackError $ "infer todo: " <> P.pTerm 0 x
+  (P.UniVar _ _ t, Infer) → pure t
   (term, Check c) → stackScope ("check via infer :" <+> P.pTTerm c) do
     ty ← infer ctx term Infer
     subtype ty c
