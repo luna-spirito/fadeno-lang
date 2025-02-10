@@ -101,8 +101,10 @@ data TermT
   | Op !TermT !OpT !TermT
   | App !TermT !TermT
   | NatLit !Word32
-  | TagLit !ByteString
+  | TagLit !Ident
   | FieldsLit !Fields ![(TermT, TermT)] !(Maybe TermT)
+  | Access !TermT !TermT -- Access a field of a record.
+  -- Restricted to idents for better performance I guess?
   | Sorry !Ident !TermT
   | Var !Ident
   -- Type-level
@@ -156,41 +158,48 @@ infxl a oper = a >>= infxl'
 
 -- 6
 parsePrim ∷ Parser' TermT
-parsePrim = token $
-  (U32 <$ $(string "U32"))
-  <|> (Ty <$ $(string "Type"))
-  <|> (Tag <$ $(string "Tag"))
-  <|> (NatLit <$> number)
-  <|> (TagLit <$> ($(char '.') *> ident'))
-  <|> (do
-    token $ $(char '{')
-    let
-      parseField = do
-        n ← parsePrim
-        fields ← token $ ($(char '=') $> FRecord) <|> ($(char ':') $> FRow)
-        v ← parseTop
-        pure ((n, v), fields)
-      parseMany = do
-        (x, fields1) ← parseField
-        xs ← many do
-          token $(char '|')
-          (res, fields2) ← parseField
-          guard $ fields1 == fields2
-          pure res
-        pure (fields1, x:xs)
-      parseEmpty = do
-        fields ← token $ ($(char ':') $> FRow) <|> pure FRecord
-        pure (fields, [])
-    (fields, knownFields) ← parseMany <|> parseEmpty
-    rest ← optional do
-      token $ $(string "||")
-      parseMath0
-    token $(char '}')
-    pure $ FieldsLit fields knownFields rest)
-  <|> (Var <$> notFollowedBy ident (token $(char '=')))
-  <|> ($(char '(')
-      *> parseTop
-      <* $(char ')'))
+parsePrim = token do
+  -- Must not end with ` `, apparently`
+  prim ← (U32 <$ $(string "U32"))
+    <|> (Ty <$ $(string "Type"))
+    <|> (Tag <$ $(string "Tag"))
+    <|> (NatLit <$> number)
+    <|> (TagLit <$> ($(char '.') *> (Ident <$> ident')))
+    <|> (do
+      token $ $(char '{')
+      let
+        parseField = do
+          n ← parsePrim
+          fields ← token $ ($(char '=') $> FRecord) <|> ($(char ':') $> FRow)
+          v ← parseTop
+          pure ((n, v), fields)
+        parseMany = do
+          (x, fields1) ← parseField
+          xs ← many do
+            token $(char '|')
+            (res, fields2) ← parseField
+            guard $ fields1 == fields2
+            pure res
+          pure (fields1, x:xs)
+        parseEmpty = do
+          fields ← token $ ($(char ':') $> FRow) <|> pure FRecord
+          pure (fields, [])
+      (fields, knownFields) ← parseMany <|> parseEmpty
+      rest ← optional do
+        token $ $(string "||")
+        parseMath0
+      space *> $(char '}')
+      pure $ FieldsLit fields knownFields rest)
+    <|> (Var <$> notFollowedBy ident (token $(char '=')))
+    <|> ($(char '(')
+        *> parseTop
+        <* $(char ')'))
+  -- any number of accesses after the prim
+  accesses ← many $ $(char '.') *> (TagLit . Ident <$> ident')
+  pure $ foldl'
+    Access
+    prim
+    accesses
 
 -- 5
 -- Tokens???
@@ -347,8 +356,7 @@ isSimple =
       TagLit _ → ping
       FieldsLit _ x y →
         for_ x (\(a, b) → complexity a *> complexity b) *> for_ y complexity
-      Row x → ping *> complexity x
-      Record x → ping *> complexity x
+      Access a _ → ping *> complexity a
       Sorry _ _ → ping
       Var _ → ping
       Ty → ping
@@ -356,6 +364,8 @@ isSimple =
       Pi _ b c -> ping *> complexity b *> complexity c
       U32 → ping
       Tag → ping
+      Row x → ping *> complexity x
+      Record x → ping *> complexity x
       ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
         Left y → complexity y
         Right _ → ping
@@ -416,7 +426,7 @@ pTerm oldPrec =
     U32 -> (6, "U32")
     Tag → (6, "Tag")
     NatLit x → (6, pretty x)
-    TagLit x → (6, "." <> pretty (decodeUtf8Lenient x))
+    TagLit x → (6, "." <> pIdent x)
     record@(FieldsLit fields _ _) → (6,
       let
         (knownFields, rest) =
@@ -444,6 +454,9 @@ pTerm oldPrec =
           x:xs → " " <> field x <> " |" <> renderFields xs
       in "{" <> renderFields knownFields <> renderRest <> "}")
     Var x → (6, pIdent x)
+    Access a b → case b of
+      TagLit b' → (6, pTerm 6 a <> "." <> pIdent b')
+      _ → (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
     ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
       Left t → (oldPrec, pTerm oldPrec t) 
       Right (n, (i, t)) → (6, "(exi" <+> pIdent n <+> "of" <+> pretty i <> maybe mempty (\t' → " :" <+> pTTerm t') t <> ")")

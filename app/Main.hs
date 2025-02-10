@@ -265,12 +265,33 @@ instMeta = uncurry \scope1 →
             _ → r
       _ → r
 
-normalize :: Has (Lift IO) sig m ⇒ HashMap P.Ident P.TermT → P.TermT → m P.TermT
+class HasTerm m a where
+  extractTerm :: a → m (Maybe P.TermT)
+  mkFromTerm :: Proxy m → P.TermT → a
+
+data LazyTermT = LazyTerm !(IORef (SolveM P.TermT)) | LazyPure !P.TermT
+
+instance HasTerm SolveM LazyTermT where
+  extractTerm (LazyTerm var) = do
+    val ← join $ sendIO $ readIORef var
+    sendIO $ writeIORef var $ pure val
+    pure $ Just val
+  extractTerm (LazyPure x) = pure $ Just x
+  mkFromTerm _ = LazyPure
+
+instance Applicative m ⇒ HasTerm m P.TermT where
+  extractTerm t = pure $ Just t
+  mkFromTerm _ = id
+instance Applicative m ⇒ HasTerm m (Maybe P.TermT, P.TTermT) where
+  extractTerm t = pure $ fst t
+  mkFromTerm _ = (, P.Kind) . Just
+
+normalize :: forall m sig a. (HasTerm m a, Has (Lift IO) sig m) ⇒ HashMap P.Ident a → P.TermT → m P.TermT
 normalize binds = \case
   P.Let ((name, _, val) :| bs) into → do
     val' ← normalize binds val
     normalize
-      (HM.insert name val' binds)
+      (HM.insert name (mkFromTerm (Proxy @m) val') binds)
       case bs of
         [] → into
         (b1:b2) → P.Let (b1 :| b2) into
@@ -280,26 +301,42 @@ normalize binds = \case
     a' ← normalize binds a
     f' ← normalize binds f
     case f' of
-      P.Lam arg bod → normalize (HM.insert arg a' binds) bod
+      P.Lam arg bod → normalize (HM.insert arg (mkFromTerm (Proxy @m) a') binds) bod
       _ → pure $ P.App f' a'
   P.NatLit x → pure $ P.NatLit x
   P.TagLit x → pure $ P.TagLit x
-  P.FieldsLit fields known rest → do
+  -- TODO: for now, no checks that the tail is a valid one.
+  P.FieldsLit fields [] Nothing → pure $ P.FieldsLit fields [] Nothing
+  P.FieldsLit _ [] (Just rest) → normalize binds rest
+  P.FieldsLit fields ((name, val):xs) rest → do
+    name' ← normalize binds name
+    val' ← normalize binds val
+    binds' ← case fields of
+      P.FRecord → pure binds
+      P.FRow → do
+        let selfId = P.Ident "self"
+        oldSelf ← extractVar selfId
+        pure $ HM.insert selfId (mkFromTerm (Proxy @m) $ P.FieldsLit P.FRecord [(name, P.Access (P.Var selfId) name')] oldSelf) binds
+    -- TODO: add a new field, `(name, self.name)`?
+    xsrest' ← normalize
+      binds'
+      $ P.FieldsLit fields xs rest
+    pure $ case xsrest' of
+      P.FieldsLit fields2 xs' rest'
+        | fields == fields2 → P.FieldsLit fields ((name', val'):xs') rest'
+      _ → P.FieldsLit fields [(name', val')] $ Just xsrest'
+  P.Access rec name → do
+    name' ← normalize binds name
     let
-      normalizeF =
-        normalize case fields of
-          P.FRecord → binds
-          P.FRow → HM.delete (P.Ident "self") binds
-    known' ← for known \(name, val) → (,) <$> normalizeF name <*> normalizeF val
-    rest' ← for rest normalizeF
-    pure $ case rest' of
-      Just (P.FieldsLit fields2 known2 rest2)
-        | fields == fields2 → P.FieldsLit fields (known' <> known2) rest2
-      _ → P.FieldsLit fields known' rest'
+      search = \case
+        P.FieldsLit P.FRecord [] (Just rest) → search rest
+        P.FieldsLit P.FRecord ((name2, val):xs) rest
+          | name' == name2 → val
+          | otherwise → search $ P.FieldsLit P.FRecord xs rest
+        x → P.Access x name
+    search <$> normalize binds rec -- TODO: normalize expensive.
   P.Sorry n x → P.Sorry n <$> normalize binds x
-  P.Var x → pure $ case HM.lookup x binds of
-    Nothing → P.Var x
-    Just x' → x'
+  P.Var x → fromMaybe (P.Var x) <$> extractVar x
   P.Quantification q x a b → P.Quantification q x <$> normalize binds a <*> normalize (HM.delete x binds) b
   P.U32 → pure P.U32
   P.Tag → pure P.Tag
@@ -311,6 +348,8 @@ normalize binds = \case
     Left t → normalize binds t
     Right _ → pure old
   old@(P.UniVar {}) → pure old
+  where
+  extractVar var = maybe (pure Nothing) extractTerm $ HM.lookup var binds
 
 -- | Intensional equality.
 data EqRes
@@ -322,6 +361,7 @@ data LookupRes
   = LookupFound !(P.TermT) !([(P.TermT, P.TermT)], Maybe P.TermT)
   | LookupMissing
   | LookupUnknown
+  deriving Show
 
 -- Lookups in FRow. **FRow**.
 lookupField :: Bool → P.TermT → ([(P.TermT, P.TermT)], Maybe P.TermT) → SolveM LookupRes
@@ -335,7 +375,7 @@ lookupField refine needle = \case
         rest' ← P.ExVar <$> pushExVarInto mScope (Just $ P.T $ P.Row P.Ty)
         val' ← P.ExVar <$> pushExVarInto mScope Nothing
         writeMeta (mScope, mT) (P.ExVar' var) $ P.FieldsLit P.FRow [(needle, val')] $ Just rest'
-        pure $ LookupFound val' ([], Nothing)
+        pure $ LookupFound val' ([], Just rest')
       else pure LookupMissing
   ([], Just (P.FieldsLit P.FRow vals rest)) → lookupField refine needle (vals, rest)
   ([], Just x) → stackError $ "lookupField todo " <> P.pTerm 0 x
@@ -426,14 +466,14 @@ isEq = curry \case
   (P.Pi {}, _) → pure EqNot
   (P.Ty, P.Ty) → pure EqYes
   (P.Ty, _) → pure EqNot
-  (P.FieldsLit _ _ _, _) → stackError @(Doc AnsiStyle) "isEq Row todo"
+  (P.FieldsLit _ _ _, _) → stackError @(Doc AnsiStyle) "isEq Fields todo"
+  (P.Access _ _, _) → stackError @(Doc AnsiStyle) "isEq Access todo" -- Equate all fields that are Unknown eq to tag.
   -- TODO: FRow???
   -- It's tempting to equate types via subtyping, but I'm afraid that's an error.
   where
   tryEq a b cont = isEq a b >>= \case
     EqYes → cont
     _ → pure EqUnknown
-  
 
 data InferMode a where
   Infer :: InferMode P.TTermT
@@ -451,15 +491,14 @@ infer ctx = curry \case
   --   yT' ← normalize (HM.singleton xName x') yT
   --   infer ctx term $ Check $ P.T yT'
   (P.Let ((name, tyM, val) :| bs) into, mode) → do
-    let normCtx = HM.mapMaybe fst ctx
     ty ← stackScope ("let" <+> P.pIdent name) case tyM of
       Nothing → infer ctx val Infer
       Just ty → do
         -- TODO: check ty' to be a type?
-        ty' ← P.T <$> normalize normCtx ty
+        ty' ← P.T <$> normalize ctx ty
         infer ctx val $ Check ty'
         pure ty'
-    val' ← normalize normCtx val
+    val' ← normalize ctx val
     let
       withBs' act = case bs of
         [] → stackScope "in" (act into)
@@ -525,13 +564,8 @@ infer ctx = curry \case
       extSelf field = HM.adjust
         (\case
           (Nothing, P.T (P.Record (P.FieldsLit P.FRow existing r))) →
-            (Nothing, P.T $ P.Record $ P.FieldsLit P.FRow (existing <> [field]) r) -- TODO: RevList? Seq?
+            (Nothing, P.T $ P.Record $ P.FieldsLit P.FRow (field:existing) r) -- TODO: RevList? Seq?
           _ → error "impossible")
-        (P.Ident "self")
-      introduceSelf = HM.alter
-        (Just . (Nothing,) . \case
-          Just (_, old@(P.T (P.Record (P.FieldsLit P.FRow _ _)))) → old -- TODO: erases the values.
-          _ → P.T $ P.Record $ P.FieldsLit P.FRow [] Nothing)
         (P.Ident "self")
     ctx' ← foldM
       (\ctx' (name, val) → do
@@ -540,11 +574,11 @@ infer ctx = curry \case
         name' ← normalize (HM.mapMaybe fst ctx') name
         val' ← normalize (HM.mapMaybe fst ctx') val
         pure $ extSelf (name', val') ctx')
-      (introduceSelf  ctx)
+      ctx
       known
     for_ rest \rest' → infer ctx' rest' $ Check $ P.T $ P.Row ty
   (P.FieldsLit P.FRow known rest, Infer) → P.T <$> scoped do
-    ty ← pushExVar $ Just P.Kind
+    ty ← pushExVar Nothing
     infer ctx (P.FieldsLit P.FRow known rest) $ Check $ P.T $ P.Row ty
     pure $ P.Row ty
   (P.FieldsLit P.FRecord knownVal rest, Infer) → do
@@ -556,11 +590,9 @@ infer ctx = curry \case
         P.T ty' → pure (name, ty')
     rest' ← for rest \rest' → scoped do
       row ← pushExVar $ Just $ P.T $ P.Row P.Ty
-      stackLog $ "Checking: " <> P.pTerm 0 rest' <> " is of Record"
       infer ctx rest' $ Check $ P.T $ P.Record row
       pure row
     pure $ P.T $ P.Record $ P.FieldsLit P.FRow knownTy rest'
-  -- ugh, Check fails on any kind of indirection. Handle inner Quantifiers and ExVars...
   (P.FieldsLit P.FRecord [] (Just origRestVal), Check (P.T (P.Record origRow))) →
     infer ctx origRestVal $ Check $ P.T $ P.Record origRow
   (P.FieldsLit P.FRecord ((name, val):fields) rest, Check (P.T (P.Record row))) → do
@@ -571,28 +603,22 @@ infer ctx = curry \case
         val' ← normalize (HM.mapMaybe fst ctx) val
         row'' ← normalize (HM.insert (P.Ident "self") (P.FieldsLit P.FRecord [(name', val')] Nothing) $ HM.mapMaybe fst ctx) $ uncurry (P.FieldsLit P.FRow) row'
         infer ctx (P.FieldsLit P.FRecord fields rest) $ Check $ P.T $ P.Record row''
-      _ → stackError @(Doc AnsiStyle) "todo lookup unknown error"
-
-    
-    -- -- TODO: lookupField should normalize field names... dammit.
-    -- let
-    --   checkFields self fieldsVal = \case
-    --     P.FieldsLit P.FRow ((name, ty):fieldsTys) restTys → do
-    --       name' ← normalize (HM.mapMaybe fst ctx) name
-    --       lookupField True name' fieldsVal >>= \case
-    --         LookupFound val fieldsVal' → do
-    --           ty' ← normalize
-    --             (HM.alter (Just . \case
-    --               Just (P.FieldsLit P.FRecord fields rest) → P.FieldsLit P.FRecord (fields <> self) rest
-    --               _ → P.FieldsLit P.FRecord self Nothing)
-    --             (P.Ident "self") $ HM.mapMaybe fst ctx) undefined
-    --           infer ctx val $ Check $ P.T ty
-    --           val' ← normalize (HM.mapMaybe fst ctx) val
-    --           checkFields (self <> [(name', val')]) fieldsVal' $ P.FieldsLit P.FRow fieldsTys restTys
-    --         _ → undefined
-    --     _ → undefined
-    -- in checkFields [] (origKnownVal, origRestVal) origRow
-  -- TODO: Check for FRecord
+      x → stackError @(Doc AnsiStyle) $ "FRecord: " <> pretty (show x)
+  --   stackLog $ "Checking that has field" <+> P.pTerm 0 name <+> "in" <+> P.pTerm 0 row
+  --       stackLog $ "Rest:" <+> P.pTerm 0 (uncurry (P.FieldsLit P.FRow) row')
+  (P.Access record name, Infer) → P.T <$> scoped do
+    row ← pushExVar $ Just $ P.T $ P.Row P.Ty
+    infer ctx record $ Check $ P.T $ P.Record row
+    lookupField True name ([], Just row) >>= \case
+      LookupFound x _ → do
+        selfLazy' ← fmap LazyTerm $ sendIO $ newIORef $ normalize ctx record
+        -- TODO: This replaces `self` with the entire record.
+        -- It doesn't filter out only the accessible fields.
+        -- It's quite easy to filter by updating the lookupField, but do we need it really?
+        -- As I understand it, the inference should fail first.
+        x' ← normalize (HM.singleton (P.Ident "self") selfLazy') x
+        pure x'
+      _ → stackError @(Doc AnsiStyle) "Access unknown lookup"
   (P.Sorry _ x, Infer) → P.T <$> normalize (HM.mapMaybe fst ctx) x -- TODO: dedup
   (P.Var x, Infer) → case HM.lookup x ctx of
     Nothing → stackError $ "Unknown var " <> P.pIdent x
@@ -654,11 +680,11 @@ subtype = \a b →
       x' ← pushUniVar $ P.T xTy
       aT' ← normalize (HM.singleton xName x') aT
       subtype (P.T aT') (P.T bT)
-    (P.T (P.Quantification P.Forall xName xTy aT), P.T bT) → scoped_ do -- TODO: not just Ty
+    (P.T (P.Quantification P.Forall xName xTy aT), P.T bT) → scoped_ do
       x' ← pushExVar $ Just $ P.T xTy
       aT' ← normalize (HM.singleton xName x') aT
       subtype (P.T aT') (P.T bT)
-    (P.T aT, P.T (P.Quantification P.Exists xName xTy bT)) → scoped_ do -- TODO: not just Ty
+    (P.T aT, P.T (P.Quantification P.Exists xName xTy bT)) → scoped_ do
       x' ← pushExVar $ Just $ P.T xTy -- TODO: deduplicate the whole scoped_/scoped pattern
       bT' ← normalize (HM.singleton xName x') bT
       subtype (P.T aT) (P.T bT')
@@ -673,9 +699,21 @@ subtype = \a b →
       d' ← maybe pure (\cName → normalize $ HM.singleton cName e) cNameM d
       subtype (P.T b') (P.T d')
     (P.T (P.App f1 a1), P.T (P.App f2 a2)) → do
+      -- TODO: not sure
       subtype (P.T f1) (P.T f2)
       subtype (P.T a2) (P.T a1)
-    (P.T (P.FieldsLit P.FRow [] _), P.T (P.FieldsLit P.FRow [] Nothing)) → pure ()
+    (P.T (P.FieldsLit P.FRow _ _), P.T (P.FieldsLit P.FRow [] Nothing)) → pure ()
+    (P.T (P.FieldsLit P.FRow [] (Just a)), b) → subtype (P.T a) b -- TODO: What if a is not FieldsLit
+    (P.T (P.FieldsLit P.FRow fields rest), P.T (P.FieldsLit P.FRow ((nameReq, valReq):fieldsReq) restReq)) → do
+      lookupField True nameReq (fields, rest) >>= \case
+        LookupFound val (fields', rest') → do
+          subtype (P.T val) (P.T valReq)
+          e ← pushUniVar $ P.T val
+          let mkRest f r = normalize (HM.singleton (P.Ident "self") $ P.FieldsLit P.FRecord [(nameReq, e)] Nothing) $ P.FieldsLit P.FRow f r
+          aT ← mkRest fields' rest'
+          bT ← mkRest fieldsReq restReq
+          subtype (P.T aT) (P.T bT)
+        _ → stackError @(Doc AnsiStyle) "<: lookup unknown todo"
     (P.T P.U32, P.T P.U32) → pure ()
     (P.T P.Ty, P.T P.Ty) → pure ()
     (P.T P.Tag, P.T P.Tag) → pure ()
@@ -703,7 +741,7 @@ checkFile file = do
   term ← P.parseFile file
   (stacks, res) ← runSolveM (infer [] term Infer)
   P.render case res of
-    Left e → 
+    Left e →
       annotate (color Red) "error: " <> e -- no newline since it is created by pStacks
       <> pStacks stacks
     Right r → P.pTTerm r
