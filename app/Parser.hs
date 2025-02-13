@@ -62,13 +62,16 @@ operator =
 
 -- TODO: block words from ident' as well?.. probably not.
 -- TODO: Convert blocklists to functions
+identSym :: Parser' Char
+identSym = satisfy \x → not $ x `elem` ("\\ \n=(){}[].:|" :: String)
+
 ident' :: Parser' ByteString
-ident' = byteStringOf (skipSome $ satisfy \x → not $ x `elem` ("\\ \n=(){}[].:|/" :: String))
+ident' = byteStringOf (skipSome identSym)
 
 ident ∷ Parser' Ident
 ident = token do
   result ← ident'
-  guard $ not $ result `elem` ["in", "+", "-", "/", "*", "U32", "->", "forall", "Tag", "Type", "Row", "Record"]
+  guard $ not $ result `elem` ["in", "+", "-", "/", "*", "->", "forall", "unpack", "fadeno"]
   pure $ Ident result
 
 {-
@@ -93,6 +96,19 @@ To the above constructs, Cedille adds the following, discussed more below:
 data Quantifier = Forall | Exists deriving (Show, Eq)
 data Fields = FRow | FRecord deriving (Show, Eq)
 
+data BuiltinT
+  = U32
+  | Tag
+  | Row
+  | Record
+  | Type -- Type+ 0, Type+ 1, ..., Type+ Aleph
+  -- | Universe
+  -- | AlephLit
+  deriving (Show, Eq)
+
+-- TODO: Unpack
+
+-- term : Type/ 0 (= Type) : Type/ 1 : ... : Module
 data TermT
   -- Term-level
   = Let !(NonEmpty (Ident, Maybe TermT, TermT)) !TermT
@@ -110,29 +126,40 @@ data TermT
   -- Type-level
   | Quantification !Quantifier !Ident !TermT !TermT
   -- ^ Cedille: forall X : 𝒌 | T / Fadeno: forall X : 𝒌. T
-  | U32
-  | Tag
-  | Row !TermT -- classifies FieldsLit FRow.
-  | Record !TermT -- classifies FieldsLit FRecord.
+  -- | U32
+  -- | Tag
+  -- | Row !TermT -- classifies FieldsLit FRow.
+  -- | Record !TermT -- classifies FieldsLit FRecord.
   | Pi !(Maybe Ident) !TermT !TermT
   -- ^ Cedille: Π x : T | T’ / Fadeno: x : T -> T'
-  | Ty -- ★
-  -- Actually belongs in TTermT
+  -- | Ty !TermT
+  -- | Module -- Classifies all types, temporary name
+  | Builtin !BuiltinT
+  | BuiltinsVar
   | ExVar !ExVar'
-  | UniVar !Ident !Int !TTermT
+  | UniVar !Ident !Int !TermT
   deriving (Show, Eq)
 
+builtinsVar :: TermT
+builtinsVar = FieldsLit FRecord
+  [ field "U32" $ Builtin U32
+  , field "Tag" $ Builtin Tag
+  , field "Row" $ Builtin Row
+  , field "Record" $ Builtin Record
+  , field "Type+" $ Builtin Type 
+  -- , field "Universe" $ Builtin Universe
+  -- , field "AlephLit" $ Builtin AlephLit
+  ]
+  Nothing
+  where field n v = (TagLit $ Ident n, v)
+
 -- Ident is just for debugging here.
-newtype ExVar' = ExVar' (IORef (Either TermT (Ident, (Int, Maybe TTermT)))) deriving Eq
+newtype ExVar' = ExVar' (IORef (Either TermT (Ident, (Int, TermT)))) deriving Eq
 
 instance Show ExVar' where
   show (ExVar' x) = case unsafePerformIO $ readIORef x of
     Left t → show t
     Right n → show n
-
--- | "Type of" TermT
-data TTermT = T TermT | Kind deriving (Eq, Show) -- Actually should be merged with TermT definition, but Haskell.
-
 
 infxr ∷ Parser' a → Parser' (a → a → a) → Parser' a
 infxr a oper = do
@@ -159,11 +186,8 @@ infxl a oper = a >>= infxl'
 -- 6
 parsePrim ∷ Parser' TermT
 parsePrim = token do
-  -- Must not end with ` `, apparently`
-  prim ← (U32 <$ $(string "U32"))
-    <|> (Ty <$ $(string "Type"))
-    <|> (Tag <$ $(string "Tag"))
-    <|> (NatLit <$> number)
+  prim ←
+    (NatLit <$> number)
     <|> (TagLit <$> ($(char '.') *> (Ident <$> ident')))
     <|> (do
       token $ $(char '{')
@@ -190,6 +214,7 @@ parsePrim = token do
         parseMath0
       space *> $(char '}')
       pure $ FieldsLit fields knownFields rest)
+    <|> (BuiltinsVar <$ (notFollowedBy $(string "fadeno") identSym))
     <|> (Var <$> notFollowedBy ident (token $(char '=')))
     <|> ($(char '(')
         *> parseTop
@@ -205,12 +230,6 @@ parsePrim = token do
 -- Tokens???
 parseApp ∷ Parser' TermT
 parseApp = infxl parsePrim (pure App)
-  <|> (do -- needs a new level?
-    token $ $(string "Row")
-    Row <$> parsePrim)
-  <|> (do
-    token $ $(string "Record")
-    Record <$> parsePrim)
 
 -- 4
 parseTy :: Parser' TermT
@@ -222,7 +241,7 @@ parseTy =
       kind = do
         token $(char ':') 
         parseTy
-      manyEntry = ((,Ty) <$> ident)
+      manyEntry = ((, App (Builtin Type) $ NatLit 0) <$> ident)
         <|> ($(char '(') *> ((,) <$> ident <*> kind) <* $(char ')'))
     binds ←
       (some manyEntry <* token $(char '.'))
@@ -358,19 +377,18 @@ isSimple =
       Access a _ → ping *> complexity a
       Sorry _ _ → ping
       Var _ → ping
-      Ty → ping
       Quantification _ _ b c -> ping *> complexity b *> complexity c
       Pi _ b c -> ping *> complexity b *> complexity c
-      U32 → ping
-      Tag → ping
-      Row x → ping *> complexity x
-      Record x → ping *> complexity x
+      Builtin _ → ping
+      BuiltinsVar → ping
       ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
         Left y → complexity y
         Right _ → ping
       UniVar _ _ _ → ping 
    in
     runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
+
+
 
 -- TODO: Concise syntax for `\` and `forall`
 pTerm ∷ Int → TermT → Doc AnsiStyle
@@ -410,7 +428,7 @@ pTerm oldPrec =
     Quantification q name kind ty -> (4,
       let
         kind' = case kind of
-          Ty → mempty
+          App (Builtin Type) (NatLit 0) → mempty
           _ → " :" <+> pTerm 4 kind
         q' = case q of
           Forall → "forall"
@@ -418,12 +436,14 @@ pTerm oldPrec =
       in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm 4 ty)
     Sorry x _ → (6, "sorry/" <> pIdent x) -- 6 and not 4 since type is not rendered
     Pi inName inTy outTy -> (4, maybe mempty (\x -> pIdent x <+> ": ") inName <> pTerm 5 inTy <+> "->" <+> pTerm 4 outTy)
+    -- Ty x -> (4, "Type/" <+> pTerm 6 x)
     App lam arg → (5, pTerm 5 lam <+> pTerm 6 arg)
-    Row x → (5, "Row" <+> pTerm 6 x)
-    Record x → (5, "Record" <+> pTerm 6 x)
-    Ty -> (6, "Type")
-    U32 -> (6, "U32")
-    Tag → (6, "Tag")
+    -- Row x → (5, "Row" <+> pTerm 6 x)
+    -- Record x → (5, "Record" <+> pTerm 6 x)
+    -- U32 -> (6, "U32")
+    -- Tag → (6, "Tag")
+    Builtin x → (6, "fadeno." <> pretty (show x)) -- TODO: use record parser
+    BuiltinsVar → (6,"fadeno")
     NatLit x → (6, pretty x)
     TagLit x → (6, "." <> pIdent x)
     record@(FieldsLit fields _ _) → (6,
@@ -458,12 +478,8 @@ pTerm oldPrec =
       _ → (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
     ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
       Left t → (oldPrec, pTerm oldPrec t) 
-      Right (n, (i, t)) → (6, "(exi" <+> pIdent n <+> "of" <+> pretty i <> maybe mempty (\t' → " :" <+> pTTerm t') t <> ")")
-    UniVar x y t → (6, "(uni" <+> pIdent x <+> "of" <+> pretty y <+> ":" <+> pTTerm t <> ")")
-
-pTTerm :: TTermT → Doc AnsiStyle
-pTTerm Kind = "Kind"
-pTTerm (T ty) = pTerm 0 ty
+      Right (n, (i, t)) → (6, "(exi" <+> pIdent n <+> "of" <+> pretty i <+> ":" <+> pTerm 0 t <> ")")
+    UniVar x y t → (6, "(uni" <+> pIdent x <+> "of" <+> pretty y <+> ":" <+> pTerm 0 t <> ")")
 
 parse ∷ ByteString → Either Text TermT
 parse inp = case runParser (parseTop <* eof) inp of

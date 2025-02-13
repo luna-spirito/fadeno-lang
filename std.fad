@@ -1,3 +1,1 @@
-/: forall (a : Row Type) b. { .x : U32 || .z : b || a } -> b
-test = \x. x.z
-in test
+fadeno
