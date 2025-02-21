@@ -276,7 +276,7 @@ parseTy =
       let kind = do
             token $(char ':')
             parseTy
-          manyEntry =
+          manyEntry = token $
             ((,App (Builtin Type) $ NatLit 0) <$> ident)
               <|> ($(char '(') *> ((,) <$> ident <*> kind) <* $(char ')'))
       binds <-

@@ -1,1 +1,15 @@
-fadeno.Type+
+Type+ = fadeno.Type+
+U32 = fadeno.U32
+
+Kind = Type+ 1
+
+/: Kind
+Type = Type+ 0
+
+/: forall (u : U32) (a : Type+ 0). a -> a
+id = \x. x
+
+/: forall (u : U32) (AT : Type+ u). A : AT -> A -> forall res. (B : AT -> B -> res) -> res
+stupid-dependent-tuple = \a b f. f a b
+
+in 3

@@ -1,9 +1,10 @@
-$ P.NatLit {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE MultiWayIf #-}
 
 module Main where
 
@@ -21,7 +22,7 @@ import Control.Effect.Empty qualified as E
 import Control.Effect.Error (Error, Throw, throwError)
 import Control.Effect.Fresh (Fresh, fresh)
 import Control.Effect.Lift (Lift, sendIO, sendM)
-import Control.Effect.Reader (ask, local)
+import Control.Effect.Reader (ask, local, Reader)
 import Control.Effect.Writer (Writer, censor, listen, tell)
 import Data.Bits (unsafeShiftL, unsafeShiftR, (.&.), (.|.))
 import Data.ByteString.Builder (toLazyByteString)
@@ -34,7 +35,7 @@ import GHC.Exts (IsList (..))
 import Parser qualified as P
 import Prettyprinter (Doc, annotate, line, nest, pretty, (<+>), indent)
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
-import RIO hiding (ask, link, local, runReader, toList)
+import RIO hiding (ask, link, local, runReader, toList, Reader)
 import RIO.HashMap qualified as HM
 import RIO.Partial qualified as P
 import RIO.Seq (Seq (..))
@@ -154,7 +155,8 @@ stackLog = send . StackLog
 stackScope :: (Has StackLog sig m) => Doc AnsiStyle -> m a -> m a
 stackScope name act = send $ StackScope name act
 
-stackError :: forall e sig m a. (Has (StackLog :+: Throw e) sig m) => e -> m a
+-- Monomorphised to Doc AnsiStyle.
+stackError :: forall sig m a. (Has (StackLog :+: Throw (Doc AnsiStyle)) sig m) => Doc AnsiStyle -> m a
 stackError e = do
   stackLog "<panic!!!11>"
   throwError e
@@ -201,16 +203,52 @@ type CtxT = HashMap P.Ident (Maybe P.TermT, P.TermT)
 data SEntry = SScope | SExVar
 
 -- | For meta-variables
-type Solve = State (IntMap [P.ExVar']) :+: Fresh :+: Error (Doc AnsiStyle) :+: StackLog :+: Lift IO
+type Solve = State (IntMap (RevList P.ExVar')) :+: Fresh :+: Error (Doc AnsiStyle) :+: StackLog :+: Lift IO
 
 freshIdent :: (Has Solve sig m) => m P.Ident
 freshIdent = P.UIdent <$> fresh
 
-scoped :: (Has Solve sig m) => m P.TermT -> m P.TermT
-scoped act = do
-  modify @(IntMap [P.ExVar']) \scopes -> IM.insert (IM.size scopes) [] scopes
-  ty <- act
-  exs <- state @(IntMap [P.ExVar']) \scopes ->
+pushExVar :: (Has (Writer (RevList P.ExVar') :+: Reader Int :+: Solve) sig m) => Maybe P.TermT -> m P.TermT
+pushExVar t = do
+  scope ← ask
+  name ← freshIdent
+  metaVar' ← fmap P.ExVar' $ sendIO $ newIORef $ Right (name, (scope, t))
+  tell @(RevList _) [metaVar']
+  pure $ P.ExVar metaVar'
+  
+pushUniVar :: (Has (Reader Int :+: Solve) sig m) => P.TermT -> m P.TermT
+pushUniVar ty = do
+  -- Pushed ephemerally.
+  scope ← ask
+  ident <- freshIdent
+  pure $ P.UniVar ident scope ty
+
+-- I hate this.
+revInsertBefore :: forall a. RevList a -> (a -> Bool) -> RevList a -> RevList a
+revInsertBefore ins f = go where
+  go = \case
+    UnsafeRevList [] → []
+    UnsafeRevList (x:xs)
+      | f x → [x] <> ins <> (UnsafeRevList xs)
+      | otherwise →
+        let (UnsafeRevList xs') = go $ UnsafeRevList xs
+        in UnsafeRevList $ x:xs'
+
+-- Probably access to Solve should be restricted in ExVarPushC...
+type ExVarPushC m = ReaderC Int (WriterC (RevList P.ExVar') m)
+beforeEx :: Has Solve sig m ⇒ Int → P.ExVar' → (ExVarPushC m (m a)) -> m a
+beforeEx scope ex act = do
+  (inserted, resM) ← runWriter (curry pure) $ runReader scope act
+  modify $ IM.adjust (revInsertBefore inserted (== ex)) scope
+  resM
+
+scoped' :: (Has Solve sig m) => ((P.TermT -> P.TermT) -> a -> a) -> ExVarPushC m (m a) -> m a
+scoped' tmap act = do
+  scope ← IM.size @(RevList P.ExVar') <$> get
+  (origExs, tyM) <- runWriter (curry pure) $ runReader scope act
+  modify $ IM.insert scope origExs
+  ty ← tyM
+  UnsafeRevList exs ← state @(IntMap (RevList P.ExVar')) \scopes ->
     (IM.deleteMax scopes, snd $ fromMaybe (error "Internal error: Scope disappeared") $ IM.lookupMax scopes)
   foldM
     ( \ty' (P.ExVar' x) ->
@@ -221,34 +259,17 @@ scoped act = do
             let variable' = P.Ident $ BS.pack $ "/" <> show variable
             sendIO $ writeIORef x $ Left $ P.Var variable'
             -- TODO: extract name for new variable from the existential.
-            let ofT t = P.Quantification P.Forall variable' t ty'
+            let ofT t = P.Quantification P.Forall variable' t `tmap` ty'
             case xTyM of
               Just xTy -> pure $ ofT xTy
               Nothing -> do
                 n <- freshIdent
-                pure $ P.Quantification P.Forall n (P.Builtin P.U32) $ ofT (P.typOf $ P.Var n)
+                pure $ P.Quantification P.Forall n (P.Builtin P.U32) `tmap` ofT (P.typOf $ P.Var n)
     )
     ty
     exs
 
--- Assumes that all existentias are resolved if they are ever used.
-scoped_ :: (Has Solve sig m) => m a -> m a
-scoped_ act = do
-  modify @(IntMap [P.ExVar']) \scopes -> IM.insert (IM.size scopes) [] scopes
-  res <- act
-  modify @(IntMap [P.ExVar']) IM.deleteMax
-  pure res
-
-delMeta :: (Has Solve sig m) => Int -> P.ExVar' -> m ()
-delMeta scope var = do
-  modify @(IntMap [P.ExVar']) \scopes ->
-    IM.adjust (filter (/= var)) scope scopes
-
-insMeta :: (Has Solve sig m) => Int -> P.ExVar' -> m ()
-insMeta scope var = do
-  modify @(IntMap [P.ExVar']) \scopes ->
-    IM.adjust (var :) scope scopes
-
+{-
 pushExVarInto :: (Has Solve sig m) => Int -> Maybe P.TermT -> m P.ExVar'
 pushExVarInto scope t = do
   name <- freshIdent
@@ -259,14 +280,38 @@ pushExVarInto scope t = do
 pushExVar :: (Has Solve sig m) => Maybe P.TermT -> m P.TermT
 pushExVar t = do
   scope <- (\x -> x - 1) . IM.size <$> get @(IntMap [P.ExVar'])
-  P.ExVar <$> pushExVarInto scope t
+  pushExVarInto scope t
 
-pushUniVar :: (Has Solve sig m) => P.TermT -> m P.TermT
-pushUniVar ty = do
-  -- Pushed ephemerally.
-  scope <- (\x -> x - 1) . IM.size <$> get @(IntMap [P.ExVar'])
-  ident <- freshIdent
-  pure $ P.UniVar ident scope ty
+scoped :: (Has Solve sig m) => m P.TermT -> m P.TermT
+scoped = scoped' id
+-- scoped act = do
+
+
+
+insMeta :: (Has Solve sig m) => Int -> P.ExVar' -> m ()
+insMeta scope var = do
+  modify @(IntMap [P.ExVar']) \scopes ->
+    IM.adjust (var :) scope scopes
+
+-}
+-- Assumes that all existentias are resolved if they are ever used.
+scoped_ :: (Has Solve sig m) => ExVarPushC m (m a) -> m a
+scoped_ act = do
+  -- Bad copy-pasta
+  scope ← IM.size @(RevList P.ExVar') <$> get
+  (origExs, tyM) ← runWriter (curry pure) $ runReader scope act
+  modify $ IM.insert scope origExs
+  ty ← tyM
+  modify $ IM.deleteMax @(RevList P.ExVar')
+  pure ty
+
+scoped :: (Has Solve sig m) => ExVarPushC m (m P.TermT) -> m P.TermT
+scoped = scoped' id
+
+markSolved :: (Has Solve sig m) => Int -> P.ExVar' -> m ()
+markSolved scope var = do
+  modify @(IntMap (RevList P.ExVar')) \scopes ->
+    IM.adjust (\(UnsafeRevList l) → UnsafeRevList $ filter (/= var) l) scope scopes
 
 -- Writes & checks
 writeMeta :: Has Solve sig m => (Int, Maybe P.TermT) -> P.ExVar' -> P.TermT -> m ()
@@ -274,26 +319,41 @@ writeMeta (scope, tyM) (P.ExVar' var) val = do
   for_ tyM $ infer [] val . Check
   -- stackLog $ "?" <> P.pTerm 0 (P.ExVar $ P.ExVar' var) <+> "=" <+> P.pTerm 0 val
   sendIO $ writeIORef var $ Left val
-  delMeta scope (P.ExVar' var)
+  markSolved scope (P.ExVar' var)
 
--- typAleph :: P.TermT
--- typAleph = typOf $ P.Builtin P.AlephLit
-
+-- TODO: So, return the proper ordering, but just use 
 instMeta :: forall sig m. (Has Solve sig m) => (Int, Maybe P.TermT) -> P.ExVar' -> P.TermT -> m ()
-instMeta = (\f a b c -> stackScope "instMeta" $ f a b c) $ uncurry \scope1 ->
+instMeta = (\f a b c -> stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1 ->
   let instMeta' :: P.TermT -> m P.TermT
       instMeta' = \case
         P.Sorry _ x -> instMeta' x
         P.ExVar (P.ExVar' var2) ->
           sendIO (readIORef var2) >>= \case
             Left t -> instMeta' t
-            Right (_, (scope2, t2)) ->
-              if scope2 <= scope1
-                then pure $ P.ExVar (P.ExVar' var2)
-                else do
-                  var1 <- P.ExVar <$> pushExVarInto scope1 t2
-                  writeMeta (scope2, t2) (P.ExVar' var2) var1
-                  pure var1
+            Right (_, (scope2, t2)) → do
+              -- Either var1 or origVar2 is introduced earlier. We need to identify, which one.
+              var2Earlier ← if
+                | scope2 < scope1 → pure True
+                | scope2 > scope1 → pure False
+                | otherwise → do
+                  -- Well, that's bad, like really bad.
+                  let
+                    go = \case
+                      (x:xs)
+                        | x == origVar1 → True -- In RevList, the later one is found first.
+                        | x == P.ExVar' var2 → False
+                        | otherwise → go xs
+                      _ → error "Imposible"
+                  UnsafeRevList exs ← P.fromJust . IM.lookup scope1 <$> get
+                  pure $ go exs
+              if var2Earlier
+                then pure $ P.ExVar $ P.ExVar' var2
+                else
+                  beforeEx scope1 origVar1 do
+                    var1R ← pushExVar t2
+                    pure do
+                      writeMeta (scope2, t2) (P.ExVar' var2) var1R
+                      pure var1R
         uni@(P.UniVar _ scope2 _)
           | scope2 <= scope1 -> pure uni
         P.App f a -> P.App <$> instMeta' f <*> instMeta' a
@@ -310,15 +370,15 @@ instMeta = (\f a b c -> stackScope "instMeta" $ f a b c) $ uncurry \scope1 ->
         P.Pi inNameM inT outT -> P.Pi inNameM <$> instMeta' inT <*> instMeta' outT
         -- P.Ty → pure P.Ty
         x -> stackError $ "instMeta (of" <+> pretty scope1 <> ")" <+> P.pTerm 0 x
-   in \t1 (P.ExVar' var1) val ->
-        let r = writeMeta (scope1, t1) (P.ExVar' var1) =<< instMeta' val
+   in \val ->
+        let r = writeMeta (scope1, t1) origVar1 =<< instMeta' val
          in case val of
               P.ExVar (P.ExVar' var2) ->
-                if var1 == var2
+                if origVar1 == P.ExVar' var2
                   then pure ()
                   else
                     sendIO (readIORef var2) >>= \case
-                      Left val' -> instMeta (scope1, t1) (P.ExVar' var1) val'
+                      Left val' -> instMeta (scope1, t1) origVar1 val'
                       _ -> r
               _ -> r
 
@@ -354,7 +414,14 @@ normalize binds = \case
         [] -> into
         (b1 : b2) -> P.Let (b1 :| b2) into
   P.Lam arg bod -> P.Lam arg <$> normalize binds bod
-  P.Op a op b -> error "todo"
+  P.Op aT op bT -> do
+    aT' ← normalize binds aT
+    bT' ← normalize binds bT
+    case (aT', bT') of
+      (P.NatLit a, P.NatLit b) → pure $ P.NatLit $ case op of
+        P.Add → a + b
+        _ → error $ show $ "TODO:" <+> pretty a <+> P.pOp op <+> pretty b
+      _ → pure $ P.Op aT' op bT'
   P.App f a -> do
     a' <- normalize binds a
     f' <- normalize binds f
@@ -392,7 +459,7 @@ normalize binds = \case
             | name' == name2 -> val
             | otherwise -> search $ P.FieldsLit P.FRecord xs rest
           x -> P.Access x name
-    search <$> normalize binds rec -- TODO: normalize expensive.
+    search <$> normalize binds rec -- TODO: normalize is expensive.
   P.Sorry n x -> P.Sorry n <$> normalize binds x
   P.Var x -> fromMaybe (P.Var x) <$> extractVar x
   P.Quantification q x a b -> P.Quantification q x <$> normalize binds a <*> normalize (HM.delete x binds) b
@@ -408,6 +475,21 @@ normalize binds = \case
   where
     extractVar var = maybe (pure Nothing) extractTerm $ HM.lookup var binds
 
+withMono :: (Has Solve sig m) => ((P.TermT -> P.TermT) -> a -> a) -> P.TermT -> (P.ExVar' → (Int, Maybe P.TermT) -> m a) -> (P.TermT -> m a) -> m a
+withMono tmap = \a onMeta onOther -> withMono' onMeta onOther a  where
+  withMono' onMeta onOther = \case
+    P.Sorry _ v -> withMono' onMeta onOther v
+    P.ExVar (P.ExVar' var) -> sendIO (readIORef var) >>= \case
+      Left v -> withMono' onMeta onOther v
+      Right (_, v) -> onMeta (P.ExVar' var) v
+    P.Quantification P.Forall name kind v -> scoped' tmap do
+      ty <- pushExVar $ Just kind
+      pure $ withMono' onMeta onOther =<< normalize (HM.singleton name ty) v
+    P.Quantification P.Exists name kind v -> scoped' tmap do
+      ty <- pushUniVar kind
+      pure $ withMono' onMeta onOther =<< normalize (HM.singleton name ty) v
+    r -> onOther r
+
 -- | Intensional equality.
 data EqRes
   = EqYes -- provably eq
@@ -420,35 +502,39 @@ data LookupRes
   | LookupUnknown
   deriving (Show)
 
+tmapLookupRes :: (P.TermT -> P.TermT) -> LookupRes -> LookupRes
+tmapLookupRes f = \case
+  LookupFound a b -> LookupFound (f a) b
+  x -> x
+
 -- Lookups in FRow. **FRow**.
-lookupField :: (Has Solve sig m) => Bool -> P.TermT -> ([(P.TermT, P.TermT)], Maybe P.TermT) -> m LookupRes
-lookupField refine needle = \case
-  ([], Nothing) -> pure LookupMissing
-  -- TODO: refactor this whole sendIO (readIORef var) thing.
-  ([], Just (P.ExVar (P.ExVar' var))) ->
-    sendIO (readIORef var) >>= \case
-      Left rest' -> lookupField refine needle ([], Just rest')
-      Right (_, (mScope, Just (P.App (P.Builtin P.Row) mT))) ->
-        if refine -- TODO: ExVar not handled.
-          then do
-            rest' <- P.ExVar <$> pushExVarInto mScope (Just $ P.rowOf mT)
-            val' <- P.ExVar <$> pushExVarInto mScope (Just mT)
-            writeMeta (mScope, Just $ P.rowOf mT) (P.ExVar' var) $ P.FieldsLit P.FRow [(needle, val')] $ Just rest'
-            pure $ LookupFound val' ([], Just rest')
-          else pure LookupMissing
-      Right _ -> notARow $ P.ExVar $ P.ExVar' var
-  ([], Just (P.FieldsLit P.FRow vals rest)) -> lookupField refine needle (vals, rest)
-  ([], Just x) -> stackError $ "lookupField todo " <> P.pTerm 0 x
-  ((name, val) : xs, rest) ->
-    isEq needle name >>= \case
-      EqYes -> pure $ LookupFound val (xs, rest)
-      EqUnknown -> pure LookupUnknown
-      EqNot ->
-        lookupField refine needle (xs, rest) <&> \case
-          LookupFound res (withoutF, withoutRest) -> LookupFound res ((name, val) : withoutF, withoutRest)
-          o -> o
-  where
-    notARow x = stackError @(Doc AnsiStyle) $ "Not a row:" <+> P.pTerm 0 x
+-- The type is too restrictive about requiring a continuation.
+withLookupField :: (Has Solve sig m) => (LookupRes -> m a) -> ((P.TermT -> P.TermT) -> a -> a) -> Bool -> P.TermT -> ([(P.TermT, P.TermT)], Maybe P.TermT) -> m a
+withLookupField cont f refine needle = rec [] where
+  notARow x = stackError $ "Not a row:" <+> P.pTerm 0 x
+  rec prev = \case
+    ([], Nothing) → cont LookupMissing
+    ([], Just next) -> withMono f next
+      (\var → if refine
+        then \case
+          (mScope, Just (P.App (P.Builtin P.Row) mT)) →
+            beforeEx mScope var do
+              rest' <- pushExVar (Just $ P.rowOf mT)
+              val' <- pushExVar  (Just mT)
+              writeMeta (mScope, Just $ P.rowOf mT) var $ P.FieldsLit P.FRow [(needle, val')] $ Just rest'
+              pure $ cont $ LookupFound val' (toList prev, Just rest')
+          _ → notARow $ P.ExVar var
+        else const $ cont LookupMissing
+      )
+      \case
+        P.FieldsLit P.FRow vals rest → rec prev (vals, rest)
+        x → stackError $ "lookupField todo " <> P.pTerm 0 x
+    ((name, val) : xs, rest) -> isEq needle name >>= \case
+      EqYes -> cont $ LookupFound val (toList prev <> xs, rest)
+      EqUnknown → cont LookupUnknown
+      EqNot → rec (prev `revSnoc` (name, val)) (xs, rest)
+
+      
 
 -- | Checks if two normalized terms are intensionally equivalent.
 -- TODO: η-conversion
@@ -463,8 +549,8 @@ isEq = curry \case
   (P.UniVar {}, _) -> pure EqUnknown
   (_, P.UniVar {}) -> pure EqUnknown
   -- TODO: ExVar? I don't know!
-  (P.ExVar {}, _) -> stackError @(Doc AnsiStyle) "isEq ExVar"
-  (_, P.ExVar {}) -> stackError @(Doc AnsiStyle) "isEq ExVar"
+  (P.ExVar {}, _) -> stackError "isEq ExVar"
+  (_, P.ExVar {}) -> stackError "isEq ExVar"
   (P.App f1 a1, P.App f2 a2) -> tryEq f1 f2 $ tryEq a1 a2 $ pure EqYes
   (P.App {}, _) -> pure EqUnknown
   (_, P.App {}) -> pure EqUnknown
@@ -478,9 +564,10 @@ isEq = curry \case
   -- Literals
   (P.Lam arg1 bod1, P.Lam arg2 bod2) -> scoped_ do
     arg <- pushUniVar undefined -- "Kind" actually doesn't matter.
-    bod1' <- normalize (HM.singleton arg1 arg) bod1
-    bod2' <- normalize (HM.singleton arg2 arg) bod2
-    isEq bod1' bod2'
+    pure do
+      bod1' <- normalize (HM.singleton arg1 arg) bod1
+      bod2' <- normalize (HM.singleton arg2 arg) bod2
+      isEq bod1' bod2'
   (P.Lam _ _, _) -> pure EqNot
   (P.NatLit a, P.NatLit b)
     | a == b -> pure EqYes
@@ -508,9 +595,10 @@ isEq = curry \case
         isEq k1 k2 >>= \case
           EqYes -> scoped_ do
             arg <- pushUniVar undefined
-            t1' <- normalize (HM.singleton n1 arg) t1
-            t2' <- normalize (HM.singleton n2 arg) t2
-            isEq t1' t2'
+            pure do
+              t1' <- normalize (HM.singleton n1 arg) t1
+              t2' <- normalize (HM.singleton n2 arg) t2
+              isEq t1' t2'
           x -> pure x
   (P.Quantification {}, _) -> pure EqNot
   (P.Builtin a, P.Builtin b)
@@ -533,15 +621,16 @@ isEq = curry \case
     isEq inT1 inT2 >>= \case
       EqYes -> scoped_ do
         arg <- pushUniVar undefined
-        outT1' <- maybe pure (\name -> normalize $ HM.singleton name arg) inNameM1 outT1
-        outT2' <- maybe pure (\name -> normalize $ HM.singleton name arg) inNameM2 outT2
-        isEq outT1' outT2'
+        pure do
+          outT1' <- maybe pure (\name -> normalize $ HM.singleton name arg) inNameM1 outT1
+          outT2' <- maybe pure (\name -> normalize $ HM.singleton name arg) inNameM2 outT2
+          isEq outT1' outT2'
       x -> pure x
   (P.Pi {}, _) -> pure EqNot
   -- (P.Ty, P.Ty) → pure EqYes
   -- (P.Ty, _) → pure EqNot
-  (P.FieldsLit _ _ _, _) -> stackError @(Doc AnsiStyle) "isEq Fields todo"
-  (P.Access _ _, _) -> stackError @(Doc AnsiStyle) "isEq Access todo" -- Equate all fields that are Unknown eq to tag.
+  (P.FieldsLit _ _ _, _) -> stackError "isEq Fields todo"
+  (P.Access _ _, _) -> stackError "isEq Access todo" -- Equate all fields that are Unknown eq to tag.
   where
     -- TODO: FRow???
     -- It's tempting to equate types via subtyping, but I'm afraid that's an error.
@@ -561,8 +650,9 @@ infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode)
     infer' = curry \case
       (term, Check (P.Quantification P.Forall xName xTy yT)) -> scoped_ do
         x' <- pushUniVar xTy
-        yT' <- normalize (HM.singleton xName x') yT
-        infer ctx term $ Check $ yT'
+        pure do
+          yT' <- normalize (HM.singleton xName x') yT
+          infer ctx term $ Check $ yT'
       -- TODO: breaks.
       -- (term, Check ((P.Quantification P.Exists xName P.Ty yT))) → scoped_ do -- TODO: not just for Ty!
       --   x' ← pushExVar
@@ -589,59 +679,53 @@ infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode)
             mode
       (P.Lam arg bod, Infer) ->
         scoped do
-          inT <- pushExVar . Just . P.typOf =<< pushExVar (Just $ P.Builtin P.U32)
-          outT <- infer (HM.insert arg (Nothing, inT) ctx) bod Infer
-          pure $ P.Pi Nothing inT outT
+          u ← pushExVar $ Just $ P.Builtin P.U32
+          inT <- pushExVar $ Just $ P.typOf u
+          pure do
+            outT <- infer (HM.insert arg (Nothing, inT) ctx) bod Infer
+            pure $ P.Pi Nothing inT outT
       (P.Lam arg bod, Check (P.Pi inNameM inT outT)) -> do
         inT' <- normalize (HM.mapMaybe fst ctx) inT
         let inferBod val outT' = infer (HM.insert arg (val, inT') ctx) bod $ Check outT'
         case inNameM of
           Nothing -> inferBod Nothing outT
           Just inName -> scoped_ do
-            arg' <- pushUniVar $ inT'
-            outT' <- normalize (HM.singleton inName arg') outT
-            inferBod (Just arg') outT'
+            arg' <- pushUniVar inT'
+            pure do
+              outT' <- normalize (HM.singleton inName arg') outT
+              inferBod (Just arg') outT'
       (P.Op a _op b, Infer) -> do
         infer ctx a $ Check $ P.Builtin P.U32
         infer ctx b $ Check $ P.Builtin P.U32
         pure $ P.Builtin P.U32
       (P.App f a, Infer) -> do
-        let inferApp = \case
-              (P.Pi inNameM inT outT) -> do
-                infer ctx a $ Check $ inT
-                case inNameM of
-                  Nothing -> pure outT
-                  Just inName -> do
-                    a' <-
-                      normalize
-                        (HM.mapMaybe fst ctx)
-                        a
+        fTy ← infer ctx f Infer
+        withMono id fTy
+          (\var (mScope, mT) →
+            -- I'm not satisfied by this solution, but instMeta solution is
+            -- even more verbose since it accepts full TermT as input.
+            beforeEx mScope var do
+            i <- pushExVar $ Just $ P.Builtin P.U32
+            inT <- pushExVar $ Just $ P.typOf i
+            outT <- pushExVar $ Just $ P.typOf i
+            pure do
+              writeMeta (mScope, mT) var (P.Pi Nothing inT outT)
+              infer ctx a $ Check $ inT
+              pure outT)
+          \case
+            P.Pi inNameM inT outT -> do
+              infer ctx a $ Check $ inT
+              case inNameM of
+                Nothing -> pure outT
+                Just inName -> do
+                  a' <-
                     normalize
-                      (HM.singleton inName a')
-                      outT
-              (P.ExVar (P.ExVar' var)) ->
-                sendIO (readIORef var) >>= \case
-                  Left t -> inferApp $ t
-                  Right (_, (mScope, mT)) -> do
-                    -- I'm not satisfied by this solution, but instMeta solution is
-                    -- even more verbose since it accepts full TermT as input.
-                    i <- P.ExVar <$> pushExVarInto mScope (Just $ P.Builtin P.U32)
-                    inT <- P.ExVar <$> pushExVarInto mScope (Just $ P.typOf i)
-                    outT <- P.ExVar <$> pushExVarInto mScope (Just $ P.typOf i)
-                    writeMeta (mScope, mT) (P.ExVar' var) (P.Pi Nothing inT outT)
-                    infer ctx a $ Check $ inT
-                    pure outT
-              (P.Quantification P.Forall xName xTy bod) -> scoped do
-                -- not just Ty!
-                x <- pushExVar $ Just xTy
-                bod' <- normalize (HM.singleton xName x) bod
-                inferApp $ bod'
-              (P.Quantification P.Exists xName xTy bod) -> scoped do
-                x <- pushUniVar xTy
-                bod' <- normalize (HM.singleton xName x) bod
-                inferApp $ bod'
-              t -> stackError $ "inferApp " <> P.pTerm 0 t
-        inferApp =<< infer ctx f Infer
+                      (HM.mapMaybe fst ctx)
+                      a
+                  normalize
+                    (HM.singleton inName a')
+                    outT
+            t -> stackError $ "inferApp " <> P.pTerm 0 t
       (P.NatLit _, Infer) -> pure $ P.Builtin P.U32
       (P.TagLit _, Infer) -> pure $ P.Builtin P.Tag
       (P.FieldsLit P.FRow known rest, Check (P.App (P.Builtin P.Row) ty)) -> do
@@ -667,8 +751,9 @@ infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode)
         for_ rest \rest' -> infer ctx' rest' $ Check $ P.rowOf ty
       (P.FieldsLit P.FRow known rest, Infer) -> scoped do
         t <- pushExVar Nothing
-        infer ctx (P.FieldsLit P.FRow known rest) $ Check $ P.rowOf t
-        pure $ P.rowOf t
+        pure do
+          infer ctx (P.FieldsLit P.FRow known rest) $ Check $ P.rowOf t
+          pure $ P.rowOf t
       -- (P.FieldsLit P.FRecord knownVal rest, Infer) → do
       --   knownTy ← for knownVal \(name, val) → do
       --     infer ctx name $ Check $ P.Builtin P.Tag
@@ -685,71 +770,97 @@ infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode)
           Nothing -> subtype (P.FieldsLit P.FRow [] Nothing) row
       (P.FieldsLit P.FRecord ((name, val) : fields) rest, Check (P.App (P.Builtin P.Record) row)) -> do
         name' <- normalize ctx name
-        lookupField True name ([], Just row) >>= \case
-          LookupFound ty row' -> do
-            traceShowM $ P.pTerm 0 val
-            traceShowM $ P.pTerm 0 ty
-            infer ctx val $ Check $ ty
-            val' <- normalize ctx val
-            row'' <-
-              normalize
-                (HM.insert (P.Ident "self") (mkFromTerm (Proxy @m) $ P.FieldsLit P.FRecord [(name', val')] Nothing) ctx)
-                $ uncurry (P.FieldsLit P.FRow) row'
-            infer ctx (P.FieldsLit P.FRecord fields rest) $ Check $ P.recordOf row''
-          x -> stackError @(Doc AnsiStyle) $ "FRecord: " <> pretty (show x)
+        withLookupField
+          (\case
+            LookupFound ty row' -> do
+              traceShowM $ P.pTerm 0 val
+              traceShowM $ P.pTerm 0 ty
+              infer ctx val $ Check $ ty
+              val' <- normalize ctx val
+              row'' <-
+                normalize
+                  (HM.insert (P.Ident "self") (mkFromTerm (Proxy @m) $ P.FieldsLit P.FRecord [(name', val')] Nothing) ctx)
+                  $ uncurry (P.FieldsLit P.FRow) row'
+              infer ctx (P.FieldsLit P.FRecord fields rest) $ Check $ P.recordOf row''
+            x -> stackError $ "FRecord: " <> pretty (show x))
+          (\_ x → x)
+          True
+          name
+          ([], Just row)
       (P.FieldsLit P.FRecord knownVal rest, Infer) -> scoped do
         u <- pushExVar Nothing
         row <- pushExVar $ Just $ P.rowOf u
-        stackScope ("bla bla" <> P.pTerm 0 (P.recordOf row))
-          $ infer ctx (P.FieldsLit P.FRecord knownVal rest)
-          $ Check
-          $ P.recordOf
-            row
-        pure
-          $ P.recordOf row
-      (P.Access record name, Infer) -> scoped do
-        ty <- pushExVar Nothing
-        row <- pushExVar $ Just $ P.rowOf ty
-        infer ctx record $ Check $ P.recordOf row
-        lookupField True name ([], Just row) >>= \case
-          LookupFound x _ -> do
-            selfLazy' <- fmap LazyTerm $ sendIO $ newIORef $ normalize @_ @m ctx record
-            -- TODO: This replaces `self` with the entire record.
-            -- It doesn't filter out only the accessible fields.
-            -- It's quite easy to filter by updating the lookupField, but do we need it really?
-            -- As I understand it, the inference should fail first.
-            x' <- normalize (HM.singleton (P.Ident "self") selfLazy') x
-            pure x'
-          _ -> stackError @(Doc AnsiStyle) "Access unknown lookup"
+        pure do
+          stackScope ("bla bla" <> P.pTerm 0 (P.recordOf row))
+            $ infer ctx (P.FieldsLit P.FRecord knownVal rest)
+            $ Check
+            $ P.recordOf
+              row
+          pure
+            $ P.recordOf row
+      (P.Access record name, Infer) -> do
+        recordTy ← infer ctx record Infer
+        let
+          body row =
+            withLookupField
+              (\case
+                LookupFound x _ -> do
+                  selfLazy' <- fmap LazyTerm $ sendIO $ newIORef $ normalize @_ @m ctx record
+                  -- TODO: This replaces `self` with the entire record.
+                  -- It doesn't filter out only the accessible fields.
+                  -- It's quite easy to filter by updating the lookupField, but do we need it really?
+                  -- As I understand it, the inference should fail first.
+                  x' <- normalize (HM.singleton (P.Ident "self") selfLazy') x
+                  pure x'
+                _ → stackError "Field not found")
+              id
+              True name ([], Just row)
+        withMono id recordTy
+          (\var → \case
+            (mScope, mT) → beforeEx mScope var do
+              u ← pushExVar $ Just $ P.Builtin P.U32
+              row ← pushExVar $ Just $ P.rowOf $ P.typOf u
+              pure do
+                writeMeta (mScope, mT) var $ P.recordOf row
+                body row)
+          \case
+            P.App (P.Builtin P.Record) row → body row
+            _ → stackError "Not a record"
+        --scoped do
+        -- ty <- pushExVar Nothing
+        -- row <- pushExVar $ Just $ P.rowOf ty
+        -- infer ctx record $ Check $ P.recordOf row
+        -- lookupField True name ([], Just row) >>= \case
+        --   LookupFound x _ -> do
+        --     selfLazy' <- fmap LazyTerm $ sendIO $ newIORef $ normalize @_ @m ctx record
+        --     -- TODO: This replaces `self` with the entire record.
+        --     -- It doesn't filter out only the accessible fields.
+        --     -- It's quite easy to filter by updating the lookupField, but do we need it really?
+        --     -- As I understand it, the inference should fail first.
+        --     x' <- normalize (HM.singleton (P.Ident "self") selfLazy') x
+        --     pure x'
+        --   _ -> stackError "Access unknown lookup"
       (P.Sorry _ x, Infer) -> normalize (HM.mapMaybe fst ctx) x -- TODO: dedup
       (P.Var x, Infer) -> case HM.lookup x ctx of
         Nothing -> stackError $ "Unknown var " <> P.pIdent x
         Just (_, ty) -> pure ty
       (P.Quantification _ name kind ty, mode) -> scoped_ do
         u <- pushExVar $ Just $ P.Builtin P.U32
-        infer ctx kind $ Check $ P.typOf u
-        kind' <- normalize (HM.mapMaybe fst ctx) kind
-        -- TODO: investigate correctness. This allows things like:
-        -- `forall x. Type -> x` : Kind
-        infer (HM.insert name (Nothing, kind') ctx) ty mode
-      -- (P.U32, Infer) → pure $ P.Ty
-      -- (P.Tag, Infer) → pure $ P.Ty
-      -- (P.Row t, Infer) → do
-      --   infer ctx t $ Check P.Kind
-      --   pure P.Kind
-      -- (P.Record t, Infer) → do
-      --   infer ctx t $ Check $ P.Row P.Ty
-      --   pure $ P.Kind
+        pure do
+          infer ctx kind $ Check $ P.typOf u
+          kind' <- normalize (HM.mapMaybe fst ctx) kind
+          -- TODO: investigate correctness. This allows things like:
+          -- `forall x. Type -> x` : Kind
+          infer (HM.insert name (Nothing, kind') ctx) ty mode
       (P.Pi inNameM x y, Check (P.App (P.Builtin P.Type) u)) -> do
         infer ctx x $ Check $ P.typOf u
         infer (maybe id (`HM.insert` (Nothing, x)) inNameM ctx) y $ Check $ P.typOf u
       (P.Pi inNameM x y, Infer) -> scoped do
         u <- pushExVar $ Just $ P.Builtin P.U32
-        infer ctx (P.Pi inNameM x y) $ Check $ P.typOf u
-        pure $ P.typOf u
+        pure do
+          infer ctx (P.Pi inNameM x y) $ Check $ P.typOf u
+          pure $ P.typOf u
       (P.Builtin x, Infer) -> pure $ P.typOfBuiltin x
-      -- P.Universe → typ
-      -- P.AlephLit → P.Builtin P.Universe--stackError @(Doc AnsiStyle) "Aleph is untypeble"
       (P.BuiltinsVar, Infer) -> pure $ P.App (P.Builtin P.Record) $ P.FieldsLit P.FRow (fmap snd <$> P.builtinsVar) Nothing -- infer ctx P.builtinsVar Infer -- TODO: redo.
       (P.ExVar (P.ExVar' i), mode) ->
         sendIO (readIORef i) >>= \case
@@ -757,7 +868,7 @@ infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode)
           Right (_, (_, Just ty)) -> case mode of
             Infer -> pure ty
             Check ty2 -> subtype ty ty2
-          Right (_, (_, Nothing)) -> stackError @(Doc AnsiStyle) "Cannot infer value of existential metavariable"
+          Right (_, (_, Nothing)) -> stackError "Cannot infer value of existential metavariable"
       (P.UniVar _ _ t, Infer) -> pure t
       (term, Check c) -> stackScope ("check via infer" <+> P.pTerm 0 term <+> ":" <+> P.pTerm 0 c) do
         ty <- infer ctx term Infer
@@ -774,20 +885,24 @@ subtype = \a b ->
     subtype' = \case
       (aT, (P.Quantification P.Forall xName xTy bT)) -> scoped_ do
         x' <- pushUniVar xTy
-        bT' <- normalize (HM.singleton xName x') bT
-        subtype (aT) (bT')
+        pure do
+          bT' <- normalize (HM.singleton xName x') bT
+          subtype (aT) (bT')
       ((P.Quantification P.Exists xName xTy aT), bT) -> scoped_ do
         x' <- pushUniVar xTy
-        aT' <- normalize (HM.singleton xName x') aT
-        subtype (aT') (bT)
+        pure do
+          aT' <- normalize (HM.singleton xName x') aT
+          subtype (aT') (bT)
       ((P.Quantification P.Forall xName xTy aT), bT) -> scoped_ do
         x' <- pushExVar $ Just xTy
-        aT' <- normalize (HM.singleton xName x') aT
-        subtype (aT') (bT)
+        pure do
+          aT' <- normalize (HM.singleton xName x') aT
+          subtype (aT') (bT)
       (aT, (P.Quantification P.Exists xName xTy bT)) -> scoped_ do
         x' <- pushExVar $ Just xTy
-        bT' <- normalize (HM.singleton xName x') bT
-        subtype (aT) (bT')
+        pure do
+          bT' <- normalize (HM.singleton xName x') bT
+          subtype (aT) (bT')
       ((P.ExVar a), bT) -> subtypeMeta a bT
       (aT, (P.ExVar b)) -> subtypeMeta b aT
       ((P.UniVar a _ _), (P.UniVar b _ _))
@@ -795,9 +910,10 @@ subtype = \a b ->
       ((P.Pi aNameM a b), (P.Pi cNameM c d)) -> scoped_ do
         subtype (c) (a)
         e <- pushUniVar $ c
-        b' <- maybe pure (\aName -> normalize $ HM.singleton aName e) aNameM b
-        d' <- maybe pure (\cName -> normalize $ HM.singleton cName e) cNameM d
-        subtype (b') (d')
+        pure do
+          b' <- maybe pure (\aName -> normalize $ HM.singleton aName e) aNameM b
+          d' <- maybe pure (\cName -> normalize $ HM.singleton cName e) cNameM d
+          subtype (b') (d')
       -- ((P.App f1 a1), (P.App f2 a2)) → do
       --   -- TODO: not sure
       --   subtype (f1) (f2)
@@ -807,15 +923,20 @@ subtype = \a b ->
       ((P.FieldsLit P.FRow _ _), (P.FieldsLit P.FRow [] Nothing)) -> pure ()
       ((P.FieldsLit P.FRow [] (Just a)), b) -> subtype (a) b -- TODO: What if a is not FieldsLit
       ((P.FieldsLit P.FRow fields rest), (P.FieldsLit P.FRow ((nameReq, valReq) : fieldsReq) restReq)) -> do
-        lookupField True nameReq (fields, rest) >>= \case
-          LookupFound val (fields', rest') -> do
-            subtype (val) (valReq)
-            e <- pushUniVar $ val
-            let mkRest f r = normalize (HM.singleton (P.Ident "self") $ P.FieldsLit P.FRecord [(nameReq, e)] Nothing) $ P.FieldsLit P.FRow f r
-            aT <- mkRest fields' rest'
-            bT <- mkRest fieldsReq restReq
-            subtype (aT) (bT)
-          _ -> stackError @(Doc AnsiStyle) "<: lookup unknown todo"
+        withLookupField
+          (\case
+            LookupFound val (fields', rest') -> do
+              subtype val valReq
+              scoped_ do
+                e <- pushUniVar val
+                pure do
+                  let mkRest f r = normalize (HM.singleton (P.Ident "self") $ P.FieldsLit P.FRecord [(nameReq, e)] Nothing) $ P.FieldsLit P.FRow f r
+                  aT <- mkRest fields' rest'
+                  bT <- mkRest fieldsReq restReq
+                  subtype aT bT
+            _ -> stackError "<: lookup unknown todo")
+          (\_ x → x)
+          True nameReq (fields, rest)
       (P.Builtin a, P.Builtin b)
         | a == b -> pure ()
       (P.App (P.Builtin P.Type) a, P.App (P.Builtin P.Type) b) -> do
@@ -823,10 +944,10 @@ subtype = \a b ->
         b' <- unwrapExs b
         case (a', b') of
           (P.NatLit x, P.NatLit y)
-            | x < y -> pure ()
+            | x <= y -> pure ()
           (P.ExVar a'', _) -> subtypeMeta a'' b
           (_, P.ExVar b'') -> subtypeMeta b'' a
-          _ -> stackError $ "Cannot check that universe" <+> P.pTerm 0 a <+> "<" <+> P.pTerm 0 b
+          _ -> stackError $ "Cannot check that universe" <+> P.pTerm 0 a <+> "<=" <+> P.pTerm 0 b
       (P.App (P.Builtin P.Record) aT, P.App (P.Builtin P.Record) bT) -> subtype aT bT
       (P.App (P.Builtin P.Row) aT, P.App (P.Builtin P.Row) bT) -> subtype aT bT
       -- ((P.Row aT), (P.Row bT)) → subtype (aT) (bT)
@@ -849,7 +970,7 @@ subtype = \a b ->
         Left _ -> error "Impossible"
         Right (_, scope) -> instMeta scope (P.ExVar' a) bT
 
-runSolveM :: Applicative m => StateC (IntMap [P.ExVar']) (FreshC (ErrorC (Doc AnsiStyle) m)) a -> m (Either (Doc AnsiStyle) a)
+runSolveM :: Applicative m => StateC (IntMap (RevList P.ExVar')) (FreshC (ErrorC (Doc AnsiStyle) m)) a -> m (Either (Doc AnsiStyle) a)
 runSolveM =
   runError (pure . Left) (pure . Right)
     . evalFresh 0
