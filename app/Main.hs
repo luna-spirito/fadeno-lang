@@ -161,6 +161,7 @@ stackError e = do
   stackLog "<panic!!!11>"
   throwError e
 
+-- TODO: Fix the newlines
 pStacks :: [StackEntry] -> Doc AnsiStyle
 pStacks = \case
   [] -> mempty
@@ -361,6 +362,7 @@ instMeta = (\f a b c -> stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1 
           P.FieldsLit P.FRow
             <$> for known (\(a, b) -> (a,) <$> instMeta' b)
             <*> for rest instMeta'
+        P.Var x → pure $ P.Var x -- TODO: I hope this is correct, but needs to be rechecked.
         P.Builtin x -> pure $ P.Builtin x
         P.NatLit x -> pure $ P.NatLit x
         -- P.U32 → pure P.U32
@@ -369,6 +371,10 @@ instMeta = (\f a b c -> stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1 
         -- P.Record x → P.Record <$> instMeta' x
         P.Pi inNameM inT outT -> P.Pi inNameM <$> instMeta' inT <*> instMeta' outT
         -- P.Ty → pure P.Ty
+        P.Op a op b → do
+          a' ← instMeta' a
+          b' ← instMeta' b
+          pure $ P.Op a' op b'
         x -> stackError $ "instMeta (of" <+> pretty scope1 <> ")" <+> P.pTerm 0 x
    in \val ->
         let r = writeMeta (scope1, t1) origVar1 =<< instMeta' val
@@ -404,6 +410,11 @@ instance (Applicative m) => HasTerm m (Maybe P.TermT, P.TermT) where
   extractTerm t = pure $ fst t
   mkFromTerm _ = (,undefined) . Just
 
+-- TODO: RecordGet as second class? Sounds inevitable.
+-- Well, to be honest, it initially was Access.
+-- So, remake RecordGet as second-class fadeno/record-get...
+
+-- TODO: Something needs to be done to handle ExVar
 normalize :: forall a m sig. (HasTerm m a, Has (Lift IO) sig m) => HashMap P.Ident a -> P.TermT -> m P.TermT
 normalize binds = \case
   P.Let ((name, _, val) :| bs) into -> do
@@ -422,6 +433,15 @@ normalize binds = \case
         P.Add → a + b
         _ → error $ show $ "TODO:" <+> pretty a <+> P.pOp op <+> pretty b
       _ → pure $ P.Op aT' op bT'
+  -- P.App (P.App (P.Builtin P.RecordGet) name) rec → do
+  --   name' <- normalize binds name
+  --   let search = \case
+  --         P.FieldsLit P.FRecord [] (Just rest) -> search rest
+  --         P.FieldsLit P.FRecord ((name2, val) : xs) rest
+  --           | name' == name2 -> val
+  --           | otherwise -> search $ P.FieldsLit P.FRecord xs rest
+  --         x -> P.recordGet name x
+  --   search <$> normalize binds rec -- TODO: normalize is expensive.
   P.App f a -> do
     a' <- normalize binds a
     f' <- normalize binds f
@@ -441,7 +461,7 @@ normalize binds = \case
       P.FRow -> do
         let selfId = P.Ident "self"
         oldSelf <- extractVar selfId
-        pure $ HM.insert selfId (mkFromTerm (Proxy @m) $ P.FieldsLit P.FRecord [(name, P.Access (P.Var selfId) name')] oldSelf) binds
+        pure $ HM.insert selfId (mkFromTerm (Proxy @m) $ P.FieldsLit P.FRecord [(name, P.recordGet name' (P.Var selfId))] oldSelf) binds
     -- TODO: add a new field, `(name, self.name)`?
     xsrest' <-
       normalize
@@ -451,15 +471,6 @@ normalize binds = \case
       P.FieldsLit fields2 xs' rest'
         | fields == fields2 -> P.FieldsLit fields ((name', val') : xs') rest'
       _ -> P.FieldsLit fields [(name', val')] $ Just xsrest'
-  P.Access rec name -> do
-    name' <- normalize binds name
-    let search = \case
-          P.FieldsLit P.FRecord [] (Just rest) -> search rest
-          P.FieldsLit P.FRecord ((name2, val) : xs) rest
-            | name' == name2 -> val
-            | otherwise -> search $ P.FieldsLit P.FRecord xs rest
-          x -> P.Access x name
-    search <$> normalize binds rec -- TODO: normalize is expensive.
   P.Sorry n x -> P.Sorry n <$> normalize binds x
   P.Var x -> fromMaybe (P.Var x) <$> extractVar x
   P.Quantification q x a b -> P.Quantification q x <$> normalize binds a <*> normalize (HM.delete x binds) b
@@ -630,7 +641,7 @@ isEq = curry \case
   -- (P.Ty, P.Ty) → pure EqYes
   -- (P.Ty, _) → pure EqNot
   (P.FieldsLit _ _ _, _) -> stackError "isEq Fields todo"
-  (P.Access _ _, _) -> stackError "isEq Access todo" -- Equate all fields that are Unknown eq to tag.
+  -- (P.Access _ _, _) -> stackError "isEq Access todo" -- Equate all fields that are Unknown eq to tag.
   where
     -- TODO: FRow???
     -- It's tempting to equate types via subtyping, but I'm afraid that's an error.
@@ -645,8 +656,9 @@ data InferMode a where
   Check :: P.TermT -> InferMode ()
 
 infer :: forall sig m a. (Has Solve sig m) => CtxT -> P.TermT -> InferMode a -> m a
-infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode)
-  where
+infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode) where
+    -- Here, we will convert Checks to Infers.
+    -- However, converting Infer to a Check when checking a term is hereby declared a deadly sin.
     infer' = curry \case
       (term, Check (P.Quantification P.Forall xName xTy yT)) -> scoped_ do
         x' <- pushUniVar xTy
@@ -680,12 +692,12 @@ infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode)
       (P.Lam arg bod, Infer) ->
         scoped do
           u ← pushExVar $ Just $ P.Builtin P.U32
-          inT <- pushExVar $ Just $ P.typOf u
+          inT ← pushExVar $ Just $ P.typOf u
           pure do
-            outT <- infer (HM.insert arg (Nothing, inT) ctx) bod Infer
+            outT ← infer (HM.insert arg (Nothing, inT) ctx) bod Infer
             pure $ P.Pi Nothing inT outT
       (P.Lam arg bod, Check (P.Pi inNameM inT outT)) -> do
-        inT' <- normalize (HM.mapMaybe fst ctx) inT
+        inT' ← normalize (HM.mapMaybe fst ctx) inT
         let inferBod val outT' = infer (HM.insert arg (val, inT') ctx) bod $ Check outT'
         case inNameM of
           Nothing -> inferBod Nothing outT
@@ -695,23 +707,24 @@ infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode)
               outT' <- normalize (HM.singleton inName arg') outT
               inferBod (Just arg') outT'
       (P.Op a _op b, Infer) -> do
+        -- Deadly sin. Should be fixed.
         infer ctx a $ Check $ P.Builtin P.U32
         infer ctx b $ Check $ P.Builtin P.U32
         pure $ P.Builtin P.U32
-      (P.App f a, Infer) -> do
+      (P.App f a, Infer) → do
         fTy ← infer ctx f Infer
         withMono id fTy
           (\var (mScope, mT) →
             -- I'm not satisfied by this solution, but instMeta solution is
             -- even more verbose since it accepts full TermT as input.
             beforeEx mScope var do
-            i <- pushExVar $ Just $ P.Builtin P.U32
-            inT <- pushExVar $ Just $ P.typOf i
-            outT <- pushExVar $ Just $ P.typOf i
-            pure do
-              writeMeta (mScope, mT) var (P.Pi Nothing inT outT)
-              infer ctx a $ Check $ inT
-              pure outT)
+              i <- pushExVar $ Just $ P.Builtin P.U32
+              inT <- pushExVar $ Just $ P.typOf i
+              outT <- pushExVar $ Just $ P.typOf i
+              pure do
+                writeMeta (mScope, mT) var (P.Pi Nothing inT outT)
+                infer ctx a $ Check $ inT
+                pure outT)
           \case
             P.Pi inNameM inT outT -> do
               infer ctx a $ Check $ inT
@@ -728,6 +741,25 @@ infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode)
             t -> stackError $ "inferApp " <> P.pTerm 0 t
       (P.NatLit _, Infer) -> pure $ P.Builtin P.U32
       (P.TagLit _, Infer) -> pure $ P.Builtin P.Tag
+      (P.FieldsLit P.FRecord knownVal rest, Infer) → do
+        knownTy ← for knownVal \(name, val) → do
+          infer ctx name $ Check $ P.Builtin P.Tag
+          ty ← infer ctx val Infer
+          pure (name, ty)
+        rest' ← for rest \rest' → do
+          restT ← infer ctx rest' Infer
+          withMono id restT
+            (\var (mScope, mT) →
+              beforeEx mScope var do
+                u ← pushExVar $ Just $ P.Builtin P.U32
+                row ← pushExVar $ Just $ P.rowOf $ P.typOf u
+                pure do
+                  writeMeta (mScope, mT) var $ P.recordOf row
+                  pure row)
+            \case
+              P.App (P.Builtin P.Record) row → pure row
+              t → stackError $ "inferRecord " <> P.pTerm 0 t
+        pure $ P.recordOf $ P.FieldsLit P.FRow knownTy rest'
       (P.FieldsLit P.FRow known rest, Check (P.App (P.Builtin P.Row) ty)) -> do
         let extSelf field =
               HM.adjust
@@ -754,16 +786,6 @@ infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode)
         pure do
           infer ctx (P.FieldsLit P.FRow known rest) $ Check $ P.rowOf t
           pure $ P.rowOf t
-      -- (P.FieldsLit P.FRecord knownVal rest, Infer) → do
-      --   knownTy ← for knownVal \(name, val) → do
-      --     infer ctx name $ Check $ P.Builtin P.Tag
-      --     ty ← infer ctx val Infer
-      --     pure (name, ty)
-      --   rest' ← for rest \rest' → scoped do
-      --     row ← pushExVar $ Just $ P.Row P.Ty
-      --     infer ctx rest' $ Check $ P.Record row
-      --     pure row
-      --   pure $ P.Record $ P.FieldsLit P.FRow knownTy rest'
       (P.FieldsLit P.FRecord [] restM, Check (P.App (P.Builtin P.Record) row)) ->
         case restM of
           Just rest -> infer ctx rest $ Check $ P.recordOf row
@@ -773,8 +795,6 @@ infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode)
         withLookupField
           (\case
             LookupFound ty row' -> do
-              traceShowM $ P.pTerm 0 val
-              traceShowM $ P.pTerm 0 ty
               infer ctx val $ Check $ ty
               val' <- normalize ctx val
               row'' <-
@@ -787,59 +807,34 @@ infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode)
           True
           name
           ([], Just row)
-      (P.FieldsLit P.FRecord knownVal rest, Infer) -> scoped do
-        u <- pushExVar Nothing
-        row <- pushExVar $ Just $ P.rowOf u
-        pure do
-          stackScope ("bla bla" <> P.pTerm 0 (P.recordOf row))
-            $ infer ctx (P.FieldsLit P.FRecord knownVal rest)
-            $ Check
-            $ P.recordOf
-              row
-          pure
-            $ P.recordOf row
-      (P.Access record name, Infer) -> do
-        recordTy ← infer ctx record Infer
-        let
-          body row =
-            withLookupField
-              (\case
-                LookupFound x _ -> do
-                  selfLazy' <- fmap LazyTerm $ sendIO $ newIORef $ normalize @_ @m ctx record
-                  -- TODO: This replaces `self` with the entire record.
-                  -- It doesn't filter out only the accessible fields.
-                  -- It's quite easy to filter by updating the lookupField, but do we need it really?
-                  -- As I understand it, the inference should fail first.
-                  x' <- normalize (HM.singleton (P.Ident "self") selfLazy') x
-                  pure x'
-                _ → stackError "Field not found")
-              id
-              True name ([], Just row)
-        withMono id recordTy
-          (\var → \case
-            (mScope, mT) → beforeEx mScope var do
-              u ← pushExVar $ Just $ P.Builtin P.U32
-              row ← pushExVar $ Just $ P.rowOf $ P.typOf u
-              pure do
-                writeMeta (mScope, mT) var $ P.recordOf row
-                body row)
-          \case
-            P.App (P.Builtin P.Record) row → body row
-            _ → stackError "Not a record"
-        --scoped do
-        -- ty <- pushExVar Nothing
-        -- row <- pushExVar $ Just $ P.rowOf ty
-        -- infer ctx record $ Check $ P.recordOf row
-        -- lookupField True name ([], Just row) >>= \case
-        --   LookupFound x _ -> do
-        --     selfLazy' <- fmap LazyTerm $ sendIO $ newIORef $ normalize @_ @m ctx record
-        --     -- TODO: This replaces `self` with the entire record.
-        --     -- It doesn't filter out only the accessible fields.
-        --     -- It's quite easy to filter by updating the lookupField, but do we need it really?
-        --     -- As I understand it, the inference should fail first.
-        --     x' <- normalize (HM.singleton (P.Ident "self") selfLazy') x
-        --     pure x'
-        --   _ -> stackError "Access unknown lookup"
+      -- (P.Access record name, Infer) -> do
+      --   recordTy ← infer ctx record Infer
+      --   let
+      --     body row =
+      --       withLookupField
+      --         (\case
+      --           LookupFound x _ -> do
+      --             selfLazy' <- fmap LazyTerm $ sendIO $ newIORef $ normalize @_ @m ctx record
+      --             -- TODO: This replaces `self` with the entire record.
+      --             -- It doesn't filter out only the accessible fields.
+      --             -- It's quite easy to filter by updating the lookupField, but do we need it really?
+      --             -- As I understand it, the inference should fail first.
+      --             x' <- normalize (HM.singleton (P.Ident "self") selfLazy') x
+      --             pure x'
+      --           _ → stackError "Field not found")
+      --         id
+      --         True name ([], Just row)
+        -- withMono id recordTy
+        --   (\var → \case
+        --     (mScope, mT) → beforeEx mScope var do
+        --       u ← pushExVar $ Just $ P.Builtin P.U32
+        --       row ← pushExVar $ Just $ P.rowOf $ P.typOf u
+        --       pure do
+        --         writeMeta (mScope, mT) var $ P.recordOf row
+        --         body row)
+        --   \case
+        --     P.App (P.Builtin P.Record) row → body row
+        --     _ → stackError "Not a record"
       (P.Sorry _ x, Infer) -> normalize (HM.mapMaybe fst ctx) x -- TODO: dedup
       (P.Var x, Infer) -> case HM.lookup x ctx of
         Nothing -> stackError $ "Unknown var " <> P.pIdent x
@@ -851,6 +846,10 @@ infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode)
           kind' <- normalize (HM.mapMaybe fst ctx) kind
           -- TODO: investigate correctness. This allows things like:
           -- `forall x. Type -> x` : Kind
+          -- TODO: ... this allows things like:
+          -- /: fadeno.U32 -> fadeno.U32
+          -- forall (x : fadeno.U32). (\y. x + y)
+          -- ... so this is absolutely wrong, need to think about this.
           infer (HM.insert name (Nothing, kind') ctx) ty mode
       (P.Pi inNameM x y, Check (P.App (P.Builtin P.Type) u)) -> do
         infer ctx x $ Check $ P.typOf u
@@ -982,9 +981,10 @@ checkFile file = do
   (stacks, res) <- runStackAccC $ runSolveM $ infer [] term Infer
   P.render case res of
     Left e ->
-      annotate (color Red) "error: "
-        <> e -- no newline since it is created by pStacks
-        <> pStacks stacks
+      pStacks stacks
+      <> line
+      <> annotate (color Red) "error: "
+      <> e
     Right r -> P.pTerm 0 r
 
 -- TODO: dedup

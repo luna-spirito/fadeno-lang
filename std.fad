@@ -6,10 +6,10 @@ Kind = Type+ 1
 /: Kind
 Type = Type+ 0
 
-/: forall (u : U32) (a : Type+ 0). a -> a
+/: forall (u : U32) (A : Type+ 0). A -> A
 id = \x. x
 
-/: forall (u : U32) (AT : Type+ u). A : AT -> A -> forall res. (B : AT -> B -> res) -> res
-stupid-dependent-tuple = \a b f. f a b
+/: forall (u : U32) (AT : Type+ u). A : AT -> A -> forall Res. (B : AT -> B -> Res) -> Res
+new-stupid-dep-pair = \a b f. f a b
 
-in 3
+in {}

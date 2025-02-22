@@ -8,6 +8,7 @@ import GHC.IO.Unsafe (unsafePerformIO)
 import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, layoutSmart, line, nest, softline, vsep, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
 import RIO hiding (Reader, ask, local)
+import Language.Haskell.TH.Syntax (Lift (..))
 
 -- For now, just untyped.
 
@@ -16,10 +17,10 @@ data OpT
   | Sub
   | Mul
   | Div
-  deriving (Show, Eq, Ord)
+  deriving (Show, Eq, Ord, Lift)
 
 data Ident = Ident !ByteString | UIdent !Int
-  deriving (Show, Eq, Ord, Generic)
+  deriving (Show, Eq, Ord, Generic, Lift)
 
 instance Hashable Ident
 
@@ -96,9 +97,9 @@ To the above constructs, Cedille adds the following, discussed more below:
   ∀ x : T . T’ – the dependent type for functions taking in an erased argument x of type T (aka implicit product)
 -}
 
-data Quantifier = Forall | Exists deriving (Show, Eq)
+data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
 
-data Fields = FRow | FRecord deriving (Show, Eq)
+data Fields = FRow | FRecord deriving (Show, Eq, Lift)
 
 data BuiltinT
   = U32
@@ -106,16 +107,11 @@ data BuiltinT
   | Row
   | Record
   | Type -- Type+ 0, Type+ 1, ..., Type+ Aleph
-  deriving
-    ( -- | Universe
-      -- | AlephLit
-      Show,
-      Eq
-    )
+  | RecordGet
+  deriving (Show, Eq, Lift)
 
 -- TODO: Unpack
 
--- term : Type/ 0 (= Type) : Type/ 1 : ... : Module
 data TermT
   = -- Term-level
 
@@ -127,12 +123,10 @@ data TermT
   | NatLit !Word32
   | TagLit !Ident
   | FieldsLit !Fields ![(TermT, TermT)] !(Maybe TermT)
-  | Access !TermT !TermT -- Access a field of a record.
   -- Restricted to idents for better performance I guess?
   | Sorry !Ident !TermT
   | Var !Ident
   | -- Type-level
-
     -- | Cedille: forall X : 𝒌 | T / Fadeno: forall X : 𝒌. T
     -- | U32
     -- | Tag
@@ -147,7 +141,7 @@ data TermT
   | BuiltinsVar
   | ExVar !ExVar'
   | UniVar !Ident !Int !TermT
-  deriving (Show, Eq)
+  deriving (Show, Eq, Lift)
 
 typOf :: TermT -> TermT
 typOf = App $ Builtin Type
@@ -158,13 +152,31 @@ rowOf = App $ Builtin Row
 recordOf :: TermT -> TermT
 recordOf = App $ Builtin Record
 
+recordGet :: TermT → TermT → TermT
+recordGet tag record = (Builtin RecordGet `App` tag) `App` record
+
 typ :: TermT
 typ = typOf $ NatLit 0
 
+builtinsList :: [BuiltinT]
+builtinsList = [ U32, Tag, Row, Record, Type, RecordGet ]
+
+identOfBuiltin :: BuiltinT → Ident
+identOfBuiltin = Ident . \case
+  U32 → "U32"
+  Tag → "Tag"
+  Row → "Row"
+  Record → "Record"
+  Type → "Type+"
+  RecordGet → "record-get"
+
+-- Todo: TH, maybe?
+-- EDIT: Unlikely, because `fadeno.U32` gets parsed as RecordGet and not a `Builtin U32`
 typOfBuiltin :: BuiltinT -> TermT
 typOfBuiltin x =
   let identU = Ident "u"
-      forallU = Quantification Forall identU $ Builtin U32
+      forall_ = Quantification Forall
+      forallU = forall_ identU $ Builtin U32
       varU = Var identU
       typOfU = typOf varU
    in case x of
@@ -173,22 +185,24 @@ typOfBuiltin x =
         Row -> forallU $ Pi Nothing typOfU typOfU
         Record -> forallU $ Pi Nothing (App (Builtin Row) typOfU) typOfU
         Type -> Pi (Just identU) (Builtin U32) $ typOf $ Op varU Add $ NatLit 1
+        RecordGet →
+          let
+            identRest = Ident "rest"
+            identT = Ident "T"
+            identTag = Ident "tag"
+            row = FieldsLit FRow [(Var identTag, Var identT)] $ Just $ Var identRest
+          in forallU $ forall_ identRest (rowOf typOfU) $ forall_ identT typOfU $
+            Pi (Just identTag) (Builtin Tag) $ Pi Nothing (recordOf row) $ Var identT
 
 builtinsVar :: [(TermT, (TermT, TermT))]
-builtinsVar =
-  [ field "U32" U32,
-    field "Tag" Tag,
-    field "Row" Row,
-    field "Record" Record,
-    field "Type+" Type
-    -- field "Universe" Universe,
-    -- field "AlephLit" AlephLit
-  ]
-  where
-    field n v = (TagLit $ Ident n, (Builtin v, typOfBuiltin v))
+builtinsVar = field <$> builtinsList where
+  field b = (TagLit $ identOfBuiltin b, (Builtin b, typOfBuiltin b))
 
 -- Ident is just for debugging here.
 newtype ExVar' = ExVar' (IORef (Either TermT (Ident, (Int, Maybe TermT)))) deriving (Eq)
+
+instance Lift ExVar' where
+  liftTyped = error "Cannot lift"
 
 instance Show ExVar' where
   show (ExVar' x) = case unsafePerformIO $ readIORef x of
@@ -258,7 +272,7 @@ parsePrim = token do
   accesses <- many $ $(char '.') *> (TagLit . Ident <$> ident')
   pure
     $ foldl'
-      Access
+      (flip recordGet)
       prim
       accesses
 
@@ -416,7 +430,7 @@ isSimple =
         TagLit _ -> ping
         FieldsLit _ x y ->
           for_ x (\(a, b) -> complexity a *> complexity b) *> for_ y complexity
-        Access a _ -> ping *> complexity a
+        -- RecordGet a _ -> ping *> complexity a
         Sorry _ _ -> ping
         Var _ -> ping
         Quantification _ _ b c -> ping *> complexity b *> complexity c
@@ -483,7 +497,7 @@ pTerm oldPrec =
     -- Record x → (5, "Record" <+> pTerm 6 x)
     -- U32 -> (6, "U32")
     -- Tag → (6, "Tag")
-    Builtin x -> (6, "fadeno." <> pretty (show x)) -- TODO: use record parser
+    Builtin x -> (6, "fadeno." <> pIdent (identOfBuiltin x)) -- TODO: use record parser
     BuiltinsVar -> (6, "fadeno")
     NatLit x -> (6, pretty x)
     TagLit x -> (6, "." <> pIdent x)
@@ -514,9 +528,9 @@ pTerm oldPrec =
          in "{" <> renderFields knownFields <> renderRest <> "}"
       )
     Var x -> (6, pIdent x)
-    Access a b -> case b of
-      TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
-      _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
+    -- RecordGet a b -> case b of
+    --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
+    --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
     ExVar (ExVar' x) -> case unsafePerformIO (readIORef x) of
       Left t -> (oldPrec, pTerm oldPrec t)
       Right (n, (i, t)) -> (6, "(exi" <+> pIdent n <+> "of" <+> pretty i <> maybe mempty (\t' -> " :" <+> pTerm 0 t') t <> ")")
@@ -536,3 +550,13 @@ render x = renderIO stdout $ layoutSmart defaultLayoutOptions $ x <> line
 
 formatFile :: FilePath -> IO ()
 formatFile = render . pTerm 0 <=< parseFile
+
+-- fadeno :: QuasiQuoter
+-- fadeno = QuasiQuoter
+--   { quoteExp = \s -> case parse (BS.pack s) of
+--                        Right t  -> [| t |]
+--                        Left _ -> fail "Cannot parse"
+--   , quotePat  = error "No pattern support"
+--   , quoteType = error "No type support"
+--   , quoteDec  = error "No declaration support"
+--   }

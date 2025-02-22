@@ -1,0 +1,2 @@
+// forall (x : fadeno.U32). (\y. x + y)
+fadeno.Type+
