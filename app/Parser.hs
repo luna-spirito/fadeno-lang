@@ -107,7 +107,7 @@ data BuiltinT
   | Row
   | Record
   | Type -- Type+ 0, Type+ 1, ..., Type+ Aleph
-  | RecordGet
+  | RecordGet -- Second-class!
   deriving (Show, Eq, Lift)
 
 -- TODO: Unpack

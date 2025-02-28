@@ -433,15 +433,15 @@ normalize binds = \case
         P.Add → a + b
         _ → error $ show $ "TODO:" <+> pretty a <+> P.pOp op <+> pretty b
       _ → pure $ P.Op aT' op bT'
-  -- P.App (P.App (P.Builtin P.RecordGet) name) rec → do
-  --   name' <- normalize binds name
-  --   let search = \case
-  --         P.FieldsLit P.FRecord [] (Just rest) -> search rest
-  --         P.FieldsLit P.FRecord ((name2, val) : xs) rest
-  --           | name' == name2 -> val
-  --           | otherwise -> search $ P.FieldsLit P.FRecord xs rest
-  --         x -> P.recordGet name x
-  --   search <$> normalize binds rec -- TODO: normalize is expensive.
+  P.App (P.App (P.Builtin P.RecordGet) name) rec → do
+    name' <- normalize binds name
+    let search = \case
+          P.FieldsLit P.FRecord [] (Just rest) -> search rest
+          P.FieldsLit P.FRecord ((name2, val) : xs) rest
+            | name' == name2 -> val
+            | otherwise -> search $ P.FieldsLit P.FRecord xs rest
+          x -> P.recordGet name x
+    search <$> normalize binds rec -- TODO: normalize is expensive.
   P.App f a -> do
     a' <- normalize binds a
     f' <- normalize binds f
@@ -711,6 +711,35 @@ infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode) where
         infer ctx a $ Check $ P.Builtin P.U32
         infer ctx b $ Check $ P.Builtin P.U32
         pure $ P.Builtin P.U32
+      -- Override for second-class RecordGet
+      (P.App (P.App (P.Builtin P.RecordGet) tag) record, Infer) -> do
+        recordTy ← infer ctx record Infer
+        let
+          body row =
+            withLookupField
+              (\case
+                LookupFound x _ -> do
+                  selfLazy' <- fmap LazyTerm $ sendIO $ newIORef $ normalize @_ @m ctx record
+                  -- TODO: This replaces `self` with the entire record.
+                  -- It doesn't filter out only the accessible fields.
+                  -- It's quite easy to filter by updating the lookupField, but do we need it really?
+                  -- As I understand it, the inference should fail first.
+                  x' <- normalize (HM.singleton (P.Ident "self") selfLazy') x
+                  pure x'
+                _ → stackError "Field not found")
+              id
+              True tag ([], Just row)
+        withMono id recordTy
+          (\var → \case
+            (mScope, mT) → beforeEx mScope var do
+              u ← pushExVar $ Just $ P.Builtin P.U32
+              row ← pushExVar $ Just $ P.rowOf $ P.typOf u
+              pure do
+                writeMeta (mScope, mT) var $ P.recordOf row
+                body row)
+          \case
+            P.App (P.Builtin P.Record) row → body row
+            _ → stackError "Not a record"
       (P.App f a, Infer) → do
         fTy ← infer ctx f Infer
         withMono id fTy
@@ -807,34 +836,6 @@ infer ctx = (\t mode -> stackScope (P.pTerm 0 t) $ infer' t mode) where
           True
           name
           ([], Just row)
-      -- (P.Access record name, Infer) -> do
-      --   recordTy ← infer ctx record Infer
-      --   let
-      --     body row =
-      --       withLookupField
-      --         (\case
-      --           LookupFound x _ -> do
-      --             selfLazy' <- fmap LazyTerm $ sendIO $ newIORef $ normalize @_ @m ctx record
-      --             -- TODO: This replaces `self` with the entire record.
-      --             -- It doesn't filter out only the accessible fields.
-      --             -- It's quite easy to filter by updating the lookupField, but do we need it really?
-      --             -- As I understand it, the inference should fail first.
-      --             x' <- normalize (HM.singleton (P.Ident "self") selfLazy') x
-      --             pure x'
-      --           _ → stackError "Field not found")
-      --         id
-      --         True name ([], Just row)
-        -- withMono id recordTy
-        --   (\var → \case
-        --     (mScope, mT) → beforeEx mScope var do
-        --       u ← pushExVar $ Just $ P.Builtin P.U32
-        --       row ← pushExVar $ Just $ P.rowOf $ P.typOf u
-        --       pure do
-        --         writeMeta (mScope, mT) var $ P.recordOf row
-        --         body row)
-        --   \case
-        --     P.App (P.Builtin P.Record) row → body row
-        --     _ → stackError "Not a record"
       (P.Sorry _ x, Infer) -> normalize (HM.mapMaybe fst ctx) x -- TODO: dedup
       (P.Var x, Infer) -> case HM.lookup x ctx of
         Nothing -> stackError $ "Unknown var " <> P.pIdent x
