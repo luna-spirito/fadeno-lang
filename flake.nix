@@ -17,6 +17,7 @@
             buildInputs = with pkgs; [
               cabal-install
               haskell.compiler."ghc${hask}"
+              fourmolu
               (haskell-language-server.override { supportedGhcVersions = [ hask ]; })
             ];
           };
