@@ -12,4 +12,4 @@ id = \x. x
 /: forall (u : U32) (AT : Type+ u). A : AT -> A -> forall Res. (B : AT -> B -> Res) -> Res
 new-stupid-dep-pair = \a b f. f a b
 
-in {}
+in fadeno

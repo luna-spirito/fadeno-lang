@@ -1,10 +1,4 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE OverloadedLists #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE UndecidableSuperClasses #-}
-{-# LANGUAGE ViewPatterns #-}
 
 module Main where
 
@@ -32,6 +26,7 @@ import Data.Kind (Type)
 import Data.List (intercalate, uncons)
 import Data.Serialize (PutM, execPut, putBuilder, putWord32be, putWord64be, putWord8, runPutMBuilder)
 import GHC.Exts (IsList (..))
+import Normalize (HasTerm (..), normalize, parseBQQ)
 import Parser qualified as P
 import Prettyprinter (Doc, annotate, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
@@ -197,6 +192,16 @@ runStackPrintC ∷ (Has (Lift IO) sig m) ⇒ StackPrintC m a → m a
 runStackPrintC = runReader 0 . unStackPrintC
 
 -- Check
+
+data LazyTermT m = LazyTerm !(IORef (m P.TermT)) | LazyPure !P.TermT
+
+instance (Has Solve sig m) ⇒ HasTerm m (LazyTermT m) where
+  extractTerm (LazyTerm var) = do
+    val ← join $ sendIO $ readIORef var
+    sendIO $ writeIORef var $ pure val
+    pure $ Just val
+  extractTerm (LazyPure x) = pure $ Just x
+  mkFromTerm _ = LazyPure
 
 -- | Context stores values and the type of introduced bindings.
 type CtxT = HashMap P.Ident (Maybe P.TermT, P.TermT) -- Actually stores just Idents, but VarT for easier conversion.
@@ -381,99 +386,6 @@ instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1
                       Left val' → instMeta (scope1, t1) origVar1 val'
                       _ → r
               _ → r
-
-class HasTerm m a where
-  extractTerm ∷ a → m (Maybe P.TermT)
-  mkFromTerm ∷ Proxy m → P.TermT → a
-
-data LazyTermT m = LazyTerm !(IORef (m P.TermT)) | LazyPure !P.TermT
-
-instance (Has Solve sig m) ⇒ HasTerm m (LazyTermT m) where
-  extractTerm (LazyTerm var) = do
-    val ← join $ sendIO $ readIORef var
-    sendIO $ writeIORef var $ pure val
-    pure $ Just val
-  extractTerm (LazyPure x) = pure $ Just x
-  mkFromTerm _ = LazyPure
-
-instance (Applicative m) ⇒ HasTerm m P.TermT where
-  extractTerm t = pure $ Just t
-  mkFromTerm _ = id
-
-instance (Applicative m) ⇒ HasTerm m (Maybe P.TermT, P.TermT) where
-  extractTerm t = pure $ fst t
-  mkFromTerm _ = (,undefined) . Just
-
--- TODO: Something needs to be done to handle ExVar
-normalize ∷ ∀ a m sig. (HasTerm m a, Has (Lift IO) sig m) ⇒ HashMap P.Ident a → P.TermT → m P.TermT
-normalize binds = \case
-  P.Block (P.BlockLet name _ val) into → do
-    val' ← normalize binds val
-    normalize
-      (HM.insert name (mkFromTerm (Proxy @m) val') binds)
-      into
-  P.Block (P.BlockRewrite _) into → pure into
-  P.Lam arg bod → P.Lam arg <$> normalize binds bod
-  P.Op aT op bT → do
-    aT' ← normalize binds aT
-    bT' ← normalize binds bT
-    case (aT', bT') of
-      (P.NatLit a, P.NatLit b) → pure $ P.NatLit $ case op of
-        P.Add → a + b
-        _ → error $ show $ "TODO:" <+> pretty a <+> P.pOp op <+> pretty b
-      _ → pure $ P.Op aT' op bT'
-  P.App (P.App (P.Builtin P.RecordGet) name) rec → do
-    name' ← normalize binds name
-    let search = \case
-          P.FieldsLit P.FRecord [] (Just rest) → search rest
-          P.FieldsLit P.FRecord ((name2, val) : xs) rest
-            | name' == name2 → val
-            | otherwise → search $ P.FieldsLit P.FRecord xs rest
-          x → P.recordGet name x
-    search <$> normalize binds rec -- TODO: normalize is expensive.
-  P.App f a → do
-    a' ← normalize binds a
-    f' ← normalize binds f
-    case f' of
-      P.Lam arg bod → normalize (HM.insert arg (mkFromTerm (Proxy @m) a') binds) bod
-      _ → pure $ P.App f' a'
-  P.NatLit x → pure $ P.NatLit x
-  P.TagLit x → pure $ P.TagLit x
-  -- TODO: for now, no checks that the tail is a valid one.
-  P.FieldsLit fields [] Nothing → pure $ P.FieldsLit fields [] Nothing
-  P.FieldsLit _ [] (Just rest) → normalize binds rest
-  P.FieldsLit fields ((name, val) : xs) rest → do
-    name' ← normalize binds name
-    val' ← normalize binds val
-    binds' ← case fields of
-      P.FRecord → pure binds
-      P.FRow → do
-        let selfId = P.Ident "self"
-        oldSelf ← extractVar selfId
-        pure $ HM.insert selfId (mkFromTerm (Proxy @m) $ P.FieldsLit P.FRecord [(name, P.recordGet name' $ P.Var selfId)] oldSelf) binds
-    -- TODO: add a new field, `(name, self.name)`?
-    xsrest' ←
-      normalize
-        binds'
-        $ P.FieldsLit fields xs rest
-    pure $ case xsrest' of
-      P.FieldsLit fields2 xs' rest'
-        | fields == fields2 → P.FieldsLit fields ((name', val') : xs') rest'
-      _ → P.FieldsLit fields [(name', val')] $ Just xsrest'
-  P.Sorry n x → P.Sorry n <$> normalize binds x
-  P.Var x → fromMaybe (P.Var x) <$> extractVar x
-  P.Quantification q x a b → P.Quantification q x <$> normalize binds a <*> normalize (HM.delete x binds) b
-  P.Builtin x → pure $ P.Builtin x -- TODO
-  P.BuiltinsVar → pure $ P.FieldsLit P.FRecord (fmap fst <$> P.builtinsVar) Nothing
-  P.Pi aM b c → P.Pi aM <$> normalize binds b <*> normalize (maybe id HM.delete aM binds) c
-  -- P.Ty → pure P.Ty
-  old@(P.ExVar (P.ExVar' var)) →
-    sendIO (readIORef var) >>= \case
-      Left t → normalize binds t
-      Right _ → pure old
-  old@(P.UniVar{}) → pure old
- where
-  extractVar var = maybe (pure Nothing) extractTerm $ HM.lookup var binds
 
 withMono ∷ (Has Solve sig m) ⇒ ((P.TermT → P.TermT) → a → a) → P.TermT → (P.ExVar' → (Int, Maybe P.TermT) → m a) → (P.TermT → m a) → m a
 withMono tmap = \a onMeta onOther → withMono' onMeta onOther a
@@ -675,6 +587,23 @@ isEq = curry \case
 --       x@(P.NatLit _) → pure x
 --       x@(P.TagLit _) → pure x
 --       P.FieldsLit f t v → --P.FildsLit f <$> _ <*> _
+
+typOfBuiltin ∷ P.BuiltinT → P.TermT
+typOfBuiltin =
+  \case
+    P.U32 → [parseBQQ| Type+ 0 |]
+    P.Tag → [parseBQQ| Type+ 0 |]
+    P.Row → [parseBQQ| forall (u : U32). Type+ u -> Type+ u |]
+    P.Record → [parseBQQ| forall (u : U32). Row (Type+ u) -> Type+ u |]
+    P.Type → [parseBQQ| u : U32 -> Type+ (u + 1) |]
+    P.Eq → [parseBQQ| forall (u : U32) (a : Type+ u). a -> Type+ u |]
+    P.RecordGet →
+      [parseBQQ|
+        forall (u : U32) (row : Row (Type+ u)) (t : Type+ u).
+          tag : Type ->
+          record : Record {tag : t || row} ->
+          t
+      |]
 
 data InferMode a where
   Infer ∷ InferMode P.TermT
@@ -899,8 +828,8 @@ infer ctx = (\t mode → stackScope (P.pTerm 0 t) $ infer' t mode)
       pure do
         infer ctx (P.Pi inNameM x y) $ Check $ P.typOf u
         pure $ P.typOf u
-    (P.Builtin x, Infer) → pure $ P.typOfBuiltin x
-    (P.BuiltinsVar, Infer) → pure $ P.App (P.Builtin P.Record) $ P.FieldsLit P.FRow (fmap snd <$> P.builtinsVar) Nothing -- infer ctx P.builtinsVar Infer -- TODO: redo.
+    (P.Builtin x, Infer) → pure $ typOfBuiltin x
+    (P.BuiltinsVar, Infer) → pure $ P.App (P.Builtin P.Record) $ P.FieldsLit P.FRow ((\b → (P.TagLit $ P.identOfBuiltin b, typOfBuiltin b)) <$> P.builtinsList) Nothing -- infer ctx P.builtinsVar Infer -- TODO: redo.
     (P.ExVar (P.ExVar' i), mode) →
       sendIO (readIORef i) >>= \case
         Left t → infer ctx t mode

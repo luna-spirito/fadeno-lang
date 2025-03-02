@@ -3,8 +3,10 @@ module Parser where
 import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.State.Church (evalState, get, modify)
 import Control.Effect.Empty qualified as E
+import Data.ByteString.Char8 (pack)
 import FlatParse.Basic (Parser, Pos, Result (..), anyAsciiChar, byteStringOf, char, empty, eof, err, failed, getPos, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string)
 import GHC.IO.Unsafe (unsafePerformIO)
+import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (Lift (..))
 import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, layoutSmart, line, nest, softline, vsep, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
@@ -75,7 +77,7 @@ ident' = byteStringOf (skipSome identSym)
 ident ∷ Parser' Ident
 ident = token do
   result ← ident'
-  guard $ not $ result `elem` ["in", "+", "-", "/", "*", "->", "forall", "unpack", "jk", "fadeno"]
+  guard $ not $ result `elem` (["in", "+", "-", "/", "*", "->", "forall", "unpack", "jk", "fadeno"] ∷ [ByteString])
   pure $ Ident result
 
 {-
@@ -107,15 +109,17 @@ data BuiltinT
   | Type -- Type+ 0, Type+ 1, ..., Type+ Aleph
   | Eq
   | RecordGet -- Second-class!
-  deriving (-- | If -- TODO: Make a Choice type.
-            Show, Eq, Lift)
+  -- If -- TODO: Make Choice counterpart for Record
+  deriving (Show, Eq, Lift)
+builtinsList ∷ [BuiltinT]
+builtinsList = [U32, Tag, Row, Record, Type, RecordGet]
 
 data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
 
 data Fields = FRow | FRecord deriving (Show, Eq, Lift)
 
 data BlockT = BlockLet !Ident !(Maybe TermT) !TermT | BlockRewrite !TermT
-  deriving (Show, Eq)
+  deriving (Show, Eq, Lift)
 
 -- Ident is just for debugging here.
 newtype ExVar' = ExVar' (IORef (Either TermT (Ident, (Int, Maybe TermT)))) deriving (Eq)
@@ -124,6 +128,9 @@ instance Show ExVar' where
   show (ExVar' x) = case unsafePerformIO $ readIORef x of
     Left t → show t
     Right n → show n
+
+instance Lift ExVar' where
+  liftTyped _ = error "Cannot lift ExVar"
 
 data TermT
   = -- Term-level
@@ -146,7 +153,7 @@ data TermT
   | BuiltinsVar
   | ExVar !ExVar'
   | UniVar !Ident !Int !TermT
-  deriving (Show, Eq)
+  deriving (Show, Eq, Lift)
 
 typOf ∷ TermT → TermT
 typOf = App $ Builtin Type
@@ -163,9 +170,6 @@ recordGet tag record = (Builtin RecordGet `App` tag) `App` record
 typ ∷ TermT
 typ = typOf $ NatLit 0
 
-builtinsList ∷ [BuiltinT]
-builtinsList = [U32, Tag, Row, Record, Type, RecordGet]
-
 identOfBuiltin ∷ BuiltinT → Ident
 identOfBuiltin =
   Ident . \case
@@ -181,43 +185,43 @@ identOfBuiltin =
 
 -- Todo: TH, maybe?
 -- EDIT: Unlikely, because `fadeno.U32` gets parsed as RecordGet and not a `Builtin U32`
-typOfBuiltin ∷ BuiltinT → TermT
-typOfBuiltin x =
-  let identU = Ident "u"
-      forall_ = Quantification Forall
-      forallU = forall_ identU $ Builtin U32
-      varU = Var identU
-      typOfU = typOf varU
-   in case x of
-        U32 → typ
-        Tag → typ
-        Row → forallU $ Pi Nothing typOfU typOfU
-        Record → forallU $ Pi Nothing (App (Builtin Row) typOfU) typOfU
-        Type → Pi (Just identU) (Builtin U32) $ typOf $ Op varU Add $ NatLit 1
-        Eq →
-          let
-            identA = Ident "a"
-            varA = Var identA
-           in
-            forallU $ forall_ identA typOfU $ Pi Nothing varA $ Pi Nothing varA $ typOf $ Op varU Add $ NatLit 1
-        RecordGet →
-          let
-            identRest = Ident "rest"
-            identT = Ident "T"
-            identTag = Ident "tag"
-            row = FieldsLit FRow [(Var identTag, Var identT)] $ Just $ Var identRest
-           in
-            forallU
-              $ forall_ identRest (rowOf typOfU)
-              $ forall_ identT typOfU
-              $ Pi (Just identTag) (Builtin Tag)
-              $ Pi Nothing (recordOf row)
-              $ Var identT
+-- typOfBuiltin ∷ BuiltinT → TermT
+-- typOfBuiltin x =
+--   let identU = Ident "u"
+--       forall_ = Quantification Forall
+--       forallU = forall_ identU $ Builtin U32
+--       varU = Var identU
+--       typOfU = typOf varU
+--    in case x of
+--         U32 → typ
+--         Tag → typ
+--         Row → forallU $ Pi Nothing typOfU typOfU
+--         Record → forallU $ Pi Nothing (App (Builtin Row) typOfU) typOfU
+--         Type → Pi (Just identU) (Builtin U32) $ typOf $ Op varU Add $ NatLit 1
+--         Eq →
+--           let
+--             identA = Ident "a"
+--             varA = Var identA
+--            in
+--             forallU $ forall_ identA typOfU $ Pi Nothing varA $ Pi Nothing varA $ typOf $ Op varU Add $ NatLit 1
+--         RecordGet →
+--           let
+--             identRest = Ident "rest"
+--             identT = Ident "T"
+--             identTag = Ident "tag"
+--             row = FieldsLit FRow [(Var identTag, Var identT)] $ Just $ Var identRest
+--            in
+--             forallU
+--               $ forall_ identRest (rowOf typOfU)
+--               $ forall_ identT typOfU
+--               $ Pi (Just identTag) (Builtin Tag)
+--               $ Pi Nothing (recordOf row)
+--               $ Var identT
 
-builtinsVar ∷ [(TermT, (TermT, TermT))]
-builtinsVar = field <$> builtinsList
- where
-  field b = (TagLit $ identOfBuiltin b, (Builtin b, typOfBuiltin b))
+-- builtinsVar ∷ [(TermT, (TermT, TermT))]
+-- builtinsVar = field <$> builtinsList
+--  where
+--   field b = (TagLit $ identOfBuiltin b, (Builtin b, typOfBuiltin b))
 
 infxr ∷ Parser' a → Parser' (a → a → a) → Parser' a
 infxr a oper = do
@@ -464,6 +468,7 @@ isSimple =
         ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
           Left y → complexity y
           Right _ → ping
+        UniVar _ _ c → ping *> complexity c
    in runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
 
 -- TODO: Concise syntax for `\` and `forall`
@@ -575,6 +580,17 @@ parse inp = case runParser (parseTop <* eof) inp of
   Err e → Left $ "Unable to parse at " <> tshow (posLineCols inp [e])
   _ → Left "Internal error: uncaught failure"
 
+parseQQ ∷ QuasiQuoter
+parseQQ =
+  QuasiQuoter
+    { quoteExp = \s → case parse (pack s) of
+        Right t → ⟦t⟧
+        Left e → fail $ "Failed to parse: " ++ show e
+    , quotePat = error "No pattern support"
+    , quoteType = error "No type support"
+    , quoteDec = error "No declaration support"
+    }
+
 parseFile ∷ FilePath → IO TermT
 parseFile x = either (error . show) id . parse <$> readFileBinary x
 
@@ -583,13 +599,3 @@ render x = renderIO stdout $ layoutSmart defaultLayoutOptions $ x <> line
 
 formatFile ∷ FilePath → IO ()
 formatFile = render . pTerm 0 <=< parseFile
-
--- fadeno :: QuasiQuoter
--- fadeno = QuasiQuoter
---   { quoteExp = \s -> case parse (BS.pack s) of
---                        Right t  -> [| t |]
---                        Left _ -> fail "Cannot parse"
---   , quotePat  = error "No pattern support"
---   , quoteType = error "No type support"
---   , quoteDec  = error "No declaration support"
---   }
