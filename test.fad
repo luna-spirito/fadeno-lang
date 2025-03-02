@@ -1,2 +1,0 @@
-// This type-checks. It shouldn't. Fix.
-forall (x : fadeno.U32). (\y. x + y)

@@ -9,6 +9,7 @@ import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, layoutSm
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
 import RIO hiding (Reader, ask, local)
 import Language.Haskell.TH.Syntax (Lift (..))
+import Data.Hashable (Hashable(..))
 
 -- For now, just untyped.
 
@@ -75,7 +76,7 @@ ident' = byteStringOf (skipSome identSym)
 ident :: Parser' Ident
 ident = token do
   result <- ident'
-  guard $ not $ result `elem` ["in", "+", "-", "/", "*", "->", "forall", "unpack", "fadeno"]
+  guard $ not $ result `elem` ["in", "+", "-", "/", "*", "->", "forall", "unpack", "jk", "fadeno"]
   pure $ Ident result
 
 {-
@@ -97,9 +98,7 @@ To the above constructs, Cedille adds the following, discussed more below:
   ∀ x : T . T’ – the dependent type for functions taking in an erased argument x of type T (aka implicit product)
 -}
 
-data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
-
-data Fields = FRow | FRecord deriving (Show, Eq, Lift)
+-- TODO: Unpack
 
 data BuiltinT
   = U32
@@ -107,41 +106,60 @@ data BuiltinT
   | Row
   | Record
   | Type -- Type+ 0, Type+ 1, ..., Type+ Aleph
+  | Eq
   | RecordGet -- Second-class!
+  -- | If -- TODO: Make a Choice type.
   deriving (Show, Eq, Lift)
 
--- TODO: Unpack
+data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
+
+data Fields = FRow | FRecord deriving (Show, Eq, Lift)
+
+data BlockT = BlockLet !Ident !(Maybe TermT) !TermT | BlockRewrite !TermT
+  deriving (Show, Eq)
+
+-- Storing type for UniVar is questionable. Also, it's not considered by Eq and Hashable.
+data VarT = SourceVar !Ident | UniVar !Ident !Int !TermT
+  deriving (Show, Generic)
+
+instance Eq VarT where
+  SourceVar a == SourceVar b = a == b
+  UniVar a b _ == UniVar c d _ = a == c && b == d
+  _ == _ = False
+
+instance Hashable VarT where
+  hashWithSalt s v = hashWithSalt s $ case v of
+    SourceVar a → Left a
+    UniVar a b _ → Right (a, b)
+
+-- Ident is just for debugging here.
+newtype ExVar' = ExVar' (IORef (Either TermT (Ident, (Int, Maybe TermT)))) deriving (Eq)
+
+instance Show ExVar' where
+  show (ExVar' x) = case unsafePerformIO $ readIORef x of
+    Left t -> show t
+    Right n -> show n
 
 data TermT
   = -- Term-level
-
-    -- | Annotations only allowed on Let.
-    Let !(NonEmpty (Ident, Maybe TermT, TermT)) !TermT
+    -- | Annotations only allowed on Block.
+    Block !BlockT !TermT
   | Lam !Ident TermT
   | Op !TermT !OpT !TermT
   | App !TermT !TermT
   | NatLit !Word32
   | TagLit !Ident
-  | FieldsLit !Fields ![(TermT, TermT)] !(Maybe TermT)
-  -- Restricted to idents for better performance I guess?
+  | FieldsLit !Fields ![(TermT, TermT)] !(Maybe TermT) -- TODO: remove list?
   | Sorry !Ident !TermT
-  | Var !Ident
+  | Var !VarT
   | -- Type-level
-    -- | Cedille: forall X : 𝒌 | T / Fadeno: forall X : 𝒌. T
-    -- | U32
-    -- | Tag
-    -- | Row !TermT -- classifies FieldsLit FRow.
-    -- | Record !TermT -- classifies FieldsLit FRecord.
     Quantification !Quantifier !Ident !TermT !TermT
   | -- | Cedille: Π x : T | T’ / Fadeno: x : T -> T'
-    -- | Ty !TermT
-    -- | Module -- Classifies all types, temporary name
     Pi !(Maybe Ident) !TermT !TermT
   | Builtin !BuiltinT
   | BuiltinsVar
   | ExVar !ExVar'
-  | UniVar !Ident !Int !TermT
-  deriving (Show, Eq, Lift)
+  deriving (Show, Eq)
 
 typOf :: TermT -> TermT
 typOf = App $ Builtin Type
@@ -168,7 +186,10 @@ identOfBuiltin = Ident . \case
   Row → "Row"
   Record → "Record"
   Type → "Type+"
+  Eq → "Eq"
   RecordGet → "record-get"
+  -- If → "if"
+
 
 -- Todo: TH, maybe?
 -- EDIT: Unlikely, because `fadeno.U32` gets parsed as RecordGet and not a `Builtin U32`
@@ -177,7 +198,7 @@ typOfBuiltin x =
   let identU = Ident "u"
       forall_ = Quantification Forall
       forallU = forall_ identU $ Builtin U32
-      varU = Var identU
+      varU = Var $ SourceVar identU
       typOfU = typOf varU
    in case x of
         U32 -> typ
@@ -185,29 +206,23 @@ typOfBuiltin x =
         Row -> forallU $ Pi Nothing typOfU typOfU
         Record -> forallU $ Pi Nothing (App (Builtin Row) typOfU) typOfU
         Type -> Pi (Just identU) (Builtin U32) $ typOf $ Op varU Add $ NatLit 1
+        Eq →
+          let
+            identA = Ident "a"
+            varA = Var $ SourceVar identA
+          in forallU $ forall_ identA typOfU $ Pi Nothing varA $ Pi Nothing varA $ typOf $ Op varU Add $ NatLit 1
         RecordGet →
           let
             identRest = Ident "rest"
             identT = Ident "T"
             identTag = Ident "tag"
-            row = FieldsLit FRow [(Var identTag, Var identT)] $ Just $ Var identRest
+            row = FieldsLit FRow [(Var $ SourceVar identTag, Var $ SourceVar identT)] $ Just $ Var $ SourceVar identRest
           in forallU $ forall_ identRest (rowOf typOfU) $ forall_ identT typOfU $
-            Pi (Just identTag) (Builtin Tag) $ Pi Nothing (recordOf row) $ Var identT
+            Pi (Just identTag) (Builtin Tag) $ Pi Nothing (recordOf row) $ Var $ SourceVar identT
 
 builtinsVar :: [(TermT, (TermT, TermT))]
 builtinsVar = field <$> builtinsList where
   field b = (TagLit $ identOfBuiltin b, (Builtin b, typOfBuiltin b))
-
--- Ident is just for debugging here.
-newtype ExVar' = ExVar' (IORef (Either TermT (Ident, (Int, Maybe TermT)))) deriving (Eq)
-
-instance Lift ExVar' where
-  liftTyped = error "Cannot lift"
-
-instance Show ExVar' where
-  show (ExVar' x) = case unsafePerformIO $ readIORef x of
-    Left t -> show t
-    Right n -> show n
 
 infxr :: Parser' a -> Parser' (a -> a -> a) -> Parser' a
 infxr a oper = do
@@ -263,7 +278,7 @@ parsePrim = token do
               pure $ FieldsLit fields knownFields rest
           )
       <|> (BuiltinsVar <$ (notFollowedBy $(string "fadeno") identSym))
-      <|> (Var <$> notFollowedBy ident (token $(char '=')))
+      <|> (Var . SourceVar <$> notFollowedBy ident (token $(char '=')))
       <|> ( $(char '(')
               *> parseTop
               <* $(char ')')
@@ -295,7 +310,7 @@ parseTy =
               <|> ($(char '(') *> ((,) <$> ident <*> kind) <* $(char ')'))
       binds <-
         (some manyEntry <* token $(char '.'))
-          <|> ((traceM "here" *> (\a b -> [(a, b)]) <$> ident <*> kind) <* token $(char '.'))
+          <|> (((\a b -> [(a, b)]) <$> ident <*> kind) <* token $(char '.'))
       into <- parseTy
       pure $ foldr (uncurry $ Quantification q) into binds
   )
@@ -354,21 +369,24 @@ someNonEmpty f = (:|) <$> f <*> many f
 -- Node captures pos <$> parseTop
 
 -- 1
-parseLet :: Parser' TermT
-parseLet = do
-  defs <- someNonEmpty do
-    ty <- optional do
-      token $(string "/:")
-      parseMath0
-    name <- ident
-    token $(char '=')
-    expr <- parseTop
-    pure (name, ty, expr)
+parseBlock :: Parser' TermT
+parseBlock = do
+  defs ← someNonEmpty $
+    (do
+      ty ← optional do
+        token $(string "/:")
+        parseMath0
+      name ← ident
+      token $(char '=')
+      expr ← parseTop
+      pure $ BlockLet name ty expr)
+    <|> (do
+      token $ $(string "rewrite")
+      BlockRewrite <$> parseTop)
   ( token do
       $(string "in")
-      val <- parseTop
-      pure $ Let defs val
-    )
+      val ← parseTop
+      pure $ foldr Block val defs)
 
 -- 0
 parseLam :: Parser' TermT
@@ -385,7 +403,7 @@ parseTop =
   token
     $
     -- parseNode
-    {-<|>-} parseLet
+    {-<|>-} parseBlock
     <|> parseLam
     <|> parseMath0
     <|> (err =<< getPos)
@@ -423,7 +441,11 @@ isSimple =
           else pure ()
       complexity = \case
         Lam _ x -> ping *> complexity x
-        Let defs x -> ping *> for_ defs (\(_, b, c) -> for_ b complexity *> complexity c) *> complexity x
+        Block defs x -> ping *>
+          (case defs of
+            BlockLet _ b c -> for_ b complexity *> complexity c
+            BlockRewrite r → ping *> complexity r)
+          *> complexity x
         Op a _ c -> complexity a *> complexity c
         App f a -> complexity f *> complexity a
         NatLit _ -> ping
@@ -440,7 +462,6 @@ isSimple =
         ExVar (ExVar' x) -> case unsafePerformIO (readIORef x) of
           Left y -> complexity y
           Right _ -> ping
-        UniVar _ _ _ -> ping
    in runIdentity . runEmpty (pure False) (\() -> pure True) . evalState @Int 0 . complexity
 
 -- TODO: Concise syntax for `\` and `forall`
@@ -460,17 +481,25 @@ pTerm oldPrec =
               <> sep
               <> pTerm 0 x
       )
-    Let defs i ->
+    block@(Block {}) ->
       ( 1,
-        vsep
-          ( toList defs <&> \(name, tyM, val) ->
+        let
+          collect term = case term of
+            Block entry next →
+              let (tEntries, tIn_) = collect next
+              in (entry:tEntries, tIn_)
+            _ → pure term
+          (entries, in_) = collect block
+        in vsep
+          ( entries <&> \case
+            BlockLet name tyM val →
               maybe mempty (\ty -> "/:" <+> pTerm 2 ty <> line) tyM -- TODO: split if complicated type
                 <> pIdent name
                 <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTerm 0 val)
-          )
+            BlockRewrite x → "rewrite" <+> pTerm 0 x)
           <> line
           <> annotate (color Cyan) "in"
-          <+> nest 2 (pTerm 1 i)
+          <+> nest 2 (pTerm 1 in_)
       )
     Op a op b ->
       let prec = case op of
@@ -527,14 +556,15 @@ pTerm oldPrec =
               x : xs -> " " <> field x <> " |" <> renderFields xs
          in "{" <> renderFields knownFields <> renderRest <> "}"
       )
-    Var x -> (6, pIdent x)
+    Var x -> (6, case x of
+      SourceVar x' → pIdent x'
+      UniVar x' y t -> "(uni" <+> pIdent x' <+> "of" <+> pretty y <+> ":" <+> pTerm 0 t <> ")")
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
     ExVar (ExVar' x) -> case unsafePerformIO (readIORef x) of
       Left t -> (oldPrec, pTerm oldPrec t)
       Right (n, (i, t)) -> (6, "(exi" <+> pIdent n <+> "of" <+> pretty i <> maybe mempty (\t' -> " :" <+> pTerm 0 t') t <> ")")
-    UniVar x y t -> (6, "(uni" <+> pIdent x <+> "of" <+> pretty y <+> ":" <+> pTerm 0 t <> ")")
 
 parse :: ByteString -> Either Text TermT
 parse inp = case runParser (parseTop <* eof) inp of

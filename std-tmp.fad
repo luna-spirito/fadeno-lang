@@ -16,6 +16,15 @@ new-stupid-dep-pair = \a b f. f a b
 
 // ----
 
+Eq = fadeno.Eq
+/: Eq a b -> Eq b c -> Eq a c
+example a b =
+  rewrite b
+  in a
+
+/: Eq a b -> Eq b a
+example = 
+
 // fadeno.access : forall (u : U32) (row : Row (Type+ u)) (t : Type+ u). tag : Type -> record : Record (tag : t | row) -> t
 // fadeno.get : forall (u : U32) (row : Row (Type+ u)). record : Record row -> tag : Type -> { .found : Bool || if | self.found.  |. yes }
 
