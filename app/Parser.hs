@@ -9,7 +9,6 @@ import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, layoutSm
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
 import RIO hiding (Reader, ask, local)
 import Language.Haskell.TH.Syntax (Lift (..))
-import Data.Hashable (Hashable(..))
 
 -- For now, just untyped.
 
@@ -118,20 +117,6 @@ data Fields = FRow | FRecord deriving (Show, Eq, Lift)
 data BlockT = BlockLet !Ident !(Maybe TermT) !TermT | BlockRewrite !TermT
   deriving (Show, Eq)
 
--- Storing type for UniVar is questionable. Also, it's not considered by Eq and Hashable.
-data VarT = SourceVar !Ident | UniVar !Ident !Int !TermT
-  deriving (Show, Generic)
-
-instance Eq VarT where
-  SourceVar a == SourceVar b = a == b
-  UniVar a b _ == UniVar c d _ = a == c && b == d
-  _ == _ = False
-
-instance Hashable VarT where
-  hashWithSalt s v = hashWithSalt s $ case v of
-    SourceVar a → Left a
-    UniVar a b _ → Right (a, b)
-
 -- Ident is just for debugging here.
 newtype ExVar' = ExVar' (IORef (Either TermT (Ident, (Int, Maybe TermT)))) deriving (Eq)
 
@@ -151,7 +136,7 @@ data TermT
   | TagLit !Ident
   | FieldsLit !Fields ![(TermT, TermT)] !(Maybe TermT) -- TODO: remove list?
   | Sorry !Ident !TermT
-  | Var !VarT
+  | Var !Ident
   | -- Type-level
     Quantification !Quantifier !Ident !TermT !TermT
   | -- | Cedille: Π x : T | T’ / Fadeno: x : T -> T'
@@ -159,6 +144,7 @@ data TermT
   | Builtin !BuiltinT
   | BuiltinsVar
   | ExVar !ExVar'
+  | UniVar !Ident !Int !TermT
   deriving (Show, Eq)
 
 typOf :: TermT -> TermT
@@ -198,7 +184,7 @@ typOfBuiltin x =
   let identU = Ident "u"
       forall_ = Quantification Forall
       forallU = forall_ identU $ Builtin U32
-      varU = Var $ SourceVar identU
+      varU = Var identU
       typOfU = typOf varU
    in case x of
         U32 -> typ
@@ -209,16 +195,16 @@ typOfBuiltin x =
         Eq →
           let
             identA = Ident "a"
-            varA = Var $ SourceVar identA
+            varA = Var identA
           in forallU $ forall_ identA typOfU $ Pi Nothing varA $ Pi Nothing varA $ typOf $ Op varU Add $ NatLit 1
         RecordGet →
           let
             identRest = Ident "rest"
             identT = Ident "T"
             identTag = Ident "tag"
-            row = FieldsLit FRow [(Var $ SourceVar identTag, Var $ SourceVar identT)] $ Just $ Var $ SourceVar identRest
+            row = FieldsLit FRow [(Var identTag, Var identT)] $ Just $ Var identRest
           in forallU $ forall_ identRest (rowOf typOfU) $ forall_ identT typOfU $
-            Pi (Just identTag) (Builtin Tag) $ Pi Nothing (recordOf row) $ Var $ SourceVar identT
+            Pi (Just identTag) (Builtin Tag) $ Pi Nothing (recordOf row) $ Var identT
 
 builtinsVar :: [(TermT, (TermT, TermT))]
 builtinsVar = field <$> builtinsList where
@@ -278,7 +264,7 @@ parsePrim = token do
               pure $ FieldsLit fields knownFields rest
           )
       <|> (BuiltinsVar <$ (notFollowedBy $(string "fadeno") identSym))
-      <|> (Var . SourceVar <$> notFollowedBy ident (token $(char '=')))
+      <|> (Var <$> notFollowedBy ident (token $(char '=')))
       <|> ( $(char '(')
               *> parseTop
               <* $(char ')')
@@ -556,15 +542,14 @@ pTerm oldPrec =
               x : xs -> " " <> field x <> " |" <> renderFields xs
          in "{" <> renderFields knownFields <> renderRest <> "}"
       )
-    Var x -> (6, case x of
-      SourceVar x' → pIdent x'
-      UniVar x' y t -> "(uni" <+> pIdent x' <+> "of" <+> pretty y <+> ":" <+> pTerm 0 t <> ")")
+    Var x -> (6, pIdent x)
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
     ExVar (ExVar' x) -> case unsafePerformIO (readIORef x) of
       Left t -> (oldPrec, pTerm oldPrec t)
       Right (n, (i, t)) -> (6, "(exi" <+> pIdent n <+> "of" <+> pretty i <> maybe mempty (\t' -> " :" <+> pTerm 0 t') t <> ")")
+    UniVar x' y t -> (6, "(uni" <+> pIdent x' <+> "of" <+> pretty y <+> ":" <+> pTerm 0 t <> ")")
 
 parse :: ByteString -> Either Text TermT
 parse inp = case runParser (parseTop <* eof) inp of
