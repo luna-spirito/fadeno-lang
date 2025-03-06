@@ -1,8 +1,11 @@
 // This type-checks. It shouldn't. Fix.
+
 //forall (x : fadeno.U32). (\y. x + y)
 
-\x.
-  ty = fadeno.Type+ 0
-  /: fadeno.Type+ x
-  y = fadeno.U32
-  in y
+// \x.
+//   ty = fadeno.Type+ 0
+//   /: fadeno.Type+ x
+//   y = fadeno.U32
+//   in y
+
+{ .x : fadeno.Type+ 0 | .y: self.x }

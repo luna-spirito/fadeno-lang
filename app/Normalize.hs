@@ -22,12 +22,12 @@ instance (Applicative m) ⇒ HasTerm m (Maybe P.TermT, P.TermT) where
   mkFromTerm _ = (,undefined) . Just
 
 -- TODO: Something needs to be done to handle ExVar
-normalize ∷ ∀ a m sig. (HasTerm m a, Has (Lift IO) sig m) ⇒ HashMap P.Ident a → P.TermT → m P.TermT
+normalize ∷ ∀ a m sig. (HasTerm m a, Has (Lift IO) sig m) ⇒ [a] → P.TermT → m P.TermT
 normalize binds = \case
-  P.Block (P.BlockLet name _ val) into → do
+  P.Block (P.BlockLet _ _ val) into → do
     val' ← normalize binds val
     normalize
-      (HM.insert name (mkFromTerm (Proxy @m) val') binds)
+      ((mkFromTerm (Proxy @m) val'):binds)
       into
   P.Block (P.BlockRewrite _) into → pure into
   P.Lam arg bod → P.Lam arg <$> normalize binds bod
@@ -52,7 +52,7 @@ normalize binds = \case
     a' ← normalize binds a
     f' ← normalize binds f
     case f' of
-      P.Lam arg bod → normalize (HM.insert arg (mkFromTerm (Proxy @m) a') binds) bod
+      P.Lam _ bod → normalize ((mkFromTerm (Proxy @m) a'):binds) bod
       _ → pure $ P.App f' a'
   P.NatLit x → pure $ P.NatLit x
   P.TagLit x → pure $ P.TagLit x
@@ -66,8 +66,9 @@ normalize binds = \case
       P.FRecord → pure binds
       P.FRow → do
         let selfId = P.Ident "self"
-        oldSelf ← extractVar selfId
-        pure $ HM.insert selfId (mkFromTerm (Proxy @m) $ P.FieldsLit P.FRecord [(name, P.recordGet name' $ P.Var selfId)] oldSelf) binds
+        let oldSelf ← extractVar selfId
+        pure (mkFromTerm (Proxy @m) (P.FieldsLit):binds)
+        -- pure $ HM.insert selfId (mkFromTerm (Proxy @m) $ P.FieldsLit P.FRecord [(name, P.recordGet name' $ P.Var selfId)] oldSelf) binds
     -- TODO: add a new field, `(name, self.name)`?
     xsrest' ←
       normalize

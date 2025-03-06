@@ -4,13 +4,15 @@ import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.State.Church (evalState, get, modify)
 import Control.Effect.Empty qualified as E
 import Data.ByteString.Char8 (pack)
-import FlatParse.Basic (Parser, Pos, Result (..), anyAsciiChar, byteStringOf, char, empty, eof, err, failed, getPos, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string)
+import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, byteStringOf, char, empty, eof, err, failed, getPos, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string, ask, local)
 import GHC.IO.Unsafe (unsafePerformIO)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (Lift (..))
 import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, layoutSmart, line, nest, softline, vsep, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
 import RIO hiding (Reader, ask, local)
+import RIO.List (elemIndex)
+import qualified RIO.List.Partial as P
 
 -- For now, just untyped.
 
@@ -26,7 +28,7 @@ data Ident = Ident !ByteString | UIdent !Int
 
 instance Hashable Ident
 
-type Parser' = Parser Pos
+type Parser' = Parser [Ident] Pos
 
 space ∷ Parser' ()
 space =
@@ -77,7 +79,7 @@ ident' = byteStringOf (skipSome identSym)
 ident ∷ Parser' Ident
 ident = token do
   result ← ident'
-  guard $ not $ result `elem` (["in", "+", "-", "/", "*", "->", "forall", "unpack", "jk", "fadeno"] ∷ [ByteString])
+  guard $ not $ result `elem` (["in", "+", "-", "/", "*", "->", "forall", "unpack", "fadeno"] ∷ [ByteString])
   pure $ Ident result
 
 {-
@@ -144,7 +146,7 @@ data TermT
   | TagLit !Ident
   | FieldsLit !Fields ![(TermT, TermT)] !(Maybe TermT) -- TODO: remove list?
   | Sorry !Ident !TermT
-  | Var !Ident
+  | Var !Int
   | -- Type-level
     Quantification !Quantifier !Ident !TermT !TermT
   | -- | Cedille: Π x : T | T’ / Fadeno: x : T -> T'
@@ -183,46 +185,6 @@ identOfBuiltin =
 
 -- If → "if"
 
--- Todo: TH, maybe?
--- EDIT: Unlikely, because `fadeno.U32` gets parsed as RecordGet and not a `Builtin U32`
--- typOfBuiltin ∷ BuiltinT → TermT
--- typOfBuiltin x =
---   let identU = Ident "u"
---       forall_ = Quantification Forall
---       forallU = forall_ identU $ Builtin U32
---       varU = Var identU
---       typOfU = typOf varU
---    in case x of
---         U32 → typ
---         Tag → typ
---         Row → forallU $ Pi Nothing typOfU typOfU
---         Record → forallU $ Pi Nothing (App (Builtin Row) typOfU) typOfU
---         Type → Pi (Just identU) (Builtin U32) $ typOf $ Op varU Add $ NatLit 1
---         Eq →
---           let
---             identA = Ident "a"
---             varA = Var identA
---            in
---             forallU $ forall_ identA typOfU $ Pi Nothing varA $ Pi Nothing varA $ typOf $ Op varU Add $ NatLit 1
---         RecordGet →
---           let
---             identRest = Ident "rest"
---             identT = Ident "T"
---             identTag = Ident "tag"
---             row = FieldsLit FRow [(Var identTag, Var identT)] $ Just $ Var identRest
---            in
---             forallU
---               $ forall_ identRest (rowOf typOfU)
---               $ forall_ identT typOfU
---               $ Pi (Just identTag) (Builtin Tag)
---               $ Pi Nothing (recordOf row)
---               $ Var identT
-
--- builtinsVar ∷ [(TermT, (TermT, TermT))]
--- builtinsVar = field <$> builtinsList
---  where
---   field b = (TagLit $ identOfBuiltin b, (Builtin b, typOfBuiltin b))
-
 infxr ∷ Parser' a → Parser' (a → a → a) → Parser' a
 infxr a oper = do
   a' ← a
@@ -260,12 +222,19 @@ parsePrim = token do
                     pure ((n, v), fields)
                   parseMany = do
                     (x, fields1) ← parseField
-                    xs ← many do
-                      token $(char '|')
-                      (res, fields2) ← parseField
-                      guard $ fields1 == fields2
-                      pure res
-                    pure (fields1, x : xs)
+                    let
+                      after = case fields1 of
+                        FRecord → id
+                        FRow → local (Ident "self":)
+                      more = after
+                        ((do
+                          token $(char '|')
+                          (res, fields2) ← parseField
+                          guard $ fields1 == fields2
+                          (res:) <$> more
+                        ) <|> (pure []))
+                    xs ← after more
+                    pure (fields1, x:xs)
                   parseEmpty = do
                     fields ← token $ ($(char ':') $> FRow) <|> pure FRecord
                     pure (fields, [])
@@ -277,7 +246,14 @@ parsePrim = token do
               pure $ FieldsLit fields knownFields rest
           )
       <|> (BuiltinsVar <$ (notFollowedBy $(string "fadeno") identSym))
-      <|> (Var <$> notFollowedBy ident (token $(char '=')))
+      <|> (Var <$>
+        do
+          i ← notFollowedBy ident $ token $(char '=')
+          vars ← ask
+          case elemIndex i vars of
+            Just n → pure n
+            Nothing → err =<< getPos -- TODO: better errors, overall
+        )
       <|> ( $(char '(')
               *> parseTop
               <* $(char ')')
@@ -398,7 +374,11 @@ parseLam = token do
   $(char '\\')
   idents ← some ident
   $(char '.')
-  bod ← parseTop
+  let
+    parseBod = \case
+      [] → parseTop
+      (x:xs) → local (x:) $ parseBod xs
+  bod ← parseBod idents
   pure $ foldr Lam bod idents
 
 -- 0
@@ -472,8 +452,8 @@ isSimple =
    in runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
 
 -- TODO: Concise syntax for `\` and `forall`
-pTerm ∷ Int → TermT → Doc AnsiStyle
-pTerm oldPrec =
+pTerm ∷ (Int, [Ident]) → TermT → Doc AnsiStyle
+pTerm (oldPrec, vars) =
   withPrec oldPrec . \case
     Lam arg x →
       ( 0
@@ -486,7 +466,7 @@ pTerm oldPrec =
               <> pIdent arg
               <> annotate (color Magenta) "."
               <> sep
-              <> pTerm 0 x
+              <> pTerm (0, arg:vars) x
       )
     block@(Block{}) →
       ( 1
@@ -501,14 +481,14 @@ pTerm oldPrec =
           vsep
             ( entries <&> \case
                 BlockLet name tyM val →
-                  maybe mempty (\ty → "/:" <+> pTerm 2 ty <> line) tyM -- TODO: split if complicated type
+                  maybe mempty (\ty → "/:" <+> pTerm (2, vars) ty <> line) tyM -- TODO: split if complicated type
                     <> pIdent name
-                    <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTerm 0 val)
-                BlockRewrite x → "rewrite" <+> pTerm 0 x
+                    <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTerm (0, vars) val)
+                BlockRewrite x → "rewrite" <+> pTerm (0, vars) x
             )
             <> line
             <> annotate (color Cyan) "in"
-            <+> nest 2 (pTerm 1 in_)
+            <+> nest 2 (pTerm (1, vars) in_)
       )
     Op a op b →
       let prec = case op of
@@ -516,21 +496,21 @@ pTerm oldPrec =
             Sub → 2
             Mul → 3
             Div → 3
-       in (prec, pTerm prec a <+> pOp op <+> pTerm prec b)
+       in (prec, pTerm (prec, vars) a <+> pOp op <+> pTerm (prec, vars) b)
     Quantification q name kind ty →
       ( 4
       , let kind' = case kind of
               App (Builtin Type) (NatLit 0) → mempty
-              _ → " :" <+> pTerm 4 kind
+              _ → " :" <+> pTerm (4, vars) kind
             q' = case q of
               Forall → "forall"
               Exists → "exists"
-         in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm 4 ty
+         in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm (4, vars) ty
       )
     Sorry x _ → (6, "sorry/" <> pIdent x) -- 6 and not 4 since type is not rendered
-    Pi inName inTy outTy → (4, maybe mempty (\x → pIdent x <+> ": ") inName <> pTerm 5 inTy <+> "->" <+> pTerm 4 outTy)
+    Pi inName inTy outTy → (4, maybe mempty (\x → pIdent x <+> ": ") inName <> pTerm (5, vars) inTy <+> "->" <+> pTerm (4, vars) outTy)
     -- Ty x -> (4, "Type/" <+> pTerm 6 x)
-    App lam arg → (5, pTerm 5 lam <+> pTerm 6 arg)
+    App lam arg → (5, pTerm (5, vars) lam <+> pTerm (6, vars) arg)
     -- Row x → (5, "Row" <+> pTerm 6 x)
     -- Record x → (5, "Record" <+> pTerm 6 x)
     -- U32 -> (6, "U32")
@@ -552,38 +532,45 @@ pTerm oldPrec =
             sep = case fields of
               FRecord → "="
               FRow → ":"
-            field (n, v) = pTerm 6 n <+> sep <+> pTerm 0 v
+            field vars' (n, v) = pTerm (6, vars') n <+> sep <+> pTerm (0, vars') v
             -- TODO: separator other than " " if not isSimple.
-            renderRest = case rest of
+            renderRest vars' = case rest of
               Nothing → mempty
-              Just rest' → "|| " <> pTerm 2 rest' <> " "
-            renderFields = \case
+              Just rest' → "|| " <> pTerm (2, vars') rest' <> " "
+            renderFields vars' = \case
               [] → case fields of
-                FRecord → mempty
-                FRow → ":"
-              [x] → " " <> field x <> " "
-              x : xs → " " <> field x <> " |" <> renderFields xs
-         in "{" <> renderFields knownFields <> renderRest <> "}"
+                FRecord → renderRest vars'
+                FRow → ":" <> renderRest vars'
+              [x] → " " <> field vars' x <> " " <> renderRest vars'
+              x : xs → " " <> field vars' x <> " |" <> renderFields
+                (case fields of
+                  FRecord → vars'
+                  FRow → Ident "self":vars')
+                xs
+         in "{" <> renderFields vars knownFields <> "}"
       )
-    Var x → (6, pIdent x)
+    Var x → (6, pIdent $ vars P.!! x)
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
     ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
-      Left t → (oldPrec, pTerm oldPrec t)
-      Right (n, (i, t)) → (6, "(exi" <+> pIdent n <+> "of" <+> pretty i <> maybe mempty (\t' → " :" <+> pTerm 0 t') t <> ")")
-    UniVar x' y t → (6, "(uni" <+> pIdent x' <+> "of" <+> pretty y <+> ":" <+> pTerm 0 t <> ")")
+      Left t → (oldPrec, pTerm (oldPrec, vars) t)
+      Right (n, (i, t)) → (6, "(exi" <+> pIdent n <+> "of" <+> pretty i <> maybe mempty (\t' → " :" <+> pTerm (0, vars) t') t <> ")")
+    UniVar x' y t → (6, "(uni" <+> pIdent x' <+> "of" <+> pretty y <+> ":" <+> pTerm (0, vars) t <> ")")
 
-parse ∷ ByteString → Either Text TermT
-parse inp = case runParser (parseTop <* eof) inp of
-  OK x "" → Right x
+pTerm' :: TermT → Doc AnsiStyle
+pTerm' = pTerm (0, [])
+
+parse ∷ [Ident] → ByteString → Either Text TermT
+parse vars inp = case runParser (parseTop <* eof) vars 0 inp of
+  OK x _ "" → Right x
   Err e → Left $ "Unable to parse at " <> tshow (posLineCols inp [e])
   _ → Left "Internal error: uncaught failure"
 
-parseQQ ∷ QuasiQuoter
-parseQQ =
+parseQQ ∷ [Ident] → QuasiQuoter
+parseQQ vars =
   QuasiQuoter
-    { quoteExp = \s → case parse (pack s) of
+    { quoteExp = \s → case parse vars (pack s) of
         Right t → ⟦t⟧
         Left e → fail $ "Failed to parse: " ++ show e
     , quotePat = error "No pattern support"
@@ -592,10 +579,10 @@ parseQQ =
     }
 
 parseFile ∷ FilePath → IO TermT
-parseFile x = either (error . show) id . parse <$> readFileBinary x
+parseFile x = either (error . show) id . parse [] <$> readFileBinary x
 
 render ∷ Doc AnsiStyle → IO ()
 render x = renderIO stdout $ layoutSmart defaultLayoutOptions $ x <> line
 
 formatFile ∷ FilePath → IO ()
-formatFile = render . pTerm 0 <=< parseFile
+formatFile = render . pTerm (0, []) <=< parseFile
