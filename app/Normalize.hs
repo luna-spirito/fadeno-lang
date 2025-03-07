@@ -20,16 +20,41 @@ import System.IO.Unsafe (unsafePerformIO)
 --   extractTerm t = pure $ fst t
 --   mkFromTerm _ = (,undefined) . Just
 
--- TODO: Something needs to be done to handle ExVar
-normalize ∷ ∀ a m sig. (Has (Lift IO) sig m) ⇒ [Maybe P.TermT] → P.TermT → m P.TermT
+-- Update nesting of normalized value
+nest ∷ P.TermT → P.TermT
+nest = rec (0 ∷ Int)
+ where
+  rec fstGlobal =
+    let u x = if x >= fstGlobal then x + 1 else x
+     in \case
+          P.Block{} → undefined
+          P.Lam arg bod → P.Lam arg $ rec (fstGlobal + 1) bod
+          P.Op a op b → P.Op (rec fstGlobal a) op (rec fstGlobal b)
+          P.App f' a' → P.App (rec fstGlobal f') (rec fstGlobal a')
+          old@P.NatLit{} → old
+          old@P.TagLit{} → old
+          P.FieldsLit f' a b → P.FieldsLit f' (bimap (rec fstGlobal) (rec fstGlobal) <$> a) (rec fstGlobal <$> b)
+          old@P.Sorry{} → old
+          P.Var i → P.Var $ u i
+          P.Quantification q n k in_ → P.Quantification q n (rec fstGlobal k) (rec fstGlobal in_)
+          P.Pi nameM in_ out_ → P.Pi nameM (rec fstGlobal in_) (rec fstGlobal out_)
+          old@P.Builtin{} → old
+          P.BuiltinsVar → P.BuiltinsVar
+          P.ExVar ex k → P.ExVar ex $ u k
+          P.UniVar a b c → P.UniVar a (u b) (rec fstGlobal c)
+
+insertBinds ∷ Maybe P.TermT → [Maybe P.TermT] → [Maybe P.TermT]
+insertBinds x xs = x : (fmap nest <$> xs)
+
+normalize ∷ ∀ m sig. (Has (Lift IO) sig m) ⇒ [Maybe P.TermT] → P.TermT → m P.TermT
 normalize binds = \case
   P.Block (P.BlockLet _ _ val) into → do
     val' ← normalize binds val
     normalize
-      (Just val' : binds)
+      (insertBinds (Just val') binds)
       into
   P.Block (P.BlockRewrite _) into → pure into
-  P.Lam arg bod → P.Lam arg <$> normalize (Nothing : binds) bod
+  P.Lam arg bod → P.Lam arg <$> normalize (insertBinds Nothing binds) bod
   P.Op aT op bT → do
     aT' ← normalize binds aT
     bT' ← normalize binds bT
@@ -61,7 +86,7 @@ normalize binds = \case
     let
       binds' = case fields of
         P.FRecord → binds
-        P.FRow → Nothing : binds
+        P.FRow → insertBinds Nothing binds
      in
       P.FieldsLit fields
         <$> (for origKnown \(n, v) → (,) <$> normalize binds' n <*> normalize binds' v)
@@ -72,11 +97,11 @@ normalize binds = \case
     (Just val : _) → val
     -- Someone-someone yells that this is wrong. Didn't actually convince me.
     (Nothing : _) → P.Var $ i - length (catMaybes $ take i binds)
-  P.Quantification q x a b → P.Quantification q x <$> normalize binds a <*> normalize (Nothing : binds) b
+  P.Quantification q x a b → P.Quantification q x <$> normalize binds a <*> normalize (insertBinds Nothing binds) b
   P.Builtin x → pure $ P.Builtin x
   P.BuiltinsVar → pure $ P.FieldsLit P.FRecord ((\b → (P.TagLit $ P.identOfBuiltin b, P.Builtin b)) <$> P.builtinsList) Nothing
-  P.Pi aM b c → P.Pi aM <$> normalize binds b <*> normalize (if isJust aM then Nothing : binds else binds) c
-  old@(P.ExVar (P.ExVar' var)) →
+  P.Pi aM b c → P.Pi aM <$> normalize binds b <*> normalize (if isJust aM then insertBinds Nothing binds else binds) c
+  old@(P.ExVar (P.ExVar' var) _) →
     sendIO (readIORef var) >>= \case
       Left t → normalize binds t
       Right _ → pure old

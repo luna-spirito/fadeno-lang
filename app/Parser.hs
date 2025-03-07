@@ -124,7 +124,7 @@ data BlockT = BlockLet !Ident !(Maybe TermT) !TermT | BlockRewrite !TermT
   deriving (Show, Eq, Lift)
 
 -- Ident is just for debugging here.
-newtype ExVar' = ExVar' (IORef (Either TermT (Ident, (Int, Maybe TermT)))) deriving (Eq)
+newtype ExVar' = ExVar' (IORef (Either TermT (Ident, Maybe TermT))) deriving (Eq)
 
 instance Show ExVar' where
   show (ExVar' x) = case unsafePerformIO $ readIORef x of
@@ -153,8 +153,8 @@ data TermT
     Pi !(Maybe Ident) !TermT !TermT
   | Builtin !BuiltinT
   | BuiltinsVar
-  | ExVar !ExVar'
-  | UniVar !Ident !Int !TermT
+  | ExVar !ExVar' !Int -- Int is for nestness
+  | UniVar !Ident !Int !TermT -- Int is for nestness
   deriving (Show, Eq, Lift)
 
 typOf ∷ TermT → TermT
@@ -446,7 +446,7 @@ isSimple =
         Pi _ b c → ping *> complexity b *> complexity c
         Builtin _ → ping
         BuiltinsVar → ping
-        ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
+        ExVar (ExVar' x) _ → case unsafePerformIO (readIORef x) of
           Left y → complexity y
           Right _ → ping
         UniVar _ _ c → ping *> complexity c
@@ -530,7 +530,7 @@ pTerm (oldPrec, vars) =
     BuiltinsVar → (6, "fadeno")
     NatLit x → (6, pretty x)
     TagLit x → (6, "." <> pIdent x)
-    record@(FieldsLit fields knownFields rest) →
+    FieldsLit fields knownFields rest →
       ( 6
       , let
           vars' = case fields of
@@ -555,10 +555,10 @@ pTerm (oldPrec, vars) =
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
-    ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
+    ExVar (ExVar' x) l → case unsafePerformIO (readIORef x) of
       Left t → (oldPrec, pTerm (oldPrec, vars) t)
-      Right (n, (i, t)) → (6, "(exi" <+> pIdent n <+> "of" <+> pretty i <> maybe mempty (\t' → " :" <+> pTerm (0, vars) t') t <> ")")
-    UniVar x' y t → (6, "(uni" <+> pIdent x' <+> "of" <+> pretty y <+> ":" <+> pTerm (0, vars) t <> ")")
+      Right (n, t) → (6, "(exi@" <> pretty l <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) t') t <> ")")
+    UniVar x' l t → (6, "(uni@" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
 
 pTerm' ∷ TermT → Doc AnsiStyle
 pTerm' = pTerm (0, [])
