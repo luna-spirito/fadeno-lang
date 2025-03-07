@@ -8,4 +8,5 @@
 //   y = fadeno.U32
 //   in y
 
-{ .x : fadeno.Type+ 0 | .y: self.x }
+a = \z. { .x : \x. x | .y : 5 + z }
+in ((a 2).x 3) + (a 3).y
