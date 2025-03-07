@@ -297,7 +297,7 @@ parseTy =
       inTy ← parseApp
       ( ( do
             token $ $(string "->")
-            outT ← parseTy
+            outT ← maybe id (local . (:)) inName parseTy
             pure $ Pi inName inTy outT
         )
           <|> ( do
@@ -517,7 +517,7 @@ pTerm (oldPrec, vars) =
          in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm (4, name : vars) ty
       )
     Sorry x _ → (6, "sorry/" <> pIdent x) -- 6 and not 4 since type is not rendered
-    Pi inName inTy outTy → (4, maybe mempty (\x → pIdent x <+> ": ") inName <> pTerm (5, vars) inTy <+> "->" <+> pTerm (4, vars) outTy)
+    Pi inName inTy outTy → (4, maybe mempty (\x → pIdent x <+> ": ") inName <> pTerm (5, vars) inTy <+> "->" <+> pTerm (4, maybe id (:) inName vars) outTy)
     -- Ty x -> (4, "Type/" <+> pTerm 6 x)
     App (App (Builtin RecordGet) (TagLit tag)) rec →
       (6, pTerm (6, vars) rec <> "." <> pIdent tag)

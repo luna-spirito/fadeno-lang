@@ -26,7 +26,7 @@ import Data.Kind (Type)
 import Data.List (intercalate, uncons)
 import Data.Serialize (PutM, execPut, putBuilder, putWord32be, putWord64be, putWord8, runPutMBuilder)
 import GHC.Exts (IsList (..))
-import Normalize (HasTerm (..), normalize, parseBQQ)
+import Normalize (normalize, parseBQQ)
 import Parser qualified as P
 import Prettyprinter (Doc, annotate, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
@@ -195,13 +195,13 @@ runStackPrintC = runReader 0 . unStackPrintC
 
 data LazyTermT m = LazyTerm !(IORef (m P.TermT)) | LazyPure !P.TermT
 
-instance (Has Solve sig m) ⇒ HasTerm m (LazyTermT m) where
-  extractTerm (LazyTerm var) = do
-    val ← join $ sendIO $ readIORef var
-    sendIO $ writeIORef var $ pure val
-    pure $ Just val
-  extractTerm (LazyPure x) = pure $ Just x
-  mkFromTerm _ = LazyPure
+-- instance (Has Solve sig m) ⇒ HasTerm m (LazyTermT m) where
+--   extractTerm (LazyTerm var) = do
+--     val ← join $ sendIO $ readIORef var
+--     sendIO $ writeIORef var $ pure val
+--     pure $ Just val
+--   extractTerm (LazyPure x) = pure $ Just x
+--   mkFromTerm _ = LazyPure
 
 -- | Context stores values and the type of introduced bindings.
 type CtxT = HashMap P.Ident (Maybe P.TermT, P.TermT) -- Actually stores just Idents, but VarT for easier conversion.
@@ -600,8 +600,8 @@ typOfBuiltin =
     P.RecordGet →
       [parseBQQ|
         forall (u : U32) (row : Row (Type+ u)) (t : Type+ u).
-          tag : Type ->
-          record : Record {tag : t || row} ->
+          tag : Tag ->
+          record : Record {(tag : t || row)} ->
           t
       |]
 

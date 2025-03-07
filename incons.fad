@@ -8,5 +8,7 @@
 //   y = fadeno.U32
 //   in y
 
-a = \z. { .x : \x. x | .y : 5 + z }
-in ((a 2).x 3) + (a 3).y
+forall (u : U32) (row : Row (Type+ u)) (t : Type+ u).
+  tag : Type ->
+  record : Record {(tag : t || row)} ->
+  t
