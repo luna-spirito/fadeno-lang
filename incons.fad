@@ -8,7 +8,14 @@
 //   y = fadeno.U32
 //   in y
 
-forall (u : U32) (row : Row (Type+ u)) (t : Type+ u).
-  tag : Type ->
-  record : Record {(tag : t || row)} ->
-  t
+ex1 = \x.
+  \y.
+    z = 4
+    s = 3
+    in \a. y
+ex2 = \x.
+  (\x. x) x
+ex3 = \x.
+  y = 10
+  in \z. \w. x + y + z
+in ex2

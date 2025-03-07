@@ -70,12 +70,12 @@ normalize binds = \case
   P.Var i → pure case drop i binds of
     [] → P.Var i
     (Just val : _) → val
-    (Nothing : xs) → P.Var $ i - length (catMaybes xs)
+    -- Someone-someone yells that this is wrong. Didn't actually convince me.
+    (Nothing : _) → P.Var $ i - length (catMaybes $ take i binds)
   P.Quantification q x a b → P.Quantification q x <$> normalize binds a <*> normalize (Nothing : binds) b
   P.Builtin x → pure $ P.Builtin x
   P.BuiltinsVar → pure $ P.FieldsLit P.FRecord ((\b → (P.TagLit $ P.identOfBuiltin b, P.Builtin b)) <$> P.builtinsList) Nothing
   P.Pi aM b c → P.Pi aM <$> normalize binds b <*> normalize (if isJust aM then Nothing : binds else binds) c
-  -- P.Ty → pure P.Ty
   old@(P.ExVar (P.ExVar' var)) →
     sendIO (readIORef var) >>= \case
       Left t → normalize binds t
@@ -98,9 +98,7 @@ parseBQQ =
     , quoteDec = error "No declaration support"
     }
 
-normalizeFile ∷ FilePath → IO P.TermT
+normalizeFile ∷ FilePath → IO ()
 normalizeFile x = do
   t ← P.parseFile x
-  normalize [] t
-
--- P.render . P.pTerm' =<< normalize [] t
+  P.render . P.pTerm' =<< normalize [] t
