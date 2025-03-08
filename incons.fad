@@ -8,17 +8,3 @@
 //   y = fadeno.U32
 //   in y
 
-ex1 = \x.
-  \y.
-    z = 4
-    s = 3
-    in \a. y
-ex2 = \x.
-  (\x. x) x
-ex3 = \x.
-  y = 10
-  in \z. \w. x + y + z
-ex4 = \x.
-  y = x
-  in \z. y
-in ex4

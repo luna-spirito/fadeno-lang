@@ -4,8 +4,8 @@ import Control.Algebra
 import Control.Effect.Lift (Lift, sendIO)
 import Data.List (splitAt)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), OpT (..), RevList (..), TermT (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render, revSnoc)
-import RIO hiding (Reader, ask, link, local, runReader, toList)
+import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), OpT (..), RevList (..), TermT (..), builtinsList, identOfBuiltin, nested, pTerm', parseFile, parseQQ, recordGet, render, revSnoc)
+import RIO hiding (Reader, ask, link, local, runReader, to, toList)
 import System.IO.Unsafe (unsafePerformIO)
 
 -- class HasTerm m a where
@@ -21,100 +21,174 @@ import System.IO.Unsafe (unsafePerformIO)
 --   mkFromTerm _ = (,undefined) . Just
 
 -- Update nesting of normalized value
-nest ∷ TermT → TermT
-nest = rec (0 ∷ Int)
+-- insertBinds ∷ Maybe TermT → RevList (Maybe TermT) → RevList (Maybe TermT)
+-- insertBinds x xs = error "wrong, should not be nested when Just" $ (fmap (nested 1) <$> xs) `revSnoc` x
+
+-- TODO: implement REWRITES, and implement ExVar substitution via REWRITES
+-- NOTE: normalize shouldn't process both normalizations and rewrites at the same time.
+
+-- | Intensional equality.
+data EqRes
+  = EqYes -- provably eq
+  | EqNot -- provably uneq
+  | EqUnknown
+
+{- | Checks if two normalized terms are intensionally equivalent.
+TODO: η-conversion
+-}
+isEq ∷ (Has (Lift IO) sig m) ⇒ TermT → TermT → m EqRes
+isEq = curry \case
+  (Block{}, _) → undefined
+  (_, Block{}) → undefined
+  (Var a, Var b)
+    | a == b → pure EqYes
+  (Var _, _) → pure EqUnknown
+  (_, Var _) → pure EqUnknown
+  (UniVar a1 b1 _, UniVar a2 b2 _)
+    | a1 == a2 && b1 == b2 → pure EqYes
+  (UniVar{}, _) → pure EqUnknown
+  (_, UniVar{}) → pure EqUnknown
+  -- TODO: ExVar? I don't know!
+  (ExVar{}, _) → error "TODO"
+  (_, ExVar{}) → error "TODO"
+  (App f1 a1, App f2 a2) → tryEq f1 f2 $ tryEq a1 a2 $ pure EqYes
+  (App{}, _) → pure EqUnknown
+  (_, App{}) → pure EqUnknown
+  (Op a1 op1 b1, Op a2 op2 b2)
+    | op1 == op2 → tryEq a1 a2 $ tryEq b1 b2 $ pure EqYes
+  (Op{}, _) → pure EqUnknown
+  (_, Op{}) → pure EqUnknown
+  (Sorry _ a, b) → isEq a b
+  (a, Sorry _ b) → isEq a b
+  -- Literals
+  (Lam _ bod1, Lam _ bod2) → isEq bod1 bod2
+  (Lam _ _, _) → pure EqNot
+  (NatLit a, NatLit b)
+    | a == b → pure EqYes
+  (NatLit _, _) → pure EqNot
+  (TagLit a, TagLit b)
+    | a == b → pure EqYes
+  (TagLit _, _) → pure EqNot
+  (Quantification q1 _n1 k1 t1, Quantification q2 _n2 k2 t2)
+    | q1 == q2 → tryEq k1 k2 $ tryEq t1 t2 $ pure EqYes
+  (Quantification{}, _) → pure EqUnknown
+  (Builtin a, Builtin b)
+    | a == b → pure EqYes
+  (Builtin _, _) → pure EqNot
+  (_, Builtin _) → pure EqNot
+  (BuiltinsVar, BuiltinsVar) → pure EqYes
+  (BuiltinsVar, _) → pure EqNot
+  (_, BuiltinsVar) → pure EqNot
+  -- TODO: Handle mixed?
+  (Pi (Just _) inT1 outT1, Pi (Just _) inT2 outT2) →
+    isEq inT1 inT2 >>= \case
+      EqYes → isEq outT1 outT2
+      x → pure x
+  (Pi Nothing inT1 outT1, Pi Nothing inT2 outT2) →
+    isEq inT1 inT2 >>= \case
+      EqYes → isEq outT1 outT2
+      x → pure x
+  (Pi{}, _) → pure EqNot
+  (FieldsLit _ _ _, _) → error "isEq Fields todo"
  where
-  rec fstGlobal =
-    let u x = if x >= fstGlobal then x + 1 else x
-     in \case
-          Block{} → undefined
-          Lam arg bod → Lam arg $ rec (fstGlobal + 1) bod
-          Op a op b → Op (rec fstGlobal a) op (rec fstGlobal b)
-          App f' a' → App (rec fstGlobal f') (rec fstGlobal a')
-          old@NatLit{} → old
-          old@TagLit{} → old
-          FieldsLit f' a b → FieldsLit f' (bimap (rec fstGlobal) (rec fstGlobal) <$> a) (rec fstGlobal <$> b)
-          old@Sorry{} → old
-          Var i → Var $ u i
-          Quantification q n k in_ → Quantification q n (rec fstGlobal k) (rec fstGlobal in_)
-          Pi nameM in_ out_ → Pi nameM (rec fstGlobal in_) (rec fstGlobal out_)
-          old@Builtin{} → old
-          BuiltinsVar → BuiltinsVar
-          ExVar ex k → ExVar ex $ u k
-          UniVar a b c → UniVar a (u b) (rec fstGlobal c)
+  -- TODO: FRow???
+  tryEq a b cont =
+    isEq a b >>= \case
+      EqYes → cont
+      _ → pure EqUnknown
 
-insertBinds ∷ Maybe TermT → RevList (Maybe TermT) → RevList (Maybe TermT)
-insertBinds x xs = (fmap nest <$> xs) `revSnoc` x
+data NormCtx
+  = NormBinds !(RevList (Maybe TermT))
+  | NormRewrite !TermT !TermT -- on normalized
 
-normalize ∷ ∀ m sig. (Has (Lift IO) sig m) ⇒ RevList (Maybe TermT) → TermT → m TermT
-normalize binds = \case
-  Block (BlockLet _ _ val) into → do
-    val' ← normalize binds val
-    normalize
-      (insertBinds (Just val') binds)
-      into
-  Block (BlockRewrite _) into → pure into
-  Lam arg bod → Lam arg <$> normalize (insertBinds Nothing binds) bod
-  Op aT op bT → do
-    aT' ← normalize binds aT
-    bT' ← normalize binds bT
-    case (aT', bT') of
-      (NatLit a, NatLit b) → pure $ NatLit $ case op of
-        Add → a + b
-        Sub → a - b
-        Mul → a * b
-        Div → a `div` b
-      _ → pure $ Op aT' op bT'
-  App f a → do
-    f' ← normalize binds f
-    a' ← normalize binds a
-    case f' of
-      Lam _ bod → normalize [Just a'] bod
-      App (Builtin RecordGet) name → do
-        let rec = a'
-        let search = \case
-              FieldsLit FRecord [] (Just rest) → search rest
-              FieldsLit FRecord ((name2, val) : xs) rest
-                | name == name2 → val
-                | otherwise → search $ FieldsLit FRecord xs rest
-              x → recordGet name x
-        pure $ search rec
-      _ → pure $ App f' a'
-  NatLit x → pure $ NatLit x
-  TagLit x → pure $ TagLit x
-  -- TODO: for now, no checks that the tail is a valid one.
-  -- FieldsLit fields [] (Just rest) → _ -- Cool, but not necessary
-  FieldsLit fields origKnown origRest →
-    let
-      binds' = case fields of
-        FRecord → binds
-        FRow → insertBinds Nothing binds
-     in
-      FieldsLit fields
-        <$> (for origKnown \(n, v) → (,) <$> normalize binds' n <*> normalize binds' v)
-        <*> for origRest (normalize binds')
-  Sorry n x → Sorry n <$> normalize binds x
-  Var i →
-    let (later, earlier) = splitAt i $ unUnsafeRevList binds
-     in pure case earlier of
-          [] → Var i
-          (Just val : _) → val
-          (Nothing : _) → Var $ i - length (catMaybes later)
-  Quantification q x a b → Quantification q x <$> normalize binds a <*> normalize (insertBinds Nothing binds) b
-  Builtin x → pure $ Builtin x
-  BuiltinsVar → pure $ FieldsLit FRecord ((\b → (TagLit $ identOfBuiltin b, Builtin b)) <$> builtinsList) Nothing
-  Pi aM b c → Pi aM <$> normalize binds b <*> normalize (if isJust aM then insertBinds Nothing binds else binds) c
-  old@(ExVar (ExVar' var) _) →
-    sendIO (readIORef var) >>= \case
-      Left t → normalize binds t
-      Right _ → pure old
-  old@(UniVar{}) → pure old
+insertBinds ∷ TermT → RevList (Maybe TermT) → RevList (Maybe TermT)
+insertBinds x xs = xs `revSnoc` Just x
 
--- where
+nestNormCtx ∷ NormCtx → NormCtx
+nestNormCtx = \case
+  NormBinds xs → NormBinds $ (fmap (nested 1) <$> xs) `revSnoc` Nothing
+  NormRewrite a b → NormRewrite (nested 1 a) (nested 1 b)
+
+-- TODO: HasTerm
+normalize ∷ ∀ m sig. (Has (Lift IO) sig m) ⇒ NormCtx → TermT → m TermT
+normalize = \ctx term → case ctx of
+  NormBinds _ → simplify ctx term
+  NormRewrite from to →
+    isEq from term >>= \case
+      EqYes → pure to
+      _ → simplify (NormRewrite from to) term
+ where
+  simplify ∷ NormCtx → TermT → m TermT
+  simplify ctx = \case
+    Block (BlockLet _ _ val) into
+      | NormBinds binds ← ctx → do
+          val' ← normalize (NormBinds binds) val
+          normalize
+            (NormBinds $ insertBinds val' binds)
+            into
+      | otherwise → undefined
+    Block (BlockRewrite from) to → Block <$> (BlockRewrite <$> normalize ctx from) <*> normalize ctx to
+    Lam arg bod → Lam arg <$> normalize (nestNormCtx ctx) bod
+    Op aT op bT → do
+      aT' ← normalize ctx aT
+      bT' ← normalize ctx bT
+      case (aT', bT') of
+        (NatLit a, NatLit b) → pure $ NatLit $ case op of
+          Add → a + b
+          Sub → a - b
+          Mul → a * b
+          Div → a `div` b
+        _ → pure $ Op aT' op bT'
+    App f a → do
+      f' ← normalize ctx f
+      a' ← normalize ctx a
+      case f' of
+        Lam _ bod → normalize (NormBinds [Just a']) bod
+        App (Builtin RecordGet) name → do
+          let rec = a'
+          let search = \case
+                FieldsLit FRecord [] (Just rest) → search rest
+                FieldsLit FRecord ((name2, val) : xs) rest
+                  | name == name2 → val
+                  | otherwise → search $ FieldsLit FRecord xs rest
+                x → recordGet name x
+          pure $ search rec
+        _ → pure $ App f' a'
+    NatLit x → pure $ NatLit x
+    TagLit x → pure $ TagLit x
+    -- TODO: for now, no checks that the tail is a valid one.
+    -- FieldsLit fields [] (Just rest) → _ -- Cool, but not necessary
+    FieldsLit fields origKnown origRest →
+      let
+        ctx' = case fields of
+          FRecord → ctx
+          FRow → nestNormCtx ctx
+       in
+        FieldsLit fields
+          <$> (for origKnown \(n, v) → (,) <$> normalize ctx' n <*> normalize ctx' v)
+          <*> for origRest (normalize ctx')
+    Sorry n x → Sorry n <$> normalize ctx x
+    Var i → case ctx of
+      NormBinds binds →
+        let (later, earlier) = splitAt i $ unUnsafeRevList binds
+         in pure case earlier of
+              (Just val : _) → val
+              _ → Var $ i - length (catMaybes later)
+      NormRewrite{} → pure $ Var i
+    Quantification q x a b → Quantification q x <$> normalize ctx a <*> normalize (nestNormCtx ctx) b
+    Builtin x → pure $ Builtin x
+    BuiltinsVar → pure $ FieldsLit FRecord ((\b → (TagLit $ identOfBuiltin b, Builtin b)) <$> builtinsList) Nothing
+    Pi aM b c → Pi aM <$> normalize ctx b <*> normalize (if isJust aM then nestNormCtx ctx else ctx) c
+    old@(ExVar (ExVar' var) nest) →
+      sendIO (readIORef var) >>= \case
+        Left t → normalize ctx $ nested nest t
+        Right _ → pure old
+    old@(UniVar{}) → pure old
+
 --  extractVar var = maybe (pure Nothing) extractTerm $ HM.lookup var binds
 
 normalizeBuiltin ∷ TermT → TermT
-normalizeBuiltin = unsafePerformIO . normalize (Just . Builtin <$> UnsafeRevList builtinsList)
+normalizeBuiltin = unsafePerformIO . normalize (NormBinds $ Just . Builtin <$> UnsafeRevList builtinsList)
 
 -- | Parse builtin
 parseBQQ ∷ QuasiQuoter
@@ -129,4 +203,4 @@ parseBQQ =
 normalizeFile ∷ FilePath → IO ()
 normalizeFile x = do
   t ← parseFile x
-  render . pTerm' =<< normalize [] t
+  render . pTerm' =<< normalize (NormBinds []) t

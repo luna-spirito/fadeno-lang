@@ -4,6 +4,7 @@ import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.State.Church (evalState, get, modify)
 import Control.Effect.Empty qualified as E
 import Data.ByteString.Char8 (pack)
+import Data.List ((!?))
 import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string)
 import GHC.Exts (IsList (..))
 import GHC.IO.Unsafe (unsafePerformIO)
@@ -13,7 +14,6 @@ import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, layoutSm
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
 import RIO hiding (Reader, ask, local)
 import RIO.List (elemIndex, uncons)
-import RIO.List.Partial qualified as P
 
 newtype RevList a = UnsafeRevList {unUnsafeRevList ∷ [a]} deriving (Functor, Show)
 
@@ -171,8 +171,10 @@ data TermT
     Pi !(Maybe Ident) !TermT !TermT
   | Builtin !BuiltinT
   | BuiltinsVar
-  | ExVar !ExVar' !Int -- Int is for nestness
-  | UniVar !Ident !Int !TermT -- Int is for nestness
+  | -- Int is for nestness. ExVar and UniVar "inhabit space" between
+    -- regular bindings, so ExVar 0 is more nested than Var 0
+    ExVar !ExVar' !Int -- Int is for nestness
+  | UniVar !Ident !Int !TermT -- Int is for nestness, Term for relative type.
   deriving (Show, Eq, Lift)
 
 typOf ∷ TermT → TermT
@@ -412,6 +414,45 @@ parseTop =
     <|> parseMath0
     <|> (err =<< getPos)
 
+--
+-- TODO: replace > with >=, then just make Main to use
+nested' ∷ Int → Int → TermT → TermT
+nested' by = rec
+ where
+  rec fstGlobal = \case
+    Block{} → undefined
+    Lam arg bod → Lam arg $ rec (fstGlobal + 1) bod
+    Op a op b → Op (rec fstGlobal a) op (rec fstGlobal b)
+    App f' a' → App (rec fstGlobal f') (rec fstGlobal a')
+    old@NatLit{} → old
+    old@TagLit{} → old
+    FieldsLit f' a b →
+      let fstGlobal' = case f' of
+            FRecord → fstGlobal
+            FRow → fstGlobal + 1
+       in FieldsLit f' (bimap (rec fstGlobal') (rec fstGlobal') <$> a) (rec fstGlobal' <$> b)
+    old@Sorry{} → old
+    Var i →
+      Var
+        $ if i >= fstGlobal
+          then i + by
+          else i
+    Quantification q n k in_ → Quantification q n (rec fstGlobal k) (rec (fstGlobal + 1) in_)
+    Pi nameM in_ out_ → Pi nameM (rec fstGlobal in_) (rec (fstGlobal + 1) out_)
+    old@Builtin{} → old
+    BuiltinsVar → BuiltinsVar
+    ExVar ex ii →
+      ExVar ex
+        $ if ii >= fstGlobal -- >, not >=!
+          then ii + by
+          else ii
+    UniVar a ii c → UniVar a (if ii >= fstGlobal then ii + by else ii) c
+
+nested ∷ Int → TermT → TermT
+nested by = nested' by 0
+
+--
+
 pIdent ∷ Ident → Doc AnsiStyle
 pIdent = \case
   Ident x → pretty $ decodeUtf8Lenient x
@@ -569,12 +610,12 @@ pTerm (oldPrec, vars) =
          in
           "{" <> braceS <> renderFields knownFields <> renderRest <> braceE <> "}"
       )
-    Var x → (6, pIdent $ unUnsafeRevList vars P.!! x)
+    Var x → (6, maybe ("@" <> pretty x) pIdent $ unUnsafeRevList vars !? x)
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
     ExVar (ExVar' x) l → case unsafePerformIO (readIORef x) of
-      Left t → (oldPrec, pTerm (oldPrec, vars) t)
+      Left t → (oldPrec, pTerm (oldPrec, vars) $ nested l t) -- pTerm (oldPrec, vars) $ nested l t)
       Right (n, t) → (6, "(exi@" <> pretty l <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) t') t <> ")")
     UniVar x' l t → (6, "(uni@" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
 
