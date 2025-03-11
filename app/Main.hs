@@ -3,42 +3,26 @@
 module Main where
 
 import Control.Algebra
-import Control.Carrier.Accum.Church (evalAccum)
-import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.Error.Church (ErrorC, runError)
 import Control.Carrier.Fresh.Church (FreshC, evalFresh)
-import Control.Carrier.Lift (LiftC, runM)
 import Control.Carrier.Reader (ReaderC, runReader)
 import Control.Carrier.State.Church (StateC, evalState)
-import Control.Carrier.Writer.Church (WriterC, execWriter, runWriter)
-import Control.Effect.Accum (add, look)
-import Control.Effect.Empty qualified as E
+import Control.Carrier.Writer.Church (WriterC, runWriter)
 import Control.Effect.Error (Error, Throw, throwError)
 import Control.Effect.Fresh (Fresh, fresh)
-import Control.Effect.Lift (Lift, sendIO, sendM)
+import Control.Effect.Lift (Lift, sendIO)
 import Control.Effect.Reader (Reader, ask, local)
 import Control.Effect.State (State, get, modify, state)
 import Control.Effect.Writer (Writer, censor, listen, tell)
-import Data.Bits (unsafeShiftL, unsafeShiftR, (.&.), (.|.))
-import Data.ByteString.Builder (toLazyByteString)
 import Data.ByteString.Char8 qualified as BS
-import Data.IntMap.Strict qualified as IM
-import Data.Kind (Type)
-import Data.List (intercalate, uncons, (!?))
-import Data.Serialize (PutM, execPut, putBuilder, putWord32be, putWord64be, putWord8, runPutMBuilder)
+import Data.List ((!?))
 import GHC.Exts (IsList (..))
 import Normalize (EqRes (..), NormCtx (..), isEq, normalize, parseBQQ)
-import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), Ident (..), Quantifier (..), RevList (..), TermT (..), builtinsList, identOfBuiltin, nested, nested', pIdent, pTerm', parseFile, recordOf, render, revSnoc, revUnsnoc, rowOf, typOf)
-import Prettyprinter (Doc, Pretty, annotate, indent, line, nest, pretty, (<+>))
+import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), Ident (..), Quantifier (..), RevList (..), TermT (..), builtinsList, identOfBuiltin, nested', nestedMeta, nestedVal, pIdent, pTerm', parseFile, recordOf, render, revSnoc, revUnsnoc, rowOf, typOf)
+import Prettyprinter (Doc, annotate, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, ask, link, local, runReader, toList)
-import RIO.HashMap qualified as HM
 import RIO.Partial qualified as P
-import RIO.Seq (Seq (..))
-import RIO.Seq qualified as S
-import RIO.Vector qualified as V
-import System.IO (print)
-import Type.Reflection ((:~:) (..))
 
 {-
 Whenever a node interacts with a negative package, DO NOT UNWRAP.
@@ -195,27 +179,26 @@ freshIdent ∷ (Has Solve sig m) ⇒ m Ident
 freshIdent = UIdent <$> fresh
 
 -- Probably access to Solve should be restricted in ExVarPushC...
--- First Int is the target scope, second (typically = 0) is the current scope
-type ExVarPushC m = ReaderC Int (WriterC (RevList ExVar') m)
+type ExVarPushC m = ReaderC (Int, Int) (WriterC (RevList ExVar') m)
 
 -- `Maybe TermT` is absolute.
-pushExVar ∷ (Has (Writer (RevList ExVar') :+: Reader Int :+: Solve) sig m) ⇒ Maybe TermT → m TermT
+pushExVar ∷ (Has (Writer (RevList ExVar') :+: Reader (Int, Int) :+: Solve) sig m) ⇒ Maybe TermT → m TermT
 pushExVar t = do
   scope ← ask
   name ← freshIdent
-  metaVar' ← fmap ExVar' $ sendIO $ newIORef $ Right (name, nested (-scope) <$> t)
+  metaVar' ← fmap ExVar' $ sendIO $ newIORef $ Right (name, nested' (-fst scope, -snd scope) <$> t)
   tell @(RevList _) [metaVar']
   let res = ExVar metaVar' scope
   stackLog $ "intro" <+> pTerm' res
   pure res
 
-pushUniVar ∷ (Has (Reader Int :+: Solve) sig m) ⇒ TermT → m TermT
+pushUniVar ∷ (Has (Reader (Int, Int) :+: Solve) sig m) ⇒ TermT → m TermT
 pushUniVar ty = do
   stackLog $ pTerm' ty
   -- Pushed ephemerally.
   scope ← ask
   ident ← freshIdent
-  let res = UniVar ident scope ty
+  let res = UniVar ident (snd scope) $ nested' (-fst scope, -snd scope) ty
   stackLog $ "intro" <+> pTerm' res
   pure res
 
@@ -236,19 +219,19 @@ adjustList f 0 (x : xs) = f x : xs
 adjustList f n (x : xs) = x : adjustList f (n - 1) xs
 adjustList _ _ [] = error "impossible"
 
-beforeEx ∷ (Has Solve sig m) ⇒ Int → ExVar' → (ExVarPushC m (m a)) → m a
-beforeEx scope ex act = do
+beforeEx ∷ (Has Solve sig m) ⇒ (Int, Int) → ExVar' → (ExVarPushC m (m a)) → m a
+beforeEx scope@(_, metaScope) ex act = do
   resM ← stackScope ("before " <> pTerm' (ExVar ex scope)) do
     (inserted, resM) ← runWriter (curry pure) $ runReader scope act
     stackLog . pretty . show =<< get @(RevList (RevList ExVar'))
-    modify $ UnsafeRevList . adjustList (revInsertBefore inserted (== ex) . traceShowId . traceShow (pTerm' (ExVar ex scope))) scope . unUnsafeRevList
+    modify $ UnsafeRevList . adjustList (revInsertBefore inserted (== ex) . traceShowId . traceShow (pTerm' (ExVar ex scope))) metaScope . unUnsafeRevList
     pure resM
   resM
 
 scoped' ∷ (Has Solve sig m) ⇒ ((TermT → TermT) → a → a) → ExVarPushC m (m a) → m a
 scoped' tmap act = do
   tyM ← stackScope "scoped" do
-    (origExs, tyM) ← runWriter (curry pure) $ runReader 0 act
+    (origExs, tyM) ← runWriter (curry pure) $ runReader (0, 0) act
     modify (`revSnoc` origExs)
     pure tyM
   ty ← tyM
@@ -267,17 +250,18 @@ scoped' tmap act = do
               -- [0] -> forall. $0
               -- \$0 + [0] -> forall. $1 + $0
               -- \$1 $0 (\ $0 + [1]) -> forall. $2 $1 (\ $0 + $1)
-              sendIO $ writeIORef x $ Left $ Var i
+              sendIO $ writeIORef x $ Left $ Var 0
+              stackLog "???"
               (\(ip, f) → (i + ip, f `tmap` ty')) <$> case xTyM of
                 Just xTy →
-                  pure $ (1, Quantification Forall variable' (nested (-i - 1) xTy) . nested' 1 1)
+                  pure $ (1, Quantification Forall variable' {-(nestedVal (-i - 1)-} xTy {-)-} . nestedVal 1 . traceShowId)
                 Nothing → do
                   n ← freshIdent
                   pure
                     ( 2
                     , Quantification Forall n (Builtin U32)
                         . Quantification Forall variable' (typOf $ Var 0)
-                        . nested' 2 1
+                        . nestedVal 2
                     )
       )
       (0, ty)
@@ -310,7 +294,7 @@ insMeta scope var = do
 scoped_ ∷ (Has Solve sig m) ⇒ ExVarPushC m (m a) → m a
 scoped_ act = do
   -- Bad copy-pasta
-  (origExs, tyM) ← runWriter (curry pure) $ runReader 0 act
+  (origExs, tyM) ← runWriter (curry pure) $ runReader (0, 0) act
   modify $ (`revSnoc` origExs)
   ty ← tyM
   modify $ fst . fromMaybe (error "Scope disappeared") . revUnsnoc @(RevList ExVar')
@@ -319,30 +303,39 @@ scoped_ act = do
 scoped ∷ (Has Solve sig m) ⇒ ExVarPushC m (m TermT) → m TermT
 scoped = scoped' id
 
+deleteWhere ∷ ∀ a. (a → Bool) → [a] → [a]
+deleteWhere f = go
+ where
+  go = \case
+    [] → error "impossible"
+    (x : xs)
+      | f x → xs
+      | otherwise → x : go xs
+
 markSolved ∷ (Has Solve sig m) ⇒ Int → ExVar' → m ()
 markSolved scope var = do
   modify @(RevList (RevList ExVar'))
     $ UnsafeRevList
     . adjustList
-      (\(UnsafeRevList l) → UnsafeRevList $ filter (/= var) l)
+      (\(UnsafeRevList l) → UnsafeRevList $ deleteWhere (== var) l)
       scope
     . unUnsafeRevList
 
 -- Writes & checks
 -- Writes *absolute* value to meta.
 -- TODO: Check that the value is actually writeable and causes no overflows.
-writeMeta ∷ (Has Solve sig m) ⇒ (Int, Maybe TermT) → ExVar' → TermT → m ()
+writeMeta ∷ (Has Solve sig m) ⇒ ((Int, Int), Maybe TermT) → ExVar' → TermT → m ()
 writeMeta (scope, tyM) (ExVar' var) absVal = do
   stackLog $ "refine " <> pTerm' (ExVar (ExVar' var) scope) <+> "=" <+> pTerm' absVal
-  let relVal = nested (-scope) absVal
+  let relVal = nested' (-fst scope, -snd scope) absVal
   for_ tyM $ infer [] relVal . Check
   sendIO $ writeIORef var $ Left relVal
-  markSolved scope (ExVar' var)
+  markSolved (snd scope) (ExVar' var)
 
 -- TODO: So, return the proper ordering, but just use
 -- TODO: Decipher what previous TODO is supposed to mean
 -- Instantiates meta with *absolute* value.
-instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ (Int, Maybe TermT) → ExVar' → TermT → m ()
+instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ ((Int, Int), Maybe TermT) → ExVar' → TermT → m ()
 instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1 →
   -- TODO: avoid nested?
   -- Accepts and returns absolute
@@ -356,8 +349,8 @@ instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1
               -- Either var1 or origVar2 is introduced earlier. We need to identify, which one.
               var2Earlier ←
                 if
-                  | scope2 < scope1 → pure True
-                  | scope2 > scope1 → pure False
+                  | snd scope2 < snd scope1 → pure True
+                  | snd scope2 > snd scope1 → pure False
                   | otherwise → do
                       -- Well, that's bad, like really bad.
                       let go = \case
@@ -366,7 +359,7 @@ instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1
                               | x == ExVar' var2 → False
                               | otherwise → go xs
                             _ → error "Imposible"
-                      UnsafeRevList exs ← P.fromJust . (!? scope1) . unUnsafeRevList <$> get
+                      UnsafeRevList exs ← P.fromJust . (!? snd scope1) . unUnsafeRevList <$> get
                       pure $ go exs
               if var2Earlier
                 then pure $ ExVar (ExVar' var2) scope2
@@ -376,7 +369,7 @@ instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1
                     writeMeta (scope2, t2) (ExVar' var2) var1R
                     pure var1R
         uni@(UniVar _ scope2 _)
-          | scope2 <= scope1 → pure uni
+          | scope2 <= snd scope1 → pure uni
         App f a → App <$> instMeta' f <*> instMeta' a
         FieldsLit FRow known rest →
           FieldsLit FRow
@@ -403,21 +396,21 @@ instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1
                       _ → r
               _ → r
 
-withMono ∷ (Has Solve sig m) ⇒ ((TermT → TermT) → a → a) → TermT → (ExVar' → (Int, Maybe TermT) → m a) → (TermT → m a) → m a
+withMono ∷ (Has Solve sig m) ⇒ ((TermT → TermT) → a → a) → TermT → (ExVar' → ((Int, Int), Maybe TermT) → m a) → (TermT → m a) → m a
 withMono tmap = \a onMeta onOther → withMono' onMeta onOther a
  where
   withMono' onMeta onOther = \case
     Sorry _ v → withMono' onMeta onOther v
     ExVar (ExVar' var) nesting →
       sendIO (readIORef var) >>= \case
-        Left v → withMono' onMeta onOther $ nested nesting v
+        Left v → withMono' onMeta onOther $ nested' nesting v
         Right (_, v) → onMeta (ExVar' var) (nesting, v)
     Quantification Forall _name kind v → scoped' tmap do
       ty ← pushExVar $ Just kind
-      pure $ withMono' onMeta onOther =<< normalize (NormRewrite (Var 0) ty) v
+      pure $ withMono' onMeta onOther =<< normalize (NormBinds [Just ty]) (nestedMeta 1 v)
     Quantification Exists _name kind v → scoped' tmap do
       ty ← pushUniVar kind
-      pure $ withMono' onMeta onOther =<< normalize (NormRewrite (Var 0) ty) v
+      pure $ withMono' onMeta onOther =<< normalize (NormBinds [Just ty]) (nestedMeta 1 v)
     r → onOther r
 
 data LookupRes
@@ -526,7 +519,7 @@ insertCtx ∷ (Maybe TermT, TermT) → CtxT → CtxT -- TODO: This is absolutely
 insertCtx (xVal, xTy) xs =
   ( if isJust xVal
       then xs
-      else (bimap (fmap (nested 1)) (nested 1) <$> xs)
+      else (bimap (fmap (nestedVal 1)) (nestedVal 1) <$> xs)
   )
     `revSnoc` (xVal, xTy)
 
@@ -547,7 +540,7 @@ infer ctx = (\t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ 
     (term, Check (Quantification Forall _ xTy yT)) → scoped_ do
       x' ← pushUniVar xTy
       pure do
-        yT' ← normalize (NormRewrite (Var 0) x') yT
+        yT' ← normalize (NormBinds [Just x']) $ nestedMeta 1 yT
         infer ctx term $ Check yT'
     -- TODO: breaks.
     -- (term, Check ((Quantification Exists xName Ty yT))) → scoped_ do -- TODO: not just for Ty!
@@ -588,7 +581,7 @@ infer ctx = (\t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ 
         Just inName → scoped_ do
           arg' ← pushUniVar inT
           pure do
-            outT' ← normalize (NormRewrite (Var 0) arg') outT
+            outT' ← normalize (NormBinds [Just arg']) $ nestedMeta 1 outT
             inferBod (Just arg') outT'
     -- pure do
     --   outT' ← normalize (NormBinds $ [Just arg']) outT
@@ -798,10 +791,10 @@ infer ctx = (\t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ 
     (BuiltinsVar, Infer) → pure $ App (Builtin Record) $ FieldsLit FRow ((\b → (TagLit $ identOfBuiltin b, typOfBuiltin b)) <$> builtinsList) Nothing -- infer ctx builtinsVar Infer -- TODO: redo.
     (ExVar (ExVar' i) nesting, mode) →
       sendIO (readIORef i) >>= \case
-        Left t → infer ctx (nested nesting t) mode
+        Left t → infer ctx (nested' nesting t) mode
         Right (_, Just ty) → case mode of
-          Infer → pure $ nested nesting ty
-          Check ty2 → subtype (nested nesting ty) ty2
+          Infer → pure $ nested' nesting ty
+          Check ty2 → subtype (nested' nesting ty) ty2
         Right (_, Nothing) → stackError "Cannot infer value of existential metavariable"
     (UniVar _ _ t, Infer) → pure t
     (term, Check c) → stackScope ("check via infer" <+> pTerm' term <+> ":" <+> pTerm' c) do
@@ -905,7 +898,7 @@ subtype = \a b →
     (Sorry _ t) → unwrapExs $ t
     (ExVar (ExVar' a) scope) →
       sendIO (readIORef a) >>= \case
-        Left i → unwrapExs $ nested scope i
+        Left i → unwrapExs $ nested' scope i
         _ → pure inp
     _ → pure inp
   subtypeMeta (ExVar' a) aScope bT =

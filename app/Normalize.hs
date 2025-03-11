@@ -4,7 +4,7 @@ import Control.Algebra
 import Control.Effect.Lift (Lift, sendIO)
 import Data.List (splitAt)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), OpT (..), RevList (..), TermT (..), builtinsList, identOfBuiltin, nested, pTerm', parseFile, parseQQ, recordGet, render, revSnoc)
+import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), OpT (..), RevList (..), TermT (..), builtinsList, identOfBuiltin, nested', nestedVal, pTerm', parseFile, parseQQ, recordGet, render, revSnoc)
 import RIO hiding (Reader, ask, link, local, runReader, to, toList)
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -106,8 +106,8 @@ insertBinds x xs = xs `revSnoc` Just x
 
 nestNormCtx ∷ NormCtx → NormCtx
 nestNormCtx = \case
-  NormBinds xs → NormBinds $ (fmap (nested 1) <$> xs) `revSnoc` Nothing
-  NormRewrite a b → NormRewrite (nested 1 a) (nested 1 b)
+  NormBinds xs → NormBinds $ (fmap (nestedVal 1) <$> xs) `revSnoc` Nothing
+  NormRewrite a b → NormRewrite (nestedVal 1 a) (nestedVal 1 b)
 
 -- TODO: HasTerm
 normalize ∷ ∀ m sig. (Has (Lift IO) sig m) ⇒ NormCtx → TermT → m TermT
@@ -181,7 +181,7 @@ normalize = \ctx term → case ctx of
     Pi aM b c → Pi aM <$> normalize ctx b <*> normalize (if isJust aM then nestNormCtx ctx else ctx) c
     old@(ExVar (ExVar' var) nest) →
       sendIO (readIORef var) >>= \case
-        Left t → normalize ctx $ nested nest t
+        Left t → normalize ctx $ nested' nest t
         Right _ → pure old
     old@(UniVar{}) → pure old
 

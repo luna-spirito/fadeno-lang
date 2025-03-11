@@ -173,8 +173,8 @@ data TermT
   | BuiltinsVar
   | -- Int is for nestness. ExVar and UniVar "inhabit space" between
     -- regular bindings, so ExVar 0 is more nested than Var 0
-    ExVar !ExVar' !Int -- Int is for nestness
-  | UniVar !Ident !Int !TermT -- Int is for nestness, Term for relative type.
+    ExVar !ExVar' !(Int, Int) -- (val nestness, meta nestness)
+  | UniVar !Ident !Int !TermT -- Int is for meta nestness, Term for **absolute** type.
   deriving (Show, Eq, Lift)
 
 typOf ∷ TermT → TermT
@@ -414,10 +414,9 @@ parseTop =
     <|> parseMath0
     <|> (err =<< getPos)
 
---
--- TODO: replace > with >=, then just make Main to use
-nested' ∷ Int → Int → TermT → TermT
-nested' by = rec
+-- TODO: This function performs both nesting of vals and metas. Probably should be separated.
+nested' ∷ (Int, Int) → TermT → TermT
+nested' (valBy, metaBy) = rec (0 ∷ Int)
  where
   rec fstGlobal = \case
     Block{} → undefined
@@ -435,21 +434,27 @@ nested' by = rec
     Var i →
       Var
         $ if i >= fstGlobal
-          then i + by
+          then i + valBy
           else i
     Quantification q n k in_ → Quantification q n (rec fstGlobal k) (rec (fstGlobal + 1) in_)
-    Pi nameM in_ out_ → Pi nameM (rec fstGlobal in_) (rec (fstGlobal + 1) out_)
+    Pi nameM in_ out_ → Pi nameM (rec fstGlobal in_) (rec (if isJust nameM then fstGlobal + 1 else fstGlobal) out_)
     old@Builtin{} → old
     BuiltinsVar → BuiltinsVar
-    ExVar ex ii →
-      ExVar ex
-        $ if ii >= fstGlobal -- >, not >=!
-          then ii + by
-          else ii
-    UniVar a ii c → UniVar a (if ii >= fstGlobal then ii + by else ii) c
+    ExVar ex (origValN, origMetaN) →
+      ExVar
+        ex
+        ( if origValN >= fstGlobal -- >, not >=!
+            then origValN + valBy
+            else origValN
+        , origMetaN + metaBy
+        )
+    UniVar a origMetaN c → UniVar a (origMetaN + metaBy) $ rec fstGlobal c
 
-nested ∷ Int → TermT → TermT
-nested by = nested' by 0
+nestedVal ∷ Int → TermT → TermT
+nestedVal by = nested' (by, 0)
+
+nestedMeta ∷ Int → TermT → TermT
+nestedMeta by = nested' (0, by)
 
 --
 
@@ -615,7 +620,7 @@ pTerm (oldPrec, vars) =
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
     ExVar (ExVar' x) l → case unsafePerformIO (readIORef x) of
-      Left t → (oldPrec, pTerm (oldPrec, vars) $ nested l t) -- pTerm (oldPrec, vars) $ nested l t)
+      Left t → (oldPrec, pTerm (oldPrec, vars) $ nested' l t)
       Right (n, t) → (6, "(exi@" <> pretty l <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) t') t <> ")")
     UniVar x' l t → (6, "(uni@" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
 
