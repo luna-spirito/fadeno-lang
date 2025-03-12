@@ -4,35 +4,33 @@ import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.State.Church (evalState, get, modify)
 import Control.Effect.Empty qualified as E
 import Data.ByteString.Char8 (pack)
-import Data.List ((!?))
+import Data.RRBVector (Vector, findIndexR, (!?), (|>))
 import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string)
-import GHC.Exts (IsList (..))
 import GHC.IO.Unsafe (unsafePerformIO)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (Lift (..))
 import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, layoutSmart, line, nest, softline, vsep, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
-import RIO hiding (Reader, ask, local)
-import RIO.List (elemIndex, uncons)
+import RIO hiding (Reader, Vector, ask, local)
 
-newtype RevList a = UnsafeRevList {unUnsafeRevList ∷ [a]} deriving (Functor, Show)
+-- newtype RevList a = UnsafeRevList {unUnsafeRevList ∷ [a]} deriving (Functor, Show)
 
-instance Semigroup (RevList a) where
-  UnsafeRevList a <> UnsafeRevList b = UnsafeRevList $ b <> a
+-- instance Semigroup (RevList a) where
+--   UnsafeRevList a <> UnsafeRevList b = UnsafeRevList $ b <> a
 
-instance Monoid (RevList a) where
-  mempty = []
+-- instance Monoid (RevList a) where
+--   mempty = []
 
-revSnoc ∷ RevList a → a → RevList a
-revSnoc (UnsafeRevList ls) x = UnsafeRevList $ x : ls
+-- revSnoc ∷ RevList a → a → RevList a
+-- revSnoc (UnsafeRevList ls) x = UnsafeRevList $ x : ls
 
-revUnsnoc ∷ RevList a → Maybe (RevList a, a)
-revUnsnoc (UnsafeRevList x) = (\(v, l) → (UnsafeRevList l, v)) <$> uncons x
+-- revUnsnoc ∷ RevList a → Maybe (RevList a, a)
+-- revUnsnoc (UnsafeRevList x) = (\(v, l) → (UnsafeRevList l, v)) <$> uncons x
 
-instance IsList (RevList a) where
-  type Item (RevList a) = a
-  fromList ls = UnsafeRevList $ reverse ls
-  toList (UnsafeRevList ls) = reverse ls
+-- instance IsList (RevList a) where
+--   type Item (RevList a) = a
+--   fromList ls = UnsafeRevList $ reverse ls
+--   toList (UnsafeRevList ls) = reverse ls
 
 data OpT
   = Add
@@ -46,7 +44,7 @@ data Ident = Ident !ByteString | UIdent !Int
 
 instance Hashable Ident
 
-type Parser' = Parser (RevList Ident) Pos
+type Parser' = Parser (Vector Ident) Pos
 
 space ∷ Parser' ()
 space =
@@ -239,7 +237,7 @@ parsePrim = token do
       <|> ( do
               fields ← token $ $(char '{') *> (($(char '(') $> FRow) <|> pure FRecord)
               let maybeInsertSelf = case fields of
-                    FRow → local (`revSnoc` Ident "self")
+                    FRow → local (|> Ident "self")
                     FRecord → id
               maybeInsertSelf do
                 let parseField = do
@@ -263,7 +261,7 @@ parsePrim = token do
               <$> do
                 i ← notFollowedBy ident $ token $(char '=')
                 vars ← ask
-                case elemIndex i (unUnsafeRevList vars) of
+                case findIndexR (== i) vars of
                   Just n → pure n
                   Nothing → err =<< getPos -- TODO: better errors, overall
           )
@@ -299,7 +297,7 @@ parseTy =
             token
               $ ((,App (Builtin Type) $ NatLit 0) <$> ident)
               <|> ($(char '(') *> ((,) <$> ident <*> kind) <* $(char ')'))
-          Quantification q ty ki <$> local (`revSnoc` ty) manyEntries
+          Quantification q ty ki <$> local (|> ty) manyEntries
         manyEntries =
           someEntries <|> (token $(char '.') *> parseTy)
       someEntries
@@ -317,7 +315,7 @@ parseTy =
       inTy ← parseApp
       ( ( do
             token $ $(string "->")
-            outT ← maybe id (local . flip revSnoc) inName parseTy
+            outT ← maybe id (local . flip (|>)) inName parseTy
             pure $ Pi inName inTy outT
         )
           <|> ( do
@@ -373,7 +371,7 @@ parseBlock = do
     someEntries =
       ( do
           (name, ty, expr) ← binding
-          rest ← (local (`revSnoc` name) manyEntries)
+          rest ← (local (|> name) manyEntries)
           pure $ Block (BlockLet name ty expr) rest
       )
         <|> ( do
@@ -399,7 +397,7 @@ parseLam = token do
   let
     parseBod = \case
       [] → parseTop
-      (x : xs) → local (`revSnoc` x) $ parseBod xs
+      (x : xs) → local (|> x) $ parseBod xs
   bod ← parseBod idents
   pure $ foldr Lam bod idents
 
@@ -517,7 +515,7 @@ isSimple =
    in runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
 
 -- TODO: Concise syntax for `\` and `forall`
-pTerm ∷ (Int, RevList Ident) → TermT → Doc AnsiStyle
+pTerm ∷ (Int, Vector Ident) → TermT → Doc AnsiStyle
 pTerm (oldPrec, vars) =
   withPrec oldPrec . \case
     Lam arg x →
@@ -531,7 +529,7 @@ pTerm (oldPrec, vars) =
               <> pIdent arg
               <> annotate (color Magenta) "."
               <> sep
-              <> pTerm (0, vars `revSnoc` arg) x
+              <> pTerm (0, vars |> arg) x
       )
     block@(Block{}) →
       ( 1
@@ -551,7 +549,7 @@ pTerm (oldPrec, vars) =
                           <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTerm (0, vars') val)
                       )
                         : acc
-                    , vars' `revSnoc` name
+                    , vars' |> name
                     )
                   BlockRewrite x → (("rewrite" <+> pTerm (0, vars') x) : acc, vars')
               )
@@ -578,10 +576,10 @@ pTerm (oldPrec, vars) =
             q' = case q of
               Forall → "forall"
               Exists → "exists"
-         in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm (4, vars `revSnoc` name) ty
+         in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm (4, vars |> name) ty
       )
     Sorry x _ → (6, "sorry/" <> pIdent x) -- 6 and not 4 since type is not rendered
-    Pi inName inTy outTy → (4, maybe mempty (\x → pIdent x <+> ": ") inName <> pTerm (5, vars) inTy <+> "->" <+> pTerm (4, maybe id (flip revSnoc) inName vars) outTy)
+    Pi inName inTy outTy → (4, maybe mempty (\x → pIdent x <+> ": ") inName <> pTerm (5, vars) inTy <+> "->" <+> pTerm (4, maybe id (flip (|>)) inName vars) outTy)
     -- Ty x -> (4, "Type/" <+> pTerm 6 x)
     App (App (Builtin RecordGet) (TagLit tag)) rec →
       (6, pTerm (6, vars) rec <> "." <> pIdent tag)
@@ -599,7 +597,7 @@ pTerm (oldPrec, vars) =
       , let
           vars' = case fields of
             FRecord → vars
-            FRow → vars `revSnoc` Ident "self"
+            FRow → vars |> Ident "self"
           field (n, v) = pTerm (6, vars') n <+> ":" <+> pTerm (0, vars') v
           -- TODO: separator other than " " if not isSimple.
           renderRest = case rest of
@@ -615,7 +613,7 @@ pTerm (oldPrec, vars) =
          in
           "{" <> braceS <> renderFields knownFields <> renderRest <> braceE <> "}"
       )
-    Var x → (6, maybe ("@" <> pretty x) pIdent $ unUnsafeRevList vars !? x)
+    Var x → (6, maybe ("@" <> pretty x) pIdent $ vars !? x)
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
@@ -627,13 +625,13 @@ pTerm (oldPrec, vars) =
 pTerm' ∷ TermT → Doc AnsiStyle
 pTerm' = pTerm (0, [])
 
-parse ∷ RevList Ident → ByteString → Either Text TermT
+parse ∷ Vector Ident → ByteString → Either Text TermT
 parse vars inp = case runParser (parseTop <* eof) vars 0 inp of
   OK x _ "" → Right x
   Err e → Left $ "Unable to parse at " <> tshow (posLineCols inp [e])
   _ → Left "Internal error: uncaught failure"
 
-parseQQ ∷ RevList Ident → QuasiQuoter
+parseQQ ∷ Vector Ident → QuasiQuoter
 parseQQ vars =
   QuasiQuoter
     { quoteExp = \s → case parse vars (pack s) of

@@ -2,10 +2,11 @@ module Normalize where
 
 import Control.Algebra
 import Control.Effect.Lift (Lift, sendIO)
-import Data.List (splitAt)
+import Data.RRBVector (Vector, splitAt, viewl, (|>))
+import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), OpT (..), RevList (..), TermT (..), builtinsList, identOfBuiltin, nested', nestedVal, pTerm', parseFile, parseQQ, recordGet, render, revSnoc)
-import RIO hiding (Reader, ask, link, local, runReader, to, toList)
+import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), OpT (..), TermT (..), builtinsList, identOfBuiltin, nested', pTerm', parseFile, parseQQ, recordGet, render)
+import RIO hiding (Reader, Vector, ask, link, local, runReader, to, toList)
 import System.IO.Unsafe (unsafePerformIO)
 
 -- class HasTerm m a where
@@ -98,16 +99,20 @@ isEq = curry \case
       _ → pure EqUnknown
 
 data NormCtx
-  = NormBinds !(RevList (Maybe TermT))
+  = NormBinds !(Vector (Maybe TermT))
   | NormRewrite !TermT !TermT -- on normalized
 
-insertBinds ∷ TermT → RevList (Maybe TermT) → RevList (Maybe TermT)
-insertBinds x xs = xs `revSnoc` Just x
+-- insertBinds ∷ TermT → Vector (Maybe TermT) → Vector (Maybe TermT)
+-- insertBinds x xs = xs |> Just x
 
+-- nestNormCtx ∷ NormCtx → NormCtx
+-- nestNormCtx = \case
+--   NormBinds xs → NormBinds $ (fmap (nestedVal 1) <$> xs) |> Nothing
+--   NormRewrite a b → NormRewrite (nestedVal 1 a) (nestedVal 1 b)
 nestNormCtx ∷ NormCtx → NormCtx
 nestNormCtx = \case
-  NormBinds xs → NormBinds $ (fmap (nestedVal 1) <$> xs) `revSnoc` Nothing
-  NormRewrite a b → NormRewrite (nestedVal 1 a) (nestedVal 1 b)
+  NormBinds xs → NormBinds (xs |> Nothing)
+  a@NormRewrite{} → a
 
 -- TODO: HasTerm
 normalize ∷ ∀ m sig. (Has (Lift IO) sig m) ⇒ NormCtx → TermT → m TermT
@@ -124,7 +129,7 @@ normalize = \ctx term → case ctx of
       | NormBinds binds ← ctx → do
           val' ← normalize (NormBinds binds) val
           normalize
-            (NormBinds $ insertBinds val' binds)
+            (NormBinds $ binds |> Just val')
             into
       | otherwise → undefined
     Block (BlockRewrite from) to → Block <$> (BlockRewrite <$> normalize ctx from) <*> normalize ctx to
@@ -170,10 +175,10 @@ normalize = \ctx term → case ctx of
     Sorry n x → Sorry n <$> normalize ctx x
     Var i → case ctx of
       NormBinds binds →
-        let (later, earlier) = splitAt i $ unUnsafeRevList binds
-         in pure case earlier of
-              (Just val : _) → val
-              _ → Var $ i - length (catMaybes later)
+        let (before, after) = splitAt i binds
+         in pure case after of
+              (viewl → Just (Just val, _)) → val
+              _ → Var $ i - foldl' (\acc x → if isJust x then acc + 1 else acc) 0 before
       NormRewrite{} → pure $ Var i
     Quantification q x a b → Quantification q x <$> normalize ctx a <*> normalize (nestNormCtx ctx) b
     Builtin x → pure $ Builtin x
@@ -188,13 +193,13 @@ normalize = \ctx term → case ctx of
 --  extractVar var = maybe (pure Nothing) extractTerm $ HM.lookup var binds
 
 normalizeBuiltin ∷ TermT → TermT
-normalizeBuiltin = unsafePerformIO . normalize (NormBinds $ Just . Builtin <$> UnsafeRevList builtinsList)
+normalizeBuiltin = unsafePerformIO . normalize (NormBinds $ Just . Builtin <$> fromList builtinsList)
 
 -- | Parse builtin
 parseBQQ ∷ QuasiQuoter
 parseBQQ =
   QuasiQuoter
-    { quoteExp = \s → ⟦normalizeBuiltin $(quoteExp (parseQQ $ identOfBuiltin <$> UnsafeRevList builtinsList) s)⟧
+    { quoteExp = \s → ⟦normalizeBuiltin $(quoteExp (parseQQ $ identOfBuiltin <$> fromList builtinsList) s)⟧
     , quotePat = error "No pattern support"
     , quoteType = error "No type support"
     , quoteDec = error "No declaration support"

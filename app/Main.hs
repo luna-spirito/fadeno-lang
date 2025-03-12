@@ -18,7 +18,7 @@ import Data.ByteString.Char8 qualified as BS
 import Data.List ((!?))
 import GHC.Exts (IsList (..))
 import Normalize (EqRes (..), NormCtx (..), isEq, normalize, parseBQQ)
-import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), Ident (..), Quantifier (..), RevList (..), TermT (..), builtinsList, identOfBuiltin, nested', nestedMeta, nestedVal, pIdent, pTerm', parseFile, recordOf, render, revSnoc, revUnsnoc, rowOf, typOf)
+import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), Ident (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, nested', nestedMeta, nestedVal, pIdent, pTerm', parseFile, recordOf, render, rowOf, typOf)
 import Prettyprinter (Doc, annotate, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, ask, link, local, runReader, toList)

@@ -15,5 +15,7 @@
 // // in \x. id x
 // in id fadeno.U32
 
-
-\x. x
+\z.
+  x = 4
+  y = 5
+  in \w. y + w + x * x * z
