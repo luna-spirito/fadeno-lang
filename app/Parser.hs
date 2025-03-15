@@ -140,7 +140,7 @@ data BlockT = BlockLet !Ident !(Maybe TermT) !TermT | BlockRewrite !TermT
   deriving (Show, Eq, Lift)
 
 -- Ident is just for debugging here.
-newtype ExVar' = ExVar' (IORef (Either TermT (Ident, Maybe TermT))) deriving (Eq)
+newtype ExVar' = ExVar' (IORef (Either PortableTermT (Ident, Int, Maybe PortableTermT))) deriving (Eq)
 
 instance Show ExVar' where
   show (ExVar' x) = case unsafePerformIO $ readIORef x of
@@ -171,9 +171,74 @@ data TermT
   | BuiltinsVar
   | -- Int is for nestness. ExVar and UniVar "inhabit space" between
     -- regular bindings, so ExVar 0 is more nested than Var 0
-    ExVar !ExVar' !(Int, Int) -- (val nestness, meta nestness)
-  | UniVar !Ident !Int !TermT -- Int is for meta nestness, Term for **absolute** type.
+    ExVar !ExVar'
+  | UniVar !Ident !Int !PortableTermT
   deriving (Show, Eq, Lift)
+
+data PortableTermT = PortableTerm !Int !TermT deriving (Show, Eq, Lift)
+
+portTerm ∷ Int → Int → TermT → TermT
+portTerm oldFirstLocal newFirstLocal = rec
+ where
+  rec ∷ TermT → TermT
+  rec = \case
+    Block{} → undefined
+    Lam arg bod → Lam arg $ rec bod
+    Op a op b → Op (rec a) op (rec b)
+    App f' a' → App (rec f') (rec a')
+    old@NatLit{} → old
+    old@TagLit{} → old
+    FieldsLit f' a b → FieldsLit f' (bimap rec rec <$> a) (rec <$> b)
+    old@Sorry{} → old
+    Var i →
+      Var
+        $ if i >= oldFirstLocal
+          then i - oldFirstLocal + newFirstLocal
+          else i
+    Quantification q n k in_ → Quantification q n (rec k) (rec in_)
+    Pi nameM in_ out_ → Pi nameM (rec in_) (rec out_)
+    old@Builtin{} → old
+    BuiltinsVar → BuiltinsVar
+    old@ExVar{} → old
+    old@UniVar{} → old
+
+unport ∷ PortableTermT → Int → TermT
+unport (PortableTerm old term) new = portTerm old new term
+
+-- nested' ∷ (Int, Int) → TermT → TermT
+-- nested' (valBy, metaBy) = rec (0 ∷ Int)
+--  where
+--   rec = \case
+--     Block{} → undefined
+--     Lam arg bod → Lam arg $ rec (fstGlobal + 1) bod
+--     Op a op b → Op (rec a) op (rec b)
+--     App f' a' → App (rec f') (rec a')
+--     old@NatLit{} → old
+--     old@TagLit{} → old
+--     FieldsLit f' a b →
+--       let fstGlobal' = case f' of
+--             FRecord → fstGlobal
+--             FRow → fstGlobal + 1
+--        in FieldsLit f' (bimap (rec') (rec') <$> a) (rec' <$> b)
+--     old@Sorry{} → old
+--     Var i →
+--       Var
+--         $ if i >= fstGlobal
+--           then i + valBy
+--           else i
+--     Quantification q n k in_ → Quantification q n (rec k) (rec (fstGlobal + 1) in_)
+--     Pi nameM in_ out_ → Pi nameM (rec in_) (rec (if isJust nameM then fstGlobal + 1 else fstGlobal) out_)
+--     old@Builtin{} → old
+--     BuiltinsVar → BuiltinsVar
+--     ExVar ex (origValN, origMetaN) →
+--       ExVar
+--         ex
+--         ( if origValN >= fstGlobal -- >, not >=!
+--             then origValN + valBy
+--             else origValN
+--         , origMetaN + metaBy
+--         )
+--     UniVar a origMetaN c → UniVar a (origMetaN + metaBy) $ rec c
 
 typOf ∷ TermT → TermT
 typOf = App $ Builtin Type
@@ -412,48 +477,6 @@ parseTop =
     <|> parseMath0
     <|> (err =<< getPos)
 
--- TODO: This function performs both nesting of vals and metas. Probably should be separated.
-nested' ∷ (Int, Int) → TermT → TermT
-nested' (valBy, metaBy) = rec (0 ∷ Int)
- where
-  rec fstGlobal = \case
-    Block{} → undefined
-    Lam arg bod → Lam arg $ rec (fstGlobal + 1) bod
-    Op a op b → Op (rec fstGlobal a) op (rec fstGlobal b)
-    App f' a' → App (rec fstGlobal f') (rec fstGlobal a')
-    old@NatLit{} → old
-    old@TagLit{} → old
-    FieldsLit f' a b →
-      let fstGlobal' = case f' of
-            FRecord → fstGlobal
-            FRow → fstGlobal + 1
-       in FieldsLit f' (bimap (rec fstGlobal') (rec fstGlobal') <$> a) (rec fstGlobal' <$> b)
-    old@Sorry{} → old
-    Var i →
-      Var
-        $ if i >= fstGlobal
-          then i + valBy
-          else i
-    Quantification q n k in_ → Quantification q n (rec fstGlobal k) (rec (fstGlobal + 1) in_)
-    Pi nameM in_ out_ → Pi nameM (rec fstGlobal in_) (rec (if isJust nameM then fstGlobal + 1 else fstGlobal) out_)
-    old@Builtin{} → old
-    BuiltinsVar → BuiltinsVar
-    ExVar ex (origValN, origMetaN) →
-      ExVar
-        ex
-        ( if origValN >= fstGlobal -- >, not >=!
-            then origValN + valBy
-            else origValN
-        , origMetaN + metaBy
-        )
-    UniVar a origMetaN c → UniVar a (origMetaN + metaBy) $ rec fstGlobal c
-
-nestedVal ∷ Int → TermT → TermT
-nestedVal by = nested' (by, 0)
-
-nestedMeta ∷ Int → TermT → TermT
-nestedMeta by = nested' (0, by)
-
 --
 
 pIdent ∷ Ident → Doc AnsiStyle
@@ -508,10 +531,11 @@ isSimple =
         Pi _ b c → ping *> complexity b *> complexity c
         Builtin _ → ping
         BuiltinsVar → ping
-        ExVar (ExVar' x) _ → case unsafePerformIO (readIORef x) of
-          Left y → complexity y
+        ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
+          Left y → complexityPortable y
           Right _ → ping
-        UniVar _ _ c → ping *> complexity c
+        UniVar _ _ c → ping *> complexityPortable c
+      complexityPortable (PortableTerm _ a) = complexity a
    in runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
 
 -- TODO: Concise syntax for `\` and `forall`
@@ -617,10 +641,10 @@ pTerm (oldPrec, vars) =
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
-    ExVar (ExVar' x) l → case unsafePerformIO (readIORef x) of
-      Left t → (oldPrec, pTerm (oldPrec, vars) $ nested' l t)
-      Right (n, t) → (6, "(exi@" <> pretty l <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) t') t <> ")")
-    UniVar x' l t → (6, "(uni@" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
+    ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
+      Left t → (oldPrec, pTerm (oldPrec, vars) $ unport t $ length vars)
+      Right (n, l, t) → (6, "(exi@" <> pretty l <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) (unport t' $ length vars)) t <> ")")
+    UniVar x' l t → (6, "(uni@" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) (unport t $ length vars) <> ")")
 
 pTerm' ∷ TermT → Doc AnsiStyle
 pTerm' = pTerm (0, [])
