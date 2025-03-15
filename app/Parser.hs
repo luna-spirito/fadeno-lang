@@ -178,7 +178,7 @@ data TermT
 data PortableTermT = PortableTerm !Int !TermT deriving (Show, Eq, Lift)
 
 portTerm ∷ Int → Int → TermT → TermT
-portTerm oldFirstLocal newFirstLocal = rec
+portTerm oldGlobal newGlobal = rec
  where
   rec ∷ TermT → TermT
   rec = \case
@@ -192,8 +192,8 @@ portTerm oldFirstLocal newFirstLocal = rec
     old@Sorry{} → old
     Var i →
       Var
-        $ if i >= oldFirstLocal
-          then i - oldFirstLocal + newFirstLocal
+        $ if i >= oldGlobal
+          then i - oldGlobal + newGlobal
           else i
     Quantification q n k in_ → Quantification q n (rec k) (rec in_)
     Pi nameM in_ out_ → Pi nameM (rec in_) (rec out_)

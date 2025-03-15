@@ -15,13 +15,14 @@ import Control.Effect.Reader (Reader, ask, local)
 import Control.Effect.State (State, get, modify, state)
 import Control.Effect.Writer (Writer, censor, listen, tell)
 import Data.ByteString.Char8 qualified as BS
-import Data.List ((!?))
+import Data.Foldable (foldrM)
+import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, splitAt, viewr, (!?), (|>))
 import GHC.Exts (IsList (..))
 import Normalize (EqRes (..), NormCtx (..), isEq, normalize, parseBQQ)
-import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), Ident (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, nested', nestedMeta, nestedVal, pIdent, pTerm', parseFile, recordOf, render, rowOf, typOf)
+import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), Ident (..), PortableTermT (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, portTerm, recordOf, render, rowOf, typOf, unport)
 import Prettyprinter (Doc, annotate, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
-import RIO hiding (Reader, ask, link, local, runReader, toList)
+import RIO hiding (Reader, Vector, ask, link, local, runReader, toList)
 import RIO.Partial qualified as P
 
 {-
@@ -94,7 +95,7 @@ data StackLog m a where
   StackScope ∷ Doc AnsiStyle → m a → StackLog m a
 
 -- | Accumulates the stack over the runtime of the program.
-newtype StackAccC m a = StackAccC {unStackAccC ∷ WriterC (RevList StackEntry) m a}
+newtype StackAccC m a = StackAccC {unStackAccC ∷ WriterC (Vector StackEntry) m a}
   deriving (Functor, Applicative, Monad)
 
 data StackEntry = StackEntry !(Doc AnsiStyle) ![StackEntry]
@@ -102,10 +103,10 @@ data StackEntry = StackEntry !(Doc AnsiStyle) ![StackEntry]
 instance (Algebra sig m) ⇒ Algebra (StackLog :+: sig) (StackAccC m) where
   alg hdl sig ctx = StackAccC $ case sig of
     L (StackLog x) → do
-      tell @(RevList StackEntry) [StackEntry x []]
+      tell @(Vector StackEntry) [StackEntry x []]
       pure ctx
     L (StackScope name act) → do
-      censor (\entries → [StackEntry name $ toList @(RevList _) entries])
+      censor (\entries → [StackEntry name $ toList @(Vector _) entries])
         $ unStackAccC
         $ hdl (ctx $> act)
     R other → alg (unStackAccC . hdl) (R other) ctx
@@ -133,7 +134,7 @@ pStack ∷ StackEntry → Doc AnsiStyle
 pStack = \(StackEntry x xs) → x <> nest 2 (pStacks xs) where
 
 runStackAccC ∷ (Applicative m) ⇒ StackAccC m a → m ([StackEntry], a)
-runStackAccC = runWriter (\w a → pure (toList @(RevList _) w, a)) . unStackAccC
+runStackAccC = runWriter (\w a → pure (toList @(Vector _) w, a)) . unStackAccC
 
 newtype StackPrintC m a = StackPrintC {unStackPrintC ∷ ReaderC Int m a}
   deriving (Functor, Applicative, Monad)
@@ -170,102 +171,94 @@ data LazyTermT m = LazyTerm !(IORef (m TermT)) | LazyPure !TermT
 --   mkFromTerm _ = LazyPure
 
 -- | Context stores values and the type of introduced bindings.
-type CtxT = RevList (Maybe TermT, TermT) -- Actually stores just Idents, but VarT for easier conversion.
+type CtxT = Vector (Maybe TermT, TermT) -- Actually stores just Idents, but VarT for easier conversion.
 
 -- | For meta-variables
-type Solve = State (RevList (RevList ExVar')) :+: Fresh :+: Error (Doc AnsiStyle) :+: StackLog :+: Lift IO
+type Solve = State (Vector (Vector ExVar')) :+: Fresh :+: Error (Doc AnsiStyle) :+: StackLog :+: Lift IO
 
 freshIdent ∷ (Has Solve sig m) ⇒ m Ident
 freshIdent = UIdent <$> fresh
 
 -- Probably access to Solve should be restricted in ExVarPushC...
-type ExVarPushC m = ReaderC (Int, Int) (WriterC (RevList ExVar') m)
+type ExVarPushC m = ReaderC Int (WriterC (Vector ExVar') m)
 
 -- `Maybe TermT` is absolute.
-pushExVar ∷ (Has (Writer (RevList ExVar') :+: Reader (Int, Int) :+: Solve) sig m) ⇒ Maybe TermT → m TermT
+pushExVar ∷ (Has (Writer (Vector ExVar') :+: Reader Int :+: Solve) sig m) ⇒ Maybe PortableTermT → m TermT
 pushExVar t = do
   scope ← ask
   name ← freshIdent
-  metaVar' ← fmap ExVar' $ sendIO $ newIORef $ Right (name, nested' (-fst scope, -snd scope) <$> t)
-  tell @(RevList _) [metaVar']
-  let res = ExVar metaVar' scope
+  metaVar' ← fmap ExVar' $ sendIO $ newIORef $ Right (name, scope, t)
+  tell @(Vector _) [metaVar']
+  let res = ExVar metaVar'
   stackLog $ "intro" <+> pTerm' res
   pure res
 
-pushUniVar ∷ (Has (Reader (Int, Int) :+: Solve) sig m) ⇒ TermT → m TermT
+pPortableTerm ∷ PortableTermT → Doc AnsiStyle
+pPortableTerm ty = pTerm' $ unport ty 100
+
+pushUniVar ∷ (Has (Reader Int :+: Solve) sig m) ⇒ PortableTermT → m TermT
 pushUniVar ty = do
-  stackLog $ pTerm' ty
+  stackLog $ pPortableTerm ty
   -- Pushed ephemerally.
   scope ← ask
   ident ← freshIdent
-  let res = UniVar ident (snd scope) $ nested' (-fst scope, -snd scope) ty
+  let res = UniVar ident scope ty
   stackLog $ "intro" <+> pTerm' res
   pure res
 
--- I hate this.
-revInsertBefore ∷ ∀ a. RevList a → (a → Bool) → RevList a → RevList a
-revInsertBefore ins f orig = go orig
- where
-  go = \case
-    UnsafeRevList [] → error $ "impossible"
-    UnsafeRevList (x : xs)
-      | f x → [x] <> ins <> (UnsafeRevList xs)
-      | otherwise →
-          let (UnsafeRevList xs') = go $ UnsafeRevList xs
-           in UnsafeRevList $ x : xs'
-
-adjustList ∷ (a → a) → Int → [a] → [a]
-adjustList f 0 (x : xs) = f x : xs
-adjustList f n (x : xs) = x : adjustList f (n - 1) xs
-adjustList _ _ [] = error "impossible"
-
-beforeEx ∷ (Has Solve sig m) ⇒ (Int, Int) → ExVar' → (ExVarPushC m (m a)) → m a
-beforeEx scope@(_, metaScope) ex act = do
-  resM ← stackScope ("before " <> pTerm' (ExVar ex scope)) do
+beforeEx ∷ (Has Solve sig m) ⇒ Int → ExVar' → (ExVarPushC m (m a)) → m a
+beforeEx scope ex act = do
+  resM ← stackScope ("before " <> pTerm' (ExVar ex)) do
     (inserted, resM) ← runWriter (curry pure) $ runReader scope act
-    stackLog . pretty . show =<< get @(RevList (RevList ExVar'))
-    modify $ UnsafeRevList . adjustList (revInsertBefore inserted (== ex) . traceShowId . traceShow (pTerm' (ExVar ex scope))) metaScope . unUnsafeRevList
+    stackLog . pretty . show =<< get @(Vector (Vector ExVar'))
+    modify
+      $ adjust'
+        scope
+        ( \exvars →
+            let (before, after) = splitAt (P.fromJust $ findIndexL (== ex) exvars) exvars
+             in before <> inserted <> after
+        )
+    -- UnsafeVector . adjustList (revInsertBefore inserted (== ex) . traceShowId . traceShow (pTerm' (ExVar ex scope))) metaScope . unUnsafeVector
     pure resM
   resM
 
 scoped' ∷ (Has Solve sig m) ⇒ ((TermT → TermT) → a → a) → ExVarPushC m (m a) → m a
 scoped' tmap act = do
+  scope ← length <$> get @(Vector (Vector ExVar'))
   tyM ← stackScope "scoped" do
-    (origExs, tyM) ← runWriter (curry pure) $ runReader (0, 0) act
-    modify (`revSnoc` origExs)
+    (origExs, tyM) ← runWriter (curry pure) $ runReader scope act
+    modify (|> origExs)
     pure tyM
   ty ← tyM
-  UnsafeRevList exs ←
-    state @(RevList (RevList ExVar'))
+  exs ←
+    state @(Vector (Vector ExVar'))
       $ fromMaybe (error "Internal error: scope disappeared")
-      . revUnsnoc
-  snd
-    <$> foldM
-      ( \(i, ty') (ExVar' x) →
-          sendIO (readIORef x) >>= \case
-            Left t → stackError $ "Internal error: Resolved existential wasn't marked as such:" <+> pTerm' t
-            Right (_, xTyM) → do
-              variable ← fresh
-              let variable' = Ident $ BS.pack $ "/" <> show variable
-              -- [0] -> forall. $0
-              -- \$0 + [0] -> forall. $1 + $0
-              -- \$1 $0 (\ $0 + [1]) -> forall. $2 $1 (\ $0 + $1)
-              sendIO $ writeIORef x $ Left $ Var 0
-              stackLog "???"
-              (\(ip, f) → (i + ip, f `tmap` ty')) <$> case xTyM of
-                Just xTy →
-                  pure $ (1, Quantification Forall variable' {-(nestedVal (-i - 1)-} xTy {-)-} . nestedVal 1 . traceShowId)
-                Nothing → do
-                  n ← freshIdent
-                  pure
-                    ( 2
-                    , Quantification Forall n (Builtin U32)
-                        . Quantification Forall variable' (typOf $ Var 0)
-                        . nestedVal 2
-                    )
-      )
-      (0, ty)
-      exs
+      . viewr
+  foldrM
+    ( \(ExVar' x) ty' →
+        sendIO (readIORef x) >>= \case
+          Left t → stackError $ "Internal error: Resolved existential wasn't marked as such:" <+> pPortableTerm t
+          Right (_, _, xTyM) → do
+            variable ← fresh
+            let variable' = Ident $ BS.pack $ "/" <> show variable
+            -- [0] -> forall. $0
+            -- \$0 + [0] -> forall. $1 + $0
+            -- \$1 $0 (\ $0 + [1]) -> forall. $2 $1 (\ $0 + $1)
+            stackLog "???"
+            (`tmap` ty') <$> case xTyM of
+              Just xTy → do
+                sendIO $ writeIORef x $ Left $ PortableTerm (nest + 1) $ Var nest
+                pure $ Quantification Forall variable' (unport xTy nest) . portTerm nest (nest + 1)
+              Nothing → do
+                sendIO $ writeIORef x $ Left $ PortableTerm (nest + 2) $ Var (nest + 1)
+                n ← freshIdent
+                pure
+                  $ Quantification Forall n (Builtin U32)
+                  . Quantification Forall variable' (typOf $ Var nest)
+                  . portTerm nest (nest + 2)
+    )
+    ty
+    exs
 
 {-
 pushExVarInto :: (Has Solve sig m) => Int -> Maybe TermT -> m ExVar'
@@ -294,82 +287,60 @@ insMeta scope var = do
 scoped_ ∷ (Has Solve sig m) ⇒ ExVarPushC m (m a) → m a
 scoped_ act = do
   -- Bad copy-pasta
-  (origExs, tyM) ← runWriter (curry pure) $ runReader (0, 0) act
-  modify $ (`revSnoc` origExs)
+  scope ← length <$> get @(Vector (Vector ExVar'))
+  (origExs, tyM) ← runWriter (curry pure) $ runReader scope act
+  modify $ (|> origExs)
   ty ← tyM
-  modify $ fst . fromMaybe (error "Scope disappeared") . revUnsnoc @(RevList ExVar')
+  modify $ fst . fromMaybe (error "Internal error: scope disappeared") . viewr @(Vector ExVar')
   pure ty
 
 scoped ∷ (Has Solve sig m) ⇒ ExVarPushC m (m TermT) → m TermT
 scoped = scoped' id
 
-deleteWhere ∷ ∀ a. (a → Bool) → [a] → [a]
-deleteWhere f = go
- where
-  go = \case
-    [] → error "impossible"
-    (x : xs)
-      | f x → xs
-      | otherwise → x : go xs
-
 markSolved ∷ (Has Solve sig m) ⇒ Int → ExVar' → m ()
-markSolved scope var = do
-  modify @(RevList (RevList ExVar'))
-    $ UnsafeRevList
-    . adjustList
-      (\(UnsafeRevList l) → UnsafeRevList $ deleteWhere (== var) l)
-      scope
-    . unUnsafeRevList
+markSolved scope var =
+  modify @(Vector (Vector ExVar')) $ adjust' scope \x → deleteAt (fromMaybe (error "impossible") $ findIndexL (== var) x) x
 
 -- Writes & checks
--- Writes *absolute* value to meta.
 -- TODO: Check that the value is actually writeable and causes no overflows.
-writeMeta ∷ (Has Solve sig m) ⇒ ((Int, Int), Maybe TermT) → ExVar' → TermT → m ()
-writeMeta (scope, tyM) (ExVar' var) absVal = do
-  stackLog $ "refine " <> pTerm' (ExVar (ExVar' var) scope) <+> "=" <+> pTerm' absVal
-  let relVal = nested' (-fst scope, -snd scope) absVal
-  for_ tyM $ infer [] relVal . Check
-  sendIO $ writeIORef var $ Left relVal
-  markSolved (snd scope) (ExVar' var)
+writeMeta ∷ (Has Solve sig m) ⇒ (Int, Maybe PortableTermT) → ExVar' → TermT → m ()
+writeMeta (scope, tyM) (ExVar' var) val = do
+  stackLog $ "refine " <> pTerm' (ExVar (ExVar' var)) <+> "=" <+> pTerm' val
+  for_ tyM $ infer [] val . Check
+  sendIO $ writeIORef var $ Left val
+  markSolved scope (ExVar' var)
 
 -- TODO: So, return the proper ordering, but just use
 -- TODO: Decipher what previous TODO is supposed to mean
 -- Instantiates meta with *absolute* value.
-instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ ((Int, Int), Maybe TermT) → ExVar' → TermT → m ()
+instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ (Int, Maybe TermT) → ExVar' → TermT → m ()
 instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1 →
   -- TODO: avoid nested?
   -- Accepts and returns absolute
   let instMeta' ∷ TermT → m TermT
       instMeta' = \case
         Sorry _ x → instMeta' x
-        ExVar (ExVar' var2) scope2 →
+        ExVar (ExVar' var2) →
           sendIO (readIORef var2) >>= \case
             Left t → instMeta' t
-            Right (_, t2) → do
+            Right (_, scope2, t2) → do
               -- Either var1 or origVar2 is introduced earlier. We need to identify, which one.
               var2Earlier ←
                 if
-                  | snd scope2 < snd scope1 → pure True
-                  | snd scope2 > snd scope1 → pure False
+                  | scope2 < scope1 → pure True
+                  | scope2 > scope1 → pure False
                   | otherwise → do
-                      -- Well, that's bad, like really bad.
-                      let go = \case
-                            (x : xs)
-                              | x == origVar1 → True -- In RevList, the later one is found first.
-                              | x == ExVar' var2 → False
-                              | otherwise → go xs
-                            _ → error "Imposible"
-                      UnsafeRevList exs ← P.fromJust . (!? snd scope1) . unUnsafeRevList <$> get
-                      pure $ go exs
+                      exs ← fromMaybe (error "Internal error: unknown scope") . (!? scope1) <$> get
+                      pure $ findIndexL (== ExVar' var2) exs < findIndexL (== origVar1) exs
               if var2Earlier
-                then pure $ ExVar (ExVar' var2) scope2
+                then pure $ ExVar (ExVar' var2)
                 else beforeEx scope1 origVar1 do
                   var1R ← pushExVar t2
                   pure do
                     writeMeta (scope2, t2) (ExVar' var2) var1R
                     pure var1R
         uni@(UniVar _ scope2 _)
-          | scope2 <= snd scope1 → pure uni
+          | scope2 <= scope1 → pure uni
         App f a → App <$> instMeta' f <*> instMeta' a
         FieldsLit FRow known rest →
           FieldsLit FRow
@@ -387,8 +358,8 @@ instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1
    in \val →
         let r = writeMeta (scope1, t1) origVar1 =<< instMeta' val
          in case val of
-              ExVar (ExVar' var2) scope2 →
-                if origVar1 == ExVar' var2 && scope1 == scope2
+              ExVar (ExVar' var2) →
+                if origVar1 == ExVar' var2
                   then pure ()
                   else
                     sendIO (readIORef var2) >>= \case
@@ -396,21 +367,21 @@ instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1
                       _ → r
               _ → r
 
-withMono ∷ (Has Solve sig m) ⇒ ((TermT → TermT) → a → a) → TermT → (ExVar' → ((Int, Int), Maybe TermT) → m a) → (TermT → m a) → m a
+withMono ∷ (Has Solve sig m) ⇒ ((TermT → TermT) → a → a) → TermT → (ExVar' → (Int, Maybe TermT) → m a) → (TermT → m a) → m a
 withMono tmap = \a onMeta onOther → withMono' onMeta onOther a
  where
   withMono' onMeta onOther = \case
     Sorry _ v → withMono' onMeta onOther v
-    ExVar (ExVar' var) nesting →
+    ExVar (ExVar' var) →
       sendIO (readIORef var) >>= \case
-        Left v → withMono' onMeta onOther $ nested' nesting v
-        Right (_, v) → onMeta (ExVar' var) (nesting, v)
+        Left v → withMono' onMeta onOther v
+        Right (_, scope, t) → onMeta (ExVar' var) (scope, t)
     Quantification Forall _name kind v → scoped' tmap do
       ty ← pushExVar $ Just kind
-      pure $ withMono' onMeta onOther =<< normalize (NormBinds [Just ty]) (nestedMeta 1 v)
+      pure $ withMono' onMeta onOther =<< normalize (NormBinds [Just ty]) v
     Quantification Exists _name kind v → scoped' tmap do
       ty ← pushUniVar kind
-      pure $ withMono' onMeta onOther =<< normalize (NormBinds [Just ty]) (nestedMeta 1 v)
+      pure $ withMono' onMeta onOther =<< normalize (NormBinds [Just ty]) v
     r → onOther r
 
 data LookupRes
@@ -444,7 +415,7 @@ withLookupField cont f refine needle = rec []
                   val' ← pushExVar (Just mT)
                   writeMeta (mScope, Just $ rowOf mT) var $ FieldsLit FRow [(needle, val')] $ Just rest'
                   pure $ cont $ LookupFound val' (toList prev, Just rest')
-              (mScope, _) → notARow $ ExVar var mScope
+              _ → notARow $ ExVar var
             else const $ cont LookupMissing
       )
       \case
@@ -454,7 +425,7 @@ withLookupField cont f refine needle = rec []
       isEq needle name >>= \case
         EqYes → cont $ LookupFound val (toList prev <> xs, rest)
         EqUnknown → cont LookupUnknown
-        EqNot → rec (prev `revSnoc` (name, val)) (xs, rest)
+        EqNot → rec (prev |> (name, val)) (xs, rest)
 
 {-
 -- TODO: implement rewrite as a normalize subroutine.
@@ -515,13 +486,13 @@ pMode = \case
   Infer → "_"
   Check t → pTerm' t
 
-insertCtx ∷ (Maybe TermT, TermT) → CtxT → CtxT -- TODO: This is absolutely 100% wrong.
-insertCtx (xVal, xTy) xs =
-  ( if isJust xVal
-      then xs
-      else (bimap (fmap (nestedVal 1)) (nestedVal 1) <$> xs)
-  )
-    `revSnoc` (xVal, xTy)
+-- insertCtx ∷ (Maybe TermT, TermT) → CtxT → CtxT -- TODO: This is absolutely 100% wrong.
+-- insertCtx (xVal, xTy) xs =
+--   ( if isJust xVal
+--       then xs
+--       else (bimap (fmap (nestedVal 1)) (nestedVal 1) <$> xs)
+--   )
+--     `revSnoc` (xVal, xTy)
 
 -- Infer value in nested context.
 -- inferNested ∷ ∀ sig m a. (Has Solve sig m) ⇒ CtxT → TermT → InferMode a → m a
@@ -540,7 +511,7 @@ infer ctx = (\t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ 
     (term, Check (Quantification Forall _ xTy yT)) → scoped_ do
       x' ← pushUniVar xTy
       pure do
-        yT' ← normalize (NormBinds [Just x']) $ nestedMeta 1 yT
+        yT' ← normalize (NormBinds [Just x']) yT
         infer ctx term $ Check yT'
     -- TODO: breaks.
     -- (term, Check ((Quantification Exists xName Ty yT))) → scoped_ do -- TODO: not just for Ty!
@@ -563,7 +534,7 @@ infer ctx = (\t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ 
             _ → stackScope "in" $ act into
       withBs' \bs' →
         infer
-          (insertCtx (Just val', ty) ctx)
+          (ctx |> (Just val', ty))
           bs'
           mode
     (Lam arg bod, Infer) →
@@ -571,17 +542,17 @@ infer ctx = (\t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ 
         u ← pushExVar $ Just $ Builtin U32
         inT ← pushExVar $ Just $ typOf u
         pure do
-          outT ← infer (insertCtx (Nothing, inT) ctx) bod Infer
+          outT ← infer (ctx |> (Nothing, inT)) bod Infer
           traceShowM $ pTerm' $ Pi Nothing inT outT
           pure $ Pi Nothing inT outT
     (Lam arg bod, Check (Pi inNameM inT outT)) → do
-      let inferBod val outT' = infer (insertCtx (val, inT) ctx) bod $ Check outT'
+      let inferBod val outT' = infer (ctx |> (val, inT)) bod $ Check outT'
       case inNameM of
         Nothing → inferBod Nothing outT
         Just inName → scoped_ do
           arg' ← pushUniVar inT
           pure do
-            outT' ← normalize (NormBinds [Just arg']) $ nestedMeta 1 outT
+            outT' ← normalize (NormBinds [Just arg']) outT
             inferBod (Just arg') outT'
     -- pure do
     --   outT' ← normalize (NormBinds $ [Just arg']) outT
@@ -717,7 +688,7 @@ infer ctx = (\t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ 
                 HM.adjust
                   ( \case
                       (Nothing, App (Builtin Record) (FieldsLit FRow existing r)) →
-                        (Nothing, recordOf $ FieldsLit FRow (field : existing) r) -- TODO: RevList? Seq?
+                        (Nothing, recordOf $ FieldsLit FRow (field : existing) r) -- TODO: Vector? Seq?
                       _ → error "impossible"
                   )
                   (Ident "self")
@@ -762,7 +733,7 @@ infer ctx = (\t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ 
             ([], Just row)
         (Sorry _ x, Infer) → normalize (HM.mapMaybe fst ctx) x -- TODO: dedup
     -}
-    (Var x, Infer) → case unUnsafeRevList ctx !? x of
+    (Var x, Infer) → case ctx !? x of
       Nothing → stackError $ "Unknown var @" <> pretty x
       Just (_, ty) → pure ty
     {-
@@ -789,13 +760,13 @@ infer ctx = (\t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ 
       -}
     (Builtin x, Infer) → pure $ typOfBuiltin x
     (BuiltinsVar, Infer) → pure $ App (Builtin Record) $ FieldsLit FRow ((\b → (TagLit $ identOfBuiltin b, typOfBuiltin b)) <$> builtinsList) Nothing -- infer ctx builtinsVar Infer -- TODO: redo.
-    (ExVar (ExVar' i) nesting, mode) →
+    (ExVar (ExVar' i), mode) →
       sendIO (readIORef i) >>= \case
-        Left t → infer ctx (nested' nesting t) mode
-        Right (_, Just ty) → case mode of
-          Infer → pure $ nested' nesting ty
-          Check ty2 → subtype (nested' nesting ty) ty2
-        Right (_, Nothing) → stackError "Cannot infer value of existential metavariable"
+        Left t → infer ctx t mode
+        Right (_, _, Just ty) → case mode of
+          Infer → pure ty
+          Check ty2 → subtype ty ty2
+        Right (_, _, Nothing) → stackError "Cannot infer value of existential metavariable"
     (UniVar _ _ t, Infer) → pure t
     (term, Check c) → stackScope ("check via infer" <+> pTerm' term <+> ":" <+> pTerm' c) do
       ty ← infer ctx term Infer
@@ -832,8 +803,8 @@ subtype = \a b →
               bT' ← normalize (HM.singleton xName x') bT
               subtype (aT) (bT')
     -}
-    ((ExVar a aScope), bT) → subtypeMeta a aScope bT
-    (aT, (ExVar b bScope)) → subtypeMeta b bScope aT
+    ((ExVar a), bT) → subtypeMeta a bT
+    (aT, (ExVar b)) → subtypeMeta b aT
     ((UniVar a1 b1 _), (UniVar a2 b2 _))
       | a1 == a2 && b1 == b2 → pure ()
     {-
@@ -879,8 +850,8 @@ subtype = \a b →
       case (a', b') of
         (NatLit x, NatLit y)
           | x <= y → pure ()
-        (ExVar a'' aScope, _) → subtypeMeta a'' aScope b
-        (_, ExVar b'' bScope) → subtypeMeta b'' bScope a
+        (ExVar a'', _) → subtypeMeta a'' b
+        (_, ExVar b'') → subtypeMeta b'' a
         _ → stackError $ "Cannot check that universe" <+> pTerm' a <+> "<=" <+> pTerm' b
   {-
         (App (Builtin Record) aT, App (Builtin Record) bT) → subtype aT bT
@@ -896,17 +867,17 @@ subtype = \a b →
   unwrapExs ∷ TermT → m TermT
   unwrapExs inp = case inp of
     (Sorry _ t) → unwrapExs $ t
-    (ExVar (ExVar' a) scope) →
+    (ExVar (ExVar' a)) →
       sendIO (readIORef a) >>= \case
-        Left i → unwrapExs $ nested' scope i
+        Left i → unwrapExs i
         _ → pure inp
     _ → pure inp
-  subtypeMeta (ExVar' a) aScope bT =
+  subtypeMeta (ExVar' a) bT =
     sendIO (readIORef a) >>= \case
       Left _ → error "Impossible"
-      Right (_, aT) → instMeta (aScope, aT) (ExVar' a) bT
+      Right (_, aScope, aT) → instMeta (aScope, aT) (ExVar' a) bT
 
-runSolveM ∷ (Applicative m) ⇒ StateC (RevList (RevList ExVar')) (FreshC (ErrorC (Doc AnsiStyle) m)) a → m (Either (Doc AnsiStyle) a)
+runSolveM ∷ (Applicative m) ⇒ StateC (Vector (Vector ExVar')) (FreshC (ErrorC (Doc AnsiStyle) m)) a → m (Either (Doc AnsiStyle) a)
 runSolveM =
   runError (pure . Left) (pure . Right)
     . evalFresh 0
