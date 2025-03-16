@@ -18,12 +18,15 @@ import Data.ByteString.Char8 qualified as BS
 import Data.Foldable (foldrM)
 import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, splitAt, viewr, (!?), (|>))
 import GHC.Exts (IsList (..))
-import Normalize (EqRes (..), NormCtx (..), isEq, normalize, parseBQQ)
-import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), Ident (..), PortableTermT (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, portTerm, recordOf, render, rowOf, typOf, unport)
+import Normalize (EqRes (..), NormCtx (..), isEq, nestedNormBinds, normalize, parseBQQ)
+import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), Ident (..), PortableTermT (..), Quantifier (..), TermT (..), pIdent, pTerm', parseFile, portTerm, render, rowOf, typOf, unport)
 import Prettyprinter (Doc, annotate, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, link, local, runReader, toList)
 import RIO.Partial qualified as P
+
+-- TODO: Refactor unwraps?
+-- TODO: portM/unportM?
 
 {-
 Whenever a node interacts with a negative package, DO NOT UNWRAP.
@@ -170,11 +173,19 @@ data LazyTermT m = LazyTerm !(IORef (m TermT)) | LazyPure !TermT
 --   extractTerm (LazyPure x) = pure $ Just x
 --   mkFromTerm _ = LazyPure
 
--- | Context stores values and the type of introduced bindings.
-type CtxT = Vector (Maybe TermT, TermT) -- Actually stores just Idents, but VarT for easier conversion.
+{- | Context stores values and the type of introduced bindings.
+type BindsT = Vector (Maybe TermT, TermT) -- Actually stores just Idents, but VarT for easier conversion.
+-}
 
 -- | For meta-variables
-type Solve = State (Vector (Vector ExVar')) :+: Fresh :+: Error (Doc AnsiStyle) :+: StackLog :+: Lift IO
+type BindsT = Vector (Maybe PortableTermT, PortableTermT)
+
+type MetaVarsT = Vector (Vector ExVar')
+type Solve = Reader BindsT :+: State MetaVarsT :+: Fresh :+: Error (Doc AnsiStyle) :+: StackLog :+: Lift IO
+
+currNesting ∷ (Has (Reader BindsT) sig m) ⇒ m Int
+currNesting = length <$> ask @BindsT
+{-# INLINE currNesting #-}
 
 freshIdent ∷ (Has Solve sig m) ⇒ m Ident
 freshIdent = UIdent <$> fresh
@@ -210,7 +221,7 @@ beforeEx ∷ (Has Solve sig m) ⇒ Int → ExVar' → (ExVarPushC m (m a)) → m
 beforeEx scope ex act = do
   resM ← stackScope ("before " <> pTerm' (ExVar ex)) do
     (inserted, resM) ← runWriter (curry pure) $ runReader scope act
-    stackLog . pretty . show =<< get @(Vector (Vector ExVar'))
+    stackLog . pretty . show =<< get @MetaVarsT
     modify
       $ adjust'
         scope
@@ -218,20 +229,19 @@ beforeEx scope ex act = do
             let (before, after) = splitAt (P.fromJust $ findIndexL (== ex) exvars) exvars
              in before <> inserted <> after
         )
-    -- UnsafeVector . adjustList (revInsertBefore inserted (== ex) . traceShowId . traceShow (pTerm' (ExVar ex scope))) metaScope . unUnsafeVector
     pure resM
   resM
 
 scoped' ∷ (Has Solve sig m) ⇒ ((TermT → TermT) → a → a) → ExVarPushC m (m a) → m a
 scoped' tmap act = do
-  scope ← length <$> get @(Vector (Vector ExVar'))
+  scope ← length <$> get @MetaVarsT
   tyM ← stackScope "scoped" do
     (origExs, tyM) ← runWriter (curry pure) $ runReader scope act
     modify (|> origExs)
     pure tyM
   ty ← tyM
   exs ←
-    state @(Vector (Vector ExVar'))
+    state @MetaVarsT
       $ fromMaybe (error "Internal error: scope disappeared")
       . viewr
   foldrM
@@ -244,50 +254,31 @@ scoped' tmap act = do
             -- [0] -> forall. $0
             -- \$0 + [0] -> forall. $1 + $0
             -- \$1 $0 (\ $0 + [1]) -> forall. $2 $1 (\ $0 + $1)
-            stackLog "???"
+            nesting ← currNesting
             (`tmap` ty') <$> case xTyM of
               Just xTy → do
-                sendIO $ writeIORef x $ Left $ PortableTerm (nest + 1) $ Var nest
-                pure $ Quantification Forall variable' (unport xTy nest) . portTerm nest (nest + 1)
+                sendIO $ writeIORef x $ Left $ PortableTerm nesting $ Var nesting
+                pure
+                  $ Quantification Forall variable' (unport xTy nesting)
+                  . (\x → trace ("1" <> tshow (pTerm' (x) <> "|" <> pretty nesting)) x)
+                  . portTerm nesting (nesting + 1)
+                  . (\x → trace ("2" <> tshow (pTerm' (x) <> "|" <> pretty nesting)) x)
               Nothing → do
-                sendIO $ writeIORef x $ Left $ PortableTerm (nest + 2) $ Var (nest + 1)
+                sendIO $ writeIORef x $ Left $ PortableTerm (nesting + 2) $ Var (nesting + 1)
                 n ← freshIdent
                 pure
                   $ Quantification Forall n (Builtin U32)
-                  . Quantification Forall variable' (typOf $ Var nest)
-                  . portTerm nest (nest + 2)
+                  . Quantification Forall variable' (typOf $ Var nesting)
+                  . portTerm nesting (nesting + 2)
     )
     ty
     exs
-
-{-
-pushExVarInto :: (Has Solve sig m) => Int -> Maybe TermT -> m ExVar'
-pushExVarInto scope t = do
-  name <- freshIdent
-  metaVar' <- fmap ExVar' $ sendIO $ newIORef $ Right $ (name, (scope, t))
-  insMeta scope metaVar'
-  pure metaVar'
-
-pushExVar :: (Has Solve sig m) => Maybe TermT -> m TermT
-pushExVar t = do
-  scope <- (\x -> x - 1) . IM.size <$> get @(IntMap [ExVar'])
-  pushExVarInto scope t
-
-scoped :: (Has Solve sig m) => m TermT -> m TermT
-scoped = scoped' id
--- scoped act = do
-
-insMeta :: (Has Solve sig m) => Int -> ExVar' -> m ()
-insMeta scope var = do
-  modify @(IntMap [ExVar']) \scopes ->
-    IM.adjust (var :) scope scopes
--}
 
 -- Assumes that all existentias are resolved if they are ever used.
 scoped_ ∷ (Has Solve sig m) ⇒ ExVarPushC m (m a) → m a
 scoped_ act = do
   -- Bad copy-pasta
-  scope ← length <$> get @(Vector (Vector ExVar'))
+  scope ← length <$> get @MetaVarsT
   (origExs, tyM) ← runWriter (curry pure) $ runReader scope act
   modify $ (|> origExs)
   ty ← tyM
@@ -299,21 +290,22 @@ scoped = scoped' id
 
 markSolved ∷ (Has Solve sig m) ⇒ Int → ExVar' → m ()
 markSolved scope var =
-  modify @(Vector (Vector ExVar')) $ adjust' scope \x → deleteAt (fromMaybe (error "impossible") $ findIndexL (== var) x) x
+  modify @MetaVarsT $ adjust' scope \x → deleteAt (fromMaybe (error "impossible") $ findIndexL (== var) x) x
 
 -- Writes & checks
 -- TODO: Check that the value is actually writeable and causes no overflows.
 writeMeta ∷ (Has Solve sig m) ⇒ (Int, Maybe PortableTermT) → ExVar' → TermT → m ()
 writeMeta (scope, tyM) (ExVar' var) val = do
   stackLog $ "refine " <> pTerm' (ExVar (ExVar' var)) <+> "=" <+> pTerm' val
-  for_ tyM $ infer [] val . Check
-  sendIO $ writeIORef var $ Left val
+  nesting ← length <$> ask @BindsT
+  for_ tyM $ infer val . Check . (`unport` nesting)
+  sendIO $ writeIORef var $ Left $ PortableTerm nesting val
   markSolved scope (ExVar' var)
 
 -- TODO: So, return the proper ordering, but just use
 -- TODO: Decipher what previous TODO is supposed to mean
 -- Instantiates meta with *absolute* value.
-instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ (Int, Maybe TermT) → ExVar' → TermT → m ()
+instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ (Int, Maybe PortableTermT) → ExVar' → TermT → m ()
 instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1 →
   -- TODO: avoid nested?
   -- Accepts and returns absolute
@@ -322,7 +314,9 @@ instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1
         Sorry _ x → instMeta' x
         ExVar (ExVar' var2) →
           sendIO (readIORef var2) >>= \case
-            Left t → instMeta' t
+            Left t → do
+              nesting ← currNesting
+              instMeta' $ unport t nesting
             Right (_, scope2, t2) → do
               -- Either var1 or origVar2 is introduced earlier. We need to identify, which one.
               var2Earlier ←
@@ -363,26 +357,31 @@ instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1
                   then pure ()
                   else
                     sendIO (readIORef var2) >>= \case
-                      Left val' → instMeta (scope1, t1) origVar1 val'
+                      Left val' → do
+                        nesting ← length <$> ask @BindsT
+                        instMeta (scope1, t1) origVar1 $ unport val' nesting
                       _ → r
               _ → r
 
-withMono ∷ (Has Solve sig m) ⇒ ((TermT → TermT) → a → a) → TermT → (ExVar' → (Int, Maybe TermT) → m a) → (TermT → m a) → m a
+withMono ∷ (Has Solve sig m) ⇒ ((TermT → TermT) → a → a) → TermT → (ExVar' → (Int, Maybe PortableTermT) → m a) → (TermT → m a) → m a
 withMono tmap = \a onMeta onOther → withMono' onMeta onOther a
  where
-  withMono' onMeta onOther = \case
-    Sorry _ v → withMono' onMeta onOther v
-    ExVar (ExVar' var) →
-      sendIO (readIORef var) >>= \case
-        Left v → withMono' onMeta onOther v
-        Right (_, scope, t) → onMeta (ExVar' var) (scope, t)
-    Quantification Forall _name kind v → scoped' tmap do
-      ty ← pushExVar $ Just kind
-      pure $ withMono' onMeta onOther =<< normalize (NormBinds [Just ty]) v
-    Quantification Exists _name kind v → scoped' tmap do
-      ty ← pushUniVar kind
-      pure $ withMono' onMeta onOther =<< normalize (NormBinds [Just ty]) v
-    r → onOther r
+  withMono' onMeta onOther = \wrapped → do
+    nesting ← length <$> ask @BindsT
+    let port = PortableTerm nesting
+    case wrapped of
+      Sorry _ v → withMono' onMeta onOther v
+      ExVar (ExVar' var) →
+        sendIO (readIORef var) >>= \case
+          Left v → withMono' onMeta onOther $ unport v nesting
+          Right (_, scope, t) → onMeta (ExVar' var) (scope, t)
+      Quantification Forall _name kind v → scoped' tmap do
+        ty ← pushExVar $ Just $ PortableTerm nesting kind
+        pure $ withMono' onMeta onOther =<< normalize (nestedNormBinds nesting [Just $ port ty]) v
+      Quantification Exists _name kind v → scoped' tmap do
+        ty ← pushUniVar $ port kind
+        pure $ withMono' onMeta onOther =<< normalize (nestedNormBinds nesting [Just $ port ty]) v
+      r → onOther r
 
 data LookupRes
   = LookupFound !(TermT) !([(TermT, TermT)], Maybe TermT)
@@ -409,11 +408,11 @@ withLookupField cont f refine needle = rec []
       ( \var →
           if refine
             then \case
-              (mScope, Just (App (Builtin Row) mT)) →
+              (mScope, Just (PortableTerm origin (App (Builtin Row) mT))) →
                 beforeEx mScope var do
-                  rest' ← pushExVar (Just $ rowOf mT)
-                  val' ← pushExVar (Just mT)
-                  writeMeta (mScope, Just $ rowOf mT) var $ FieldsLit FRow [(needle, val')] $ Just rest'
+                  rest' ← pushExVar (Just $ PortableTerm origin $ rowOf mT)
+                  val' ← pushExVar (Just $ PortableTerm origin mT)
+                  writeMeta (mScope, Just $ PortableTerm origin $ rowOf mT) var $ FieldsLit FRow [(needle, val')] $ Just rest'
                   pure $ cont $ LookupFound val' (toList prev, Just rest')
               _ → notARow $ ExVar var
             else const $ cont LookupMissing
@@ -427,42 +426,9 @@ withLookupField cont f refine needle = rec []
         EqUnknown → cont LookupUnknown
         EqNot → rec (prev |> (name, val)) (xs, rest)
 
-{-
--- TODO: implement rewrite as a normalize subroutine.
--- Rewrites are performed on normalized terms.
--- This makes sense only since current stupid implementation rewrites
--- only the normalized bindings in scope.
--- TODO: rewrite as a form of normalize.
--- rewrite :: forall sig m. (Has Solve sig m) => (TermT, TermT) -> TermT -> m TermT
--- rewrite (what, with) = rewrite'
---   where
---     rewrite' :: TermT → m TermT
---     rewrite' curr = do
---       matches <- isEq what curr
---       case matches of
---         EqYes -> pure with
---         _ -> rec curr
---     -- TODO: This just recurses 1 level into the structure.
---     -- Probably could be deduplicated with instMeta.
---     rec :: TermT → m TermT
---     rec = \case
---       Block {} -> undefined
---       Lam argName bod -> scoped_ do
---         arg ← pushUniVar' undefined
---         pure do
---           bod' ← normalize (HM.singleton argName $ Var arg) bod
---           bodR ← rewrite' bod'
---           normalize (HM.singleton arg (Var $ SourceVar argName)) bodR
---       Op a op b → Op <$> rewrite' a <*> pure op <*> rewrite' b
---       App f a → App <$> rewrite' f <*> rewrite' a
---       x@(NatLit _) → pure x
---       x@(TagLit _) → pure x
---       FieldsLit f t v → --FildsLit f <$> _ <*> _
--}
-
-typOfBuiltin ∷ BuiltinT → TermT
+typOfBuiltin ∷ BuiltinT → PortableTermT
 typOfBuiltin =
-  \case
+  PortableTerm 0 . \case
     U32 → [parseBQQ| Type+ 0 |]
     Tag → [parseBQQ| Type+ 0 |]
     Row → [parseBQQ| forall (u : U32). Type+ u -> Type+ u |]
@@ -486,7 +452,7 @@ pMode = \case
   Infer → "_"
   Check t → pTerm' t
 
--- insertCtx ∷ (Maybe TermT, TermT) → CtxT → CtxT -- TODO: This is absolutely 100% wrong.
+-- insertCtx ∷ (Maybe TermT, TermT) → BindsT → BindsT -- TODO: This is absolutely 100% wrong.
 -- insertCtx (xVal, xTy) xs =
 --   ( if isJust xVal
 --       then xs
@@ -495,282 +461,286 @@ pMode = \case
 --     `revSnoc` (xVal, xTy)
 
 -- Infer value in nested context.
--- inferNested ∷ ∀ sig m a. (Has Solve sig m) ⇒ CtxT → TermT → InferMode a → m a
+-- inferNested ∷ ∀ sig m a. (Has Solve sig m) ⇒ BindsT → TermT → InferMode a → m a
 -- inferNested ctx val Infer = nested (-1) <$> infer ctx val Infer
 -- inferNested ctx val (Check ty) = infer ctx val $ Check $ nested 1 ty
 
 -- TODO: beforeEx DOESN'T CONSIDER INTRODUCED VARIABLES, ACTUALLY!
 
 -- | Either infers a normalized type for the value and context, or checks a value against the normalized type.
-infer ∷ ∀ sig m a. (Has Solve sig m) ⇒ CtxT → TermT → InferMode a → m a
-infer ctx = (\t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer' t mode)
+infer ∷ ∀ sig m a. (Has Solve sig m) ⇒ TermT → InferMode a → m a
+infer = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer' t mode
  where
   -- Here, we will convert Checks to Infers.
   -- However, converting Infer to a Check when checking a term is hereby declared a deadly sin.
-  infer' = curry \case
-    (term, Check (Quantification Forall _ xTy yT)) → scoped_ do
-      x' ← pushUniVar xTy
-      pure do
-        yT' ← normalize (NormBinds [Just x']) yT
-        infer ctx term $ Check yT'
-    -- TODO: breaks.
-    -- (term, Check ((Quantification Exists xName Ty yT))) → scoped_ do -- TODO: not just for Ty!
-    --   x' ← pushExVar
-    --   yT' ← normalize (HM.singleton xName x') yT
-    --   infer ctx term $ Check $ yT'
-    (Block (BlockLet name tyM val) into, mode) → do
-      ty ← stackScope ("let" <+> pIdent name) case tyM of
-        Nothing → infer ctx val Infer
-        Just ty → do
-          -- TODO: check ty' to be a type?
-          -- EDIT: typechecking is undecidable... so... uh... no?
-          -- void $ infer ctx ty Infer
-          ty' ← normalize (NormBinds $ fst <$> ctx) ty
-          infer ctx val $ Check ty'
-          pure ty'
-      val' ← normalize (NormBinds $ fst <$> ctx) val
-      let withBs' act = case into of
-            Block{} → act into
-            _ → stackScope "in" $ act into
-      withBs' \bs' →
-        infer
-          (ctx |> (Just val', ty))
-          bs'
-          mode
-    (Lam arg bod, Infer) →
-      scoped do
-        u ← pushExVar $ Just $ Builtin U32
-        inT ← pushExVar $ Just $ typOf u
+  infer' ∷ TermT → InferMode a → m a
+  infer' orA orB = do
+    nesting ← currNesting
+    case (orA, orB) of
+      (term, Check (Quantification Forall _ xTy yT)) → scoped_ do
+        x' ← pushUniVar $ PortableTerm nesting xTy
         pure do
-          outT ← infer (ctx |> (Nothing, inT)) bod Infer
-          traceShowM $ pTerm' $ Pi Nothing inT outT
-          pure $ Pi Nothing inT outT
-    (Lam arg bod, Check (Pi inNameM inT outT)) → do
-      let inferBod val outT' = infer (ctx |> (val, inT)) bod $ Check outT'
-      case inNameM of
-        Nothing → inferBod Nothing outT
-        Just inName → scoped_ do
-          arg' ← pushUniVar inT
+          ctx ← ask @BindsT
+          yT' ← normalize (nestedNormBinds nesting [Just $ PortableTerm nesting x']) yT
+          infer term $ Check yT'
+      -- TODO: breaks.
+      -- (term, Check ((Quantification Exists xName Ty yT))) → scoped_ do -- TODO: not just for Ty!
+      --   x' ← pushExVar
+      --   yT' ← normalize (HM.singleton xName x') yT
+      --   infer ctx term $ Check $ yT'
+      (Block (BlockLet name tyM val) into, mode) → do
+        ctx ← ask @BindsT
+        ty ← stackScope ("let" <+> pIdent name) case tyM of
+          Nothing → infer val Infer
+          Just ty → do
+            -- TODO: check ty' to be a type?
+            -- EDIT: typechecking is undecidable... so... uh... no?
+            -- void $ infer ctx ty Infer
+            ty' ← normalize (NormBinds nesting $ fst <$> ctx) ty
+            infer val $ Check ty'
+            pure ty'
+        val' ← normalize (NormBinds nesting $ fst <$> ctx) val
+        let withBs' act = case into of
+              Block{} → act into
+              _ → stackScope "in" $ act into
+        withBs' \bs' →
+          local (|> (Just $ PortableTerm nesting val', PortableTerm nesting ty))
+            $ infer bs' mode
+      (Lam arg bod, Infer) →
+        scoped do
+          u ← pushExVar $ Just $ PortableTerm nesting $ Builtin U32
+          inT ← pushExVar $ Just $ PortableTerm nesting $ typOf u
           pure do
-            outT' ← normalize (NormBinds [Just arg']) outT
-            inferBod (Just arg') outT'
-    -- pure do
-    --   outT' ← normalize (NormBinds $ [Just arg']) outT
-    --   inferBod (Just arg') outT'
-    (Op a _op b, Infer) → do
-      -- Deadly sin. Should be fixed.
-      infer ctx a $ Check $ Builtin U32
-      infer ctx b $ Check $ Builtin U32
-      pure $ Builtin U32
-    -- Override for second-class RecordGet
-    -- TODO: Create a speci type for RecordGet
-    (App (App (Builtin RecordGet) tag) record, Infer) → do
-      recordTy ← infer ctx record Infer
-      let body row = do
-            withLookupField
-              ( \case
-                  LookupFound x _ → do
-                    self ← normalize (NormBinds $ fst <$> ctx) record
-                    -- TODO: This replaces `self` with the entire record.
-                    -- It doesn't filter out only the accessible fields.
-                    -- It's quite easy to filter by updating the lookupField, but do we need it really?
-                    -- As I understand it, the inference should fail first.
-                    x' ← normalize (NormBinds [Just self]) x
-                    pure x'
-                  _ → stackError "Field not found"
-              )
-              id
-              True
-              tag
-              ([], Just row)
-      withMono
-        id
-        recordTy
-        ( \var (mScope, mT) → beforeEx mScope var do
-            u ← pushExVar $ Just $ Builtin U32
-            row ← pushExVar $ Just $ rowOf $ typOf u
-            pure do
-              writeMeta (mScope, mT) var $ recordOf row
-              body row
-        )
-        \case
-          App (Builtin Record) row → body row
-          _ → stackError "Not a record"
-    {-
-      recordTy ← infer ctx record Infer
-      let body row =
-            withLookupField
-              ( \case
-                  LookupFound x _ → do
-                    selfLazy' ← fmap LazyTerm $ sendIO $ newIORef $ normalize @_ @m ctx record
-                    -- TODO: This replaces `self` with the entire record.
-                    -- It doesn't filter out only the accessible fields.
-                    -- It's quite easy to filter by updating the lookupField, but do we need it really?
-                    -- As I understand it, the inference should fail first.
-                    x' ← normalize (HM.singleton (Ident "self") selfLazy') x
-                    pure x'
-                  _ → stackError "Field not found"
-              )
-              id
-              True
-              tag
-              ([], Just row)
-      withMono
-        id
-        recordTy
-        ( \var → \case
-            (mScope, mT) → beforeEx mScope var do
-              u ← pushExVar $ Just $ Builtin U32
-              row ← pushExVar $ Just $ rowOf $ typOf u
-              pure do
-                writeMeta (mScope, mT) var $ recordOf row
-                body row
-        )
-        \case
-          App (Builtin Record) row → body row
-          _ → stackError "Not a record"
-    -}
-    (App f a, Infer) → do
-      fTy ← infer ctx f Infer
-      withMono
-        id
-        fTy
-        ( \var (mScope, mT) →
-            -- I'm not satisfied by this solution, but instMeta solution is
-            -- even more verbose since it accepts full TermT as input.
-            beforeEx mScope var do
-              i ← pushExVar $ Just $ Builtin U32
-              inT ← pushExVar $ Just $ typOf i
-              outT ← pushExVar $ Just $ typOf i
-              pure do
-                writeMeta (mScope, mT) var (Pi Nothing inT outT)
-                infer ctx a $ Check $ inT
-                pure outT
-        )
-        \case
-          Pi inNameM inT outT → do
-            infer ctx a $ Check $ inT
-            case inNameM of
-              Nothing → pure outT
-              Just _inNameM → do
-                a' ← normalize (NormBinds $ fst <$> ctx) a
-                normalize
-                  (NormBinds [Just a'])
-                  outT
-          t → stackError $ "inferApp " <> pTerm' t
-    (NatLit _, Infer) → pure $ Builtin U32
-    (TagLit _, Infer) → pure $ Builtin Tag
-    {-
-        (FieldsLit FRecord knownVal rest, Infer) → do
-          knownTy ← for knownVal \(name, val) → do
-            infer ctx name $ Check $ Builtin Tag
-            ty ← infer ctx val Infer
-            pure (name, ty)
-          rest' ← for rest \rest' → do
-            restT ← infer ctx rest' Infer
-            withMono
-              id
-              restT
-              ( \var (mScope, mT) →
-                  beforeEx mScope var do
-                    u ← pushExVar $ Just $ Builtin U32
-                    row ← pushExVar $ Just $ rowOf $ typOf u
-                    pure do
-                      writeMeta (mScope, mT) var $ recordOf row
-                      pure row
-              )
-              \case
-                App (Builtin Record) row → pure row
-                t → stackError $ "inferRecord " <> pTerm 0 t
-          pure $ recordOf $ FieldsLit FRow knownTy rest'
-        (FieldsLit FRow known rest, Check (App (Builtin Row) ty)) → do
-          let extSelf field =
-                HM.adjust
-                  ( \case
-                      (Nothing, App (Builtin Record) (FieldsLit FRow existing r)) →
-                        (Nothing, recordOf $ FieldsLit FRow (field : existing) r) -- TODO: Vector? Seq?
-                      _ → error "impossible"
-                  )
-                  (Ident "self")
-          ctx' ←
-            foldM
-              ( \ctx' (name, val) → do
-                  infer ctx' name $ Check $ Builtin Tag
-                  infer ctx' val $ Check ty
-                  name' ← normalize ctx' name
-                  val' ← normalize ctx' val
-                  pure $ extSelf (name', val') ctx'
-              )
-              ctx
-              known
-          for_ rest \rest' → infer ctx' rest' $ Check $ rowOf ty
-        (FieldsLit FRow known rest, Infer) → scoped do
-          t ← pushExVar Nothing
-          pure do
-            infer ctx (FieldsLit FRow known rest) $ Check $ rowOf t
-            pure $ rowOf t
-        (FieldsLit FRecord [] restM, Check (App (Builtin Record) row)) →
-          case restM of
-            Just rest → infer ctx rest $ Check $ recordOf row
-            Nothing → subtype (FieldsLit FRow [] Nothing) row
-        (FieldsLit FRecord ((name, val) : fields) rest, Check (App (Builtin Record) row)) → do
-          name' ← normalize ctx name
-          withLookupField
-            ( \case
-                LookupFound ty row' → do
-                  infer ctx val $ Check $ ty
-                  val' ← normalize ctx val
-                  row'' ←
-                    normalize
-                      (HM.insert (Ident "self") (mkFromTerm (Proxy @m) $ FieldsLit FRecord [(name', val')] Nothing) ctx)
-                      $ uncurry (FieldsLit FRow) row'
-                  infer ctx (FieldsLit FRecord fields rest) $ Check $ recordOf row''
-                x → stackError $ "FRecord: " <> pretty (show x)
-            )
-            (\_ x → x)
-            True
-            name
-            ([], Just row)
-        (Sorry _ x, Infer) → normalize (HM.mapMaybe fst ctx) x -- TODO: dedup
-    -}
-    (Var x, Infer) → case ctx !? x of
-      Nothing → stackError $ "Unknown var @" <> pretty x
-      Just (_, ty) → pure ty
-    {-
-        (Quantification _ name kind ty, mode) → scoped_ do
-          u ← pushExVar $ Just $ Builtin U32
-          pure do
-            infer ctx kind $ Check $ typOf u
-            kind' ← normalize (HM.mapMaybe fst ctx) kind
-            -- TODO: investigate correctness. This allows things like:
-            -- `forall x. Type -> x` : Kind
-            -- TODO: ... this allows things like:
-            -- /: fadeno.U32 -> fadeno.U32
-            -- forall (x : fadeno.U32). (\y. x + y)
-            -- ... so this is absolutely wrong, need to think about this.
-            infer (HM.insert name (Nothing, kind') ctx) ty mode
-        (Pi inNameM x y, Check (App (Builtin Type) u)) → do
-          infer ctx x $ Check $ typOf u
-          infer (maybe id (`HM.insert` (Nothing, x)) inNameM ctx) y $ Check $ typOf u
-        (Pi inNameM x y, Infer) → scoped do
-          u ← pushExVar $ Just $ Builtin U32
-          pure do
-            infer ctx (Pi inNameM x y) $ Check $ typOf u
-            pure $ typOf u
-      -}
-    (Builtin x, Infer) → pure $ typOfBuiltin x
-    (BuiltinsVar, Infer) → pure $ App (Builtin Record) $ FieldsLit FRow ((\b → (TagLit $ identOfBuiltin b, typOfBuiltin b)) <$> builtinsList) Nothing -- infer ctx builtinsVar Infer -- TODO: redo.
-    (ExVar (ExVar' i), mode) →
-      sendIO (readIORef i) >>= \case
-        Left t → infer ctx t mode
-        Right (_, _, Just ty) → case mode of
-          Infer → pure ty
-          Check ty2 → subtype ty ty2
-        Right (_, _, Nothing) → stackError "Cannot infer value of existential metavariable"
-    (UniVar _ _ t, Infer) → pure t
-    (term, Check c) → stackScope ("check via infer" <+> pTerm' term <+> ":" <+> pTerm' c) do
-      ty ← infer ctx term Infer
-      subtype ty c
+            outT ← local @BindsT (|> (Nothing, PortableTerm nesting inT)) $ infer bod Infer
+            pure $ Pi Nothing inT outT
+      -- (Lam arg bod, Check (Pi inNameM inT outT)) → do
+      --   let inferBod val outT' = local (|> (PortableTerm nesting <$> val, PortableTerm nesting inT)) $ infer bod $ Check outT'
+      --   case inNameM of
+      --     Nothing → inferBod Nothing outT
+      --     Just inName → scoped_ do
+      --       arg' ← pushUniVar $ PortableTerm nesting inT
+      --       pure do
+      --         outT' ← normalize (NormBinds [Just arg']) outT
+      --         inferBod (Just arg') outT'
+      -- -- pure do
+      -- --   outT' ← normalize (NormBinds $ [Just arg']) outT
+      -- --   inferBod (Just arg') outT'
+      -- (Op a _op b, Infer) → do
+      --   -- Deadly sin. Should be fixed.
+      --   infer ctx a $ Check $ Builtin U32
+      --   infer ctx b $ Check $ Builtin U32
+      --   pure $ Builtin U32
+      -- -- Override for second-class RecordGet
+      -- -- TODO: Create a speci type for RecordGet
+      -- (App (App (Builtin RecordGet) tag) record, Infer) → do
+      --   recordTy ← infer ctx record Infer
+      --   let body row = do
+      --         withLookupField
+      --           ( \case
+      --               LookupFound x _ → do
+      --                 self ← normalize (NormBinds $ fst <$> ctx) record
+      --                 -- TODO: This replaces `self` with the entire record.
+      --                 -- It doesn't filter out only the accessible fields.
+      --                 -- It's quite easy to filter by updating the lookupField, but do we need it really?
+      --                 -- As I understand it, the inference should fail first.
+      --                 x' ← normalize (NormBinds [Just self]) x
+      --                 pure x'
+      --               _ → stackError "Field not found"
+      --           )
+      --           id
+      --           True
+      --           tag
+      --           ([], Just row)
+      --   withMono
+      --     id
+      --     recordTy
+      --     ( \var (mScope, mT) → beforeEx mScope var do
+      --         u ← pushExVar $ Just $ Builtin U32
+      --         row ← pushExVar $ Just $ rowOf $ typOf u
+      --         pure do
+      --           writeMeta (mScope, mT) var $ recordOf row
+      --           body row
+      --     )
+      --     \case
+      --       App (Builtin Record) row → body row
+      --       _ → stackError "Not a record"
+      -- {-
+      --   recordTy ← infer ctx record Infer
+      --   let body row =
+      --         withLookupField
+      --           ( \case
+      --               LookupFound x _ → do
+      --                 selfLazy' ← fmap LazyTerm $ sendIO $ newIORef $ normalize @_ @m ctx record
+      --                 -- TODO: This replaces `self` with the entire record.
+      --                 -- It doesn't filter out only the accessible fields.
+      --                 -- It's quite easy to filter by updating the lookupField, but do we need it really?
+      --                 -- As I understand it, the inference should fail first.
+      --                 x' ← normalize (HM.singleton (Ident "self") selfLazy') x
+      --                 pure x'
+      --               _ → stackError "Field not found"
+      --           )
+      --           id
+      --           True
+      --           tag
+      --           ([], Just row)
+      --   withMono
+      --     id
+      --     recordTy
+      --     ( \var → \case
+      --         (mScope, mT) → beforeEx mScope var do
+      --           u ← pushExVar $ Just $ Builtin U32
+      --           row ← pushExVar $ Just $ rowOf $ typOf u
+      --           pure do
+      --             writeMeta (mScope, mT) var $ recordOf row
+      --             body row
+      --     )
+      --     \case
+      --       App (Builtin Record) row → body row
+      --       _ → stackError "Not a record"
+      -- -}
+      -- (App f a, Infer) → do
+      --   fTy ← infer ctx f Infer
+      --   withMono
+      --     id
+      --     fTy
+      --     ( \var (mScope, mT) →
+      --         -- I'm not satisfied by this solution, but instMeta solution is
+      --         -- even more verbose since it accepts full TermT as input.
+      --         beforeEx mScope var do
+      --           i ← pushExVar $ Just $ Builtin U32
+      --           inT ← pushExVar $ Just $ typOf i
+      --           outT ← pushExVar $ Just $ typOf i
+      --           pure do
+      --             writeMeta (mScope, mT) var (Pi Nothing inT outT)
+      --             infer ctx a $ Check $ inT
+      --             pure outT
+      --     )
+      --     \case
+      --       Pi inNameM inT outT → do
+      --         infer ctx a $ Check $ inT
+      --         case inNameM of
+      --           Nothing → pure outT
+      --           Just _inNameM → do
+      --             a' ← normalize (NormBinds $ fst <$> ctx) a
+      --             normalize
+      --               (NormBinds [Just a'])
+      --               outT
+      --       t → stackError $ "inferApp " <> pTerm' t
+      (NatLit _, Infer) → pure $ Builtin U32
+      (TagLit _, Infer) → pure $ Builtin Tag
+      -- {-
+      --     (FieldsLit FRecord knownVal rest, Infer) → do
+      --       knownTy ← for knownVal \(name, val) → do
+      --         infer ctx name $ Check $ Builtin Tag
+      --         ty ← infer ctx val Infer
+      --         pure (name, ty)
+      --       rest' ← for rest \rest' → do
+      --         restT ← infer ctx rest' Infer
+      --         withMono
+      --           id
+      --           restT
+      --           ( \var (mScope, mT) →
+      --               beforeEx mScope var do
+      --                 u ← pushExVar $ Just $ Builtin U32
+      --                 row ← pushExVar $ Just $ rowOf $ typOf u
+      --                 pure do
+      --                   writeMeta (mScope, mT) var $ recordOf row
+      --                   pure row
+      --           )
+      --           \case
+      --             App (Builtin Record) row → pure row
+      --             t → stackError $ "inferRecord " <> pTerm 0 t
+      --       pure $ recordOf $ FieldsLit FRow knownTy rest'
+      --     (FieldsLit FRow known rest, Check (App (Builtin Row) ty)) → do
+      --       let extSelf field =
+      --             HM.adjust
+      --               ( \case
+      --                   (Nothing, App (Builtin Record) (FieldsLit FRow existing r)) →
+      --                     (Nothing, recordOf $ FieldsLit FRow (field : existing) r) -- TODO: Vector? Seq?
+      --                   _ → error "impossible"
+      --               )
+      --               (Ident "self")
+      --       ctx' ←
+      --         foldM
+      --           ( \ctx' (name, val) → do
+      --               infer ctx' name $ Check $ Builtin Tag
+      --               infer ctx' val $ Check ty
+      --               name' ← normalize ctx' name
+      --               val' ← normalize ctx' val
+      --               pure $ extSelf (name', val') ctx'
+      --           )
+      --           ctx
+      --           known
+      --       for_ rest \rest' → infer ctx' rest' $ Check $ rowOf ty
+      --     (FieldsLit FRow known rest, Infer) → scoped do
+      --       t ← pushExVar Nothing
+      --       pure do
+      --         infer ctx (FieldsLit FRow known rest) $ Check $ rowOf t
+      --         pure $ rowOf t
+      --     (FieldsLit FRecord [] restM, Check (App (Builtin Record) row)) →
+      --       case restM of
+      --         Just rest → infer ctx rest $ Check $ recordOf row
+      --         Nothing → subtype (FieldsLit FRow [] Nothing) row
+      --     (FieldsLit FRecord ((name, val) : fields) rest, Check (App (Builtin Record) row)) → do
+      --       name' ← normalize ctx name
+      --       withLookupField
+      --         ( \case
+      --             LookupFound ty row' → do
+      --               infer ctx val $ Check $ ty
+      --               val' ← normalize ctx val
+      --               row'' ←
+      --                 normalize
+      --                   (HM.insert (Ident "self") (mkFromTerm (Proxy @m) $ FieldsLit FRecord [(name', val')] Nothing) ctx)
+      --                   $ uncurry (FieldsLit FRow) row'
+      --               infer ctx (FieldsLit FRecord fields rest) $ Check $ recordOf row''
+      --             x → stackError $ "FRecord: " <> pretty (show x)
+      --         )
+      --         (\_ x → x)
+      --         True
+      --         name
+      --         ([], Just row)
+      --     (Sorry _ x, Infer) → normalize (HM.mapMaybe fst ctx) x -- TODO: dedup
+      -- -}
+      (Var x, Infer) → do
+        ctx ← ask @BindsT
+        case ctx !? x of
+          Nothing → stackError $ "Unknown var @" <> pretty x
+          Just (_, ty) → pure $ unport ty nesting
+      -- {-
+      --     (Quantification _ name kind ty, mode) → scoped_ do
+      --       u ← pushExVar $ Just $ Builtin U32
+      --       pure do
+      --         infer ctx kind $ Check $ typOf u
+      --         kind' ← normalize (HM.mapMaybe fst ctx) kind
+      --         -- TODO: investigate correctness. This allows things like:
+      --         -- `forall x. Type -> x` : Kind
+      --         -- TODO: ... this allows things like:
+      --         -- /: fadeno.U32 -> fadeno.U32
+      --         -- forall (x : fadeno.U32). (\y. x + y)
+      --         -- ... so this is absolutely wrong, need to think about this.
+      --         infer (HM.insert name (Nothing, kind') ctx) ty mode
+      --     (Pi inNameM x y, Check (App (Builtin Type) u)) → do
+      --       infer ctx x $ Check $ typOf u
+      --       infer (maybe id (`HM.insert` (Nothing, x)) inNameM ctx) y $ Check $ typOf u
+      --     (Pi inNameM x y, Infer) → scoped do
+      --       u ← pushExVar $ Just $ Builtin U32
+      --       pure do
+      --         infer ctx (Pi inNameM x y) $ Check $ typOf u
+      --         pure $ typOf u
+      --   -}
+      -- (Builtin x, Infer) → pure $ typOfBuiltin x
+      -- (BuiltinsVar, Infer) → pure $ App (Builtin Record) $ FieldsLit FRow ((\b → (TagLit $ identOfBuiltin b, typOfBuiltin b)) <$> builtinsList) Nothing -- infer ctx builtinsVar Infer -- TODO: redo.
+      -- (ExVar (ExVar' i), mode) →
+      --   sendIO (readIORef i) >>= \case
+      --     Left t → infer ctx t mode
+      --     Right (_, _, Just ty) → case mode of
+      --       Infer → pure ty
+      --       Check ty2 → subtype ty ty2
+      --     Right (_, _, Nothing) → stackError "Cannot infer value of existential metavariable"
+      -- (UniVar _ _ t, Infer) → pure t
+      (term, Check c) → stackScope ("check via infer" <+> pTerm' term <+> ":" <+> pTerm' c) do
+        ty ← infer term Infer
+        subtype ty c
 
 -- | a <: b
 subtype ∷ ∀ sig m. (Has Solve sig m) ⇒ TermT → TermT → m ()
@@ -869,7 +839,9 @@ subtype = \a b →
     (Sorry _ t) → unwrapExs $ t
     (ExVar (ExVar' a)) →
       sendIO (readIORef a) >>= \case
-        Left i → unwrapExs i
+        Left i → do
+          nesting ← currNesting
+          unwrapExs $ unport i nesting
         _ → pure inp
     _ → pure inp
   subtypeMeta (ExVar' a) bT =
@@ -877,16 +849,17 @@ subtype = \a b →
       Left _ → error "Impossible"
       Right (_, aScope, aT) → instMeta (aScope, aT) (ExVar' a) bT
 
-runSolveM ∷ (Applicative m) ⇒ StateC (Vector (Vector ExVar')) (FreshC (ErrorC (Doc AnsiStyle) m)) a → m (Either (Doc AnsiStyle) a)
+runSolveM ∷ (Applicative m) ⇒ ReaderC BindsT (StateC MetaVarsT (FreshC (ErrorC (Doc AnsiStyle) m))) a → m (Either (Doc AnsiStyle) a)
 runSolveM =
   runError (pure . Left) (pure . Right)
     . evalFresh 0
-    . evalState mempty
+    . evalState @MetaVarsT mempty
+    . runReader @BindsT []
 
 checkFile ∷ FilePath → IO ()
 checkFile file = do
   term ← parseFile file
-  (stacks, res) ← runStackAccC $ runSolveM $ infer [] term Infer
+  (stacks, res) ← runStackAccC $ runSolveM $ infer term Infer
   render case res of
     Left e →
       pStacks stacks
@@ -899,7 +872,7 @@ checkFile file = do
 checkFileDebug ∷ FilePath → IO ()
 checkFileDebug file = do
   term ← parseFile file
-  res ← runStackPrintC $ runSolveM $ infer [] term Infer
+  res ← runStackPrintC $ runSolveM $ infer term Infer
   render case res of
     Left e → annotate (color Red) "error: " <> e
     Right r → pTerm' r

@@ -199,8 +199,13 @@ portTerm oldGlobal newGlobal = rec
     Pi nameM in_ out_ → Pi nameM (rec in_) (rec out_)
     old@Builtin{} → old
     BuiltinsVar → BuiltinsVar
-    old@ExVar{} → old
-    old@UniVar{} → old
+    ExVar{} → error "sighs2"
+    -- ExVar var → trace ("portTerm " <> tshow oldGlobal <> " " <> tshow newGlobal <> " " <> tshow var) $ ExVar var
+    -- case (unsafePerformIO $ readIORef var) of
+    -- Left t → portTerm oldGlobal newGlobal $ unport t oldGlobal
+    -- _ → error "sighs2"
+    -- error "sighs2"
+    old@UniVar{} → error "sighs"
 
 unport ∷ PortableTermT → Int → TermT
 unport (PortableTerm old term) new = portTerm old new term

@@ -2,11 +2,11 @@ module Normalize where
 
 import Control.Algebra
 import Control.Effect.Lift (Lift, sendIO)
-import Data.RRBVector (Vector, splitAt, viewl, (|>))
+import Data.RRBVector (Vector, drop, replicate, splitAt, viewl, (|>))
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), OpT (..), PortableTermT (..), TermT (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render, unport)
-import RIO hiding (Reader, Vector, ask, link, local, runReader, to, toList)
+import RIO hiding (Reader, Vector, ask, drop, link, local, replicate, runReader, to, toList)
 import System.IO.Unsafe (unsafePerformIO)
 
 -- class HasTerm m a where
@@ -99,12 +99,15 @@ isEq = curry \case
       _ → pure EqUnknown
 
 data NormCtx
-  = NormBinds !(Vector (Maybe PortableTermT))
-  | NormRewrite !Int !TermT !TermT -- on normalized
+  = NormBinds !Int !(Vector (Maybe PortableTermT)) -- Globals, variables.
+  | NormRewrite !Int !TermT !TermT -- on normalized. Nestness, from, to.
+
+nestedNormBinds ∷ Int → Vector (Maybe PortableTermT) → NormCtx
+nestedNormBinds nest v = NormBinds nest $ replicate nest Nothing <> v
 
 getNest ∷ NormCtx → Int
 getNest = \case
-  NormBinds x → length x
+  NormBinds _ x → length x
   NormRewrite x _ _ → x
 
 -- insertBinds ∷ TermT → Vector (Maybe TermT) → Vector (Maybe TermT)
@@ -116,13 +119,17 @@ getNest = \case
 --   NormRewrite a b → NormRewrite (nestedVal 1 a) (nestedVal 1 b)
 nestNormCtx ∷ NormCtx → NormCtx
 nestNormCtx = \case
-  NormBinds xs → NormBinds (xs |> Nothing)
-  a@NormRewrite{} → a
+  NormBinds globals xs → NormBinds globals (xs |> Nothing)
+  a@NormRewrite{} → a -- TODO: is this correct?
 
 -- TODO: HasTerm
+-- Normalizes/rewrites a term.
+-- `NormBinds globals binds` normalizes a term using `binds`, considering first `globals` `binds` as, well, "globals", and does not erase them.
+-- The result term is a valid one under the "globals", and can be normalized again.
+-- `NormRewrite nest from term` performs a rewrite, with nesting being `nest`.
 normalize ∷ ∀ m sig. (Has (Lift IO) sig m) ⇒ NormCtx → TermT → m TermT
 normalize = \ctx term → case ctx of
-  NormBinds _ → simplify ctx term
+  NormBinds{} → simplify ctx term
   NormRewrite n from to →
     isEq from term >>= \case
       EqYes → pure to
@@ -131,10 +138,10 @@ normalize = \ctx term → case ctx of
   simplify ∷ NormCtx → TermT → m TermT
   simplify ctx = \case
     Block (BlockLet _ _ val) into
-      | NormBinds binds ← ctx → do
-          val' ← normalize (NormBinds binds) val
+      | NormBinds globals binds ← ctx → do
+          val' ← normalize ctx val
           normalize
-            (NormBinds $ binds |> Just (PortableTerm (getNest ctx) val'))
+            (NormBinds globals $ binds |> Just (PortableTerm (getNest ctx) val'))
             into
       | otherwise → undefined
     Block (BlockRewrite from) to → Block <$> (BlockRewrite <$> normalize ctx from) <*> normalize ctx to
@@ -153,7 +160,7 @@ normalize = \ctx term → case ctx of
       f' ← normalize ctx f
       a' ← normalize ctx a
       case f' of
-        Lam _ bod → normalize (NormBinds [Just $ PortableTerm (getNest ctx) a']) bod
+        Lam _ bod → normalize (NormBinds 0 [Just $ PortableTerm (getNest ctx) a']) bod
         App (Builtin RecordGet) name → do
           let rec = a'
           let search = \case
@@ -179,11 +186,11 @@ normalize = \ctx term → case ctx of
           <*> for origRest (normalize ctx')
     Sorry n x → Sorry n <$> normalize ctx x
     Var i → case ctx of
-      NormBinds binds →
+      NormBinds globals binds →
         let (before, after) = splitAt i binds
          in pure case after of
               (viewl → Just (Just val, _)) → unport val $ getNest ctx
-              _ → Var $ i - foldl' (\acc x → if isJust x then acc + 1 else acc) 0 before
+              _ → Var $ i - foldl' (\acc x → if isJust x then acc + 1 else acc) 0 (drop globals before)
       NormRewrite{} → pure $ Var i
     Quantification q x a b → Quantification q x <$> normalize ctx a <*> normalize (nestNormCtx ctx) b
     Builtin x → pure $ Builtin x
@@ -198,7 +205,7 @@ normalize = \ctx term → case ctx of
 --  extractVar var = maybe (pure Nothing) extractTerm $ HM.lookup var binds
 
 normalizeBuiltin ∷ TermT → TermT
-normalizeBuiltin = unsafePerformIO . normalize (NormBinds $ Just . PortableTerm 0 . Builtin <$> fromList builtinsList)
+normalizeBuiltin = unsafePerformIO . normalize (NormBinds 0 $ Just . PortableTerm 0 . Builtin <$> fromList builtinsList)
 
 -- | Parse builtin
 parseBQQ ∷ QuasiQuoter
@@ -213,4 +220,4 @@ parseBQQ =
 normalizeFile ∷ FilePath → IO ()
 normalizeFile x = do
   t ← parseFile x
-  render . pTerm' =<< normalize (NormBinds []) t
+  render . pTerm' =<< normalize (NormBinds 0 []) t
