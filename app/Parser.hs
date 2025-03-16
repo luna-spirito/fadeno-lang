@@ -199,13 +199,8 @@ portTerm oldGlobal newGlobal = rec
     Pi nameM in_ out_ → Pi nameM (rec in_) (rec out_)
     old@Builtin{} → old
     BuiltinsVar → BuiltinsVar
-    ExVar{} → error "sighs2"
-    -- ExVar var → trace ("portTerm " <> tshow oldGlobal <> " " <> tshow newGlobal <> " " <> tshow var) $ ExVar var
-    -- case (unsafePerformIO $ readIORef var) of
-    -- Left t → portTerm oldGlobal newGlobal $ unport t oldGlobal
-    -- _ → error "sighs2"
-    -- error "sighs2"
-    old@UniVar{} → error "sighs"
+    old@ExVar{} → old
+    old@UniVar{} → old
 
 unport ∷ PortableTermT → Int → TermT
 unport (PortableTerm old term) new = portTerm old new term
@@ -609,14 +604,9 @@ pTerm (oldPrec, vars) =
       )
     Sorry x _ → (6, "sorry/" <> pIdent x) -- 6 and not 4 since type is not rendered
     Pi inName inTy outTy → (4, maybe mempty (\x → pIdent x <+> ": ") inName <> pTerm (5, vars) inTy <+> "->" <+> pTerm (4, maybe id (flip (|>)) inName vars) outTy)
-    -- Ty x -> (4, "Type/" <+> pTerm 6 x)
     App (App (Builtin RecordGet) (TagLit tag)) rec →
       (6, pTerm (6, vars) rec <> "." <> pIdent tag)
     App lam arg → (5, pTerm (5, vars) lam <+> pTerm (6, vars) arg)
-    -- Row x → (5, "Row" <+> pTerm 6 x)
-    -- Record x → (5, "Record" <+> pTerm 6 x)
-    -- U32 -> (6, "U32")
-    -- Tag → (6, "Tag")
     Builtin x → (6, "fadeno." <> pIdent (identOfBuiltin x)) -- TODO: use record parser
     BuiltinsVar → (6, "fadeno")
     NatLit x → (6, pretty x)

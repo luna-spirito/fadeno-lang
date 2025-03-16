@@ -1,4 +1,4 @@
-// Type+ = fadeno.Type+
+Type+ = fadeno.Type+
 // U32 = fadeno.U32
 
 // Kind = Type+ 1
@@ -16,4 +16,5 @@
 // in id fadeno.U32
 
 // fadeno
-\x. x
+// \f a. f a
+in Type+
