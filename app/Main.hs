@@ -19,7 +19,7 @@ import Data.Foldable (foldrM)
 import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, splitAt, viewr, (!?), (|>))
 import GHC.Exts (IsList (..))
 import Normalize (EqRes (..), NormCtx (..), isEq, nestedNormBinds, normalize, parseBQQ)
-import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), Ident (..), PortableTermT (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, portTerm, render, rowOf, typOf, unport)
+import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), Ident (..), PortableTermT (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, portTerm, recordOf, render, rowOf, typOf, unport)
 import Prettyprinter (Doc, annotate, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, link, local, runReader, toList)
@@ -527,40 +527,44 @@ infer = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer
         infer a $ Check $ Builtin U32
         infer b $ Check $ Builtin U32
         pure $ Builtin U32
-      -- -- Override for second-class RecordGet
-      -- -- TODO: Create a speci type for RecordGet
-      -- (App (App (Builtin RecordGet) tag) record, Infer) → do
-      --   recordTy ← infer ctx record Infer
-      --   let body row = do
-      --         withLookupField
-      --           ( \case
-      --               LookupFound x _ → do
-      --                 self ← normalize (NormBinds $ fst <$> ctx) record
-      --                 -- TODO: This replaces `self` with the entire record.
-      --                 -- It doesn't filter out only the accessible fields.
-      --                 -- It's quite easy to filter by updating the lookupField, but do we need it really?
-      --                 -- As I understand it, the inference should fail first.
-      --                 x' ← normalize (NormBinds [Just self]) x
-      --                 pure x'
-      --               _ → stackError "Field not found"
-      --           )
-      --           id
-      --           True
-      --           tag
-      --           ([], Just row)
-      --   withMono
-      --     id
-      --     recordTy
-      --     ( \var (mScope, mT) → beforeEx mScope var do
-      --         u ← pushExVar $ Just $ Builtin U32
-      --         row ← pushExVar $ Just $ rowOf $ typOf u
-      --         pure do
-      --           writeMeta (mScope, mT) var $ recordOf row
-      --           body row
-      --     )
-      --     \case
-      --       App (Builtin Record) row → body row
-      --       _ → stackError "Not a record"
+      -- Override for second-class RecordGet
+      -- TODO: Create a speci type for RecordGet
+      (App (App (Builtin RecordGet) tag) record, Infer) → do
+        recordTy ← infer record Infer
+        let body row = do
+              traceShowM $ pTerm' row
+              withLookupField
+                ( \case
+                    LookupFound x _ → do
+                      ctx ← ask @BindsT
+                      self ← normalize (NormBinds nesting $ fst <$> ctx) record
+                      -- TODO: This replaces `self` with the entire record.
+                      -- It doesn't filter out only the accessible fields.
+                      -- It's quite easy to filter by updating the lookupField, but do we need it really?
+                      -- As I understand it, the inference should fail first.
+                      traceShowM x
+                      x' ← normalize (nestedNormBinds nesting [Just $ PortableTerm nesting self]) x
+                      traceShowM x'
+                      pure x'
+                    _ → stackError "Field not found"
+                )
+                id
+                True
+                tag
+                ([], Just row)
+        withMono
+          id
+          recordTy
+          ( \var (mScope, mT) → beforeEx mScope var do
+              u ← pushExVar $ Just $ PortableTerm nesting $ Builtin U32
+              row ← pushExVar $ Just $ PortableTerm nesting $ rowOf $ typOf u
+              pure do
+                writeMeta (mScope, mT) var $ recordOf row
+                body row
+          )
+          \case
+            App (Builtin Record) row → body row
+            _ → stackError "Not a record"
       -- {-
       --   recordTy ← infer ctx record Infer
       --   let body row =
@@ -731,7 +735,7 @@ infer = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer
       (BuiltinsVar, Infer) →
         pure
           $ App (Builtin Record)
-          $ FieldsLit FRow ((\b → (TagLit $ identOfBuiltin b, unport (typOfBuiltin b) nesting)) <$> builtinsList) Nothing
+          $ FieldsLit FRow ((\b → (TagLit $ identOfBuiltin b, unport (typOfBuiltin b) (nesting + 1))) <$> builtinsList) Nothing
       (ExVar (ExVar' i), mode) →
         sendIO (readIORef i) >>= \case
           Left t → infer (unport t nesting) mode
