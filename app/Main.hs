@@ -22,7 +22,7 @@ import Normalize (EqRes (..), NormCtx (..), isEq, nestedNormBinds, normalize, pa
 import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), Ident (..), PortableTermT (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, portTerm, recordOf, render, rowOf, typOf, unport)
 import Prettyprinter (Doc, annotate, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
-import RIO hiding (Reader, Vector, ask, link, local, runReader, toList)
+import RIO hiding (Reader, Vector, ask, filter, link, local, runReader, toList)
 import RIO.Partial qualified as P
 
 -- TODO: Refactor unwraps?
@@ -183,9 +183,13 @@ type BindsT = Vector (Maybe PortableTermT, PortableTermT)
 type MetaVarsT = Vector (Vector ExVar')
 type Solve = Reader BindsT :+: State MetaVarsT :+: Fresh :+: Error (Doc AnsiStyle) :+: StackLog :+: Lift IO
 
-currNesting ∷ (Has (Reader BindsT) sig m) ⇒ m Int
-currNesting = length <$> ask @BindsT
-{-# INLINE currNesting #-}
+currValNesting ∷ (Has (Reader BindsT) sig m) ⇒ m Int
+currValNesting = length <$> ask @BindsT
+{-# INLINE currValNesting #-}
+
+currTyNesting ∷ (Has (Reader BindsT) sig m) ⇒ m Int
+currTyNesting = foldl' (\acc (x, _) → if isNothing x then acc + 1 else acc) 0 <$> ask @BindsT
+{-# INLINE currTyNesting #-}
 
 freshIdent ∷ (Has Solve sig m) ⇒ m Ident
 freshIdent = UIdent <$> fresh
@@ -254,22 +258,22 @@ scoped' tmap act = do
             -- [0] -> forall. $0
             -- \$0 + [0] -> forall. $1 + $0
             -- \$1 $0 (\ $0 + [1]) -> forall. $2 $1 (\ $0 + $1)
-            nesting ← currNesting
+            tyNesting ← currTyNesting
             (`tmap` ty') \resTy → do
               -- A crutch that hopefully doesn't fall off instantly.
               -- TODO: Explain, formalize and hopefully remove the crutch by providing a proper portTerm.
-              resTy' ← normalize (nestedNormBinds nesting []) resTy
+              resTy' ← normalize (nestedNormBinds tyNesting []) resTy
               case xTyM of
                 Just xTy → do
-                  sendIO $ writeIORef x $ Left $ PortableTerm (nesting + 1) $ Var nesting
-                  pure $ Quantification Forall variable' (unport xTy nesting) $ portTerm nesting (nesting + 1) resTy'
+                  sendIO $ writeIORef x $ Left $ PortableTerm (tyNesting + 1) $ Var tyNesting
+                  pure $ Quantification Forall variable' (unport xTy tyNesting) $ portTerm tyNesting (tyNesting + 1) resTy'
                 Nothing → do
-                  sendIO $ writeIORef x $ Left $ PortableTerm (nesting + 2) $ Var $ nesting + 1
+                  sendIO $ writeIORef x $ Left $ PortableTerm (tyNesting + 2) $ Var $ tyNesting + 1
                   n ← freshIdent
                   pure
                     $ Quantification Forall n (Builtin U32)
-                    $ Quantification Forall variable' (typOf $ Var nesting)
-                    $ portTerm nesting (nesting + 2) resTy
+                    $ Quantification Forall variable' (typOf $ Var tyNesting)
+                    $ portTerm tyNesting (tyNesting + 2) resTy
     )
     ty
     exs
@@ -315,7 +319,7 @@ instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1
         ExVar (ExVar' var2) →
           sendIO (readIORef var2) >>= \case
             Left t → do
-              nesting ← currNesting
+              nesting ← currValNesting
               instMeta' $ unport t nesting
             Right (_, scope2, t2) → do
               -- Either var1 or origVar2 is introduced earlier. We need to identify, which one.
@@ -475,13 +479,14 @@ infer = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer
   -- However, converting Infer to a Check when checking a term is hereby declared a deadly sin.
   infer' ∷ TermT → InferMode a → m a
   infer' orA orB = do
-    nesting ← currNesting
+    valNesting0 ← currValNesting
+    tyNesting0 ← currTyNesting
     case (orA, orB) of
       (term, Check (Quantification Forall _ xTy yT)) → scoped_ do
-        x' ← pushUniVar $ PortableTerm nesting xTy
+        x' ← pushUniVar $ PortableTerm tyNesting0 xTy
         pure do
           ctx ← ask @BindsT
-          yT' ← normalize (nestedNormBinds nesting [Just $ PortableTerm nesting x']) yT
+          yT' ← normalize (nestedNormBinds tyNesting0 [Just $ PortableTerm tyNesting0 x']) yT
           infer term $ Check yT'
       -- TODO: breaks.
       -- (term, Check ((Quantification Exists xName Ty yT))) → scoped_ do -- TODO: not just for Ty!
@@ -496,31 +501,31 @@ infer = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer
             -- TODO: check ty' to be a type?
             -- EDIT: typechecking is undecidable... so... uh... no?
             -- void $ infer ctx ty Infer
-            ty' ← normalize (NormBinds nesting $ fst <$> ctx) ty
+            ty' ← normalize (NormBinds 0 $ fst <$> ctx) ty
             infer val $ Check ty'
             pure ty'
-        val' ← normalize (NormBinds nesting $ fst <$> ctx) val
+        val' ← normalize (NormBinds valNesting0 $ fst <$> ctx) val
         let withBs' act = case into of
               Block{} → act into
               _ → stackScope "in" $ act into
         withBs' \bs' →
-          local (|> (Just $ PortableTerm nesting val', PortableTerm nesting ty))
+          local (|> (Just $ PortableTerm valNesting0 val', PortableTerm tyNesting0 ty))
             $ infer bs' mode
       (Lam arg bod, Infer) →
         scoped do
-          u ← pushExVar $ Just $ PortableTerm nesting $ Builtin U32
-          inT ← pushExVar $ Just $ PortableTerm nesting $ typOf u
+          u ← pushExVar $ Just $ PortableTerm tyNesting0 $ Builtin U32
+          inT ← pushExVar $ Just $ PortableTerm tyNesting0 $ typOf u
           pure do
-            outT ← local @BindsT (|> (Nothing, PortableTerm nesting inT)) $ infer bod Infer
+            outT ← local @BindsT (|> (Nothing, PortableTerm tyNesting0 inT)) $ infer bod Infer
             pure $ Pi Nothing inT outT
       (Lam arg bod, Check (Pi inNameM inT outT)) → do
-        let inferBod val outT' = local (|> (PortableTerm nesting <$> val, PortableTerm nesting inT)) $ infer bod $ Check outT'
+        let inferBod val outT' = local (|> (PortableTerm valNesting0 <$> val, PortableTerm tyNesting0 inT)) $ infer bod $ Check outT'
         case inNameM of
           Nothing → inferBod Nothing outT
           Just inName → scoped_ do
-            arg' ← pushUniVar $ PortableTerm nesting inT
+            arg' ← pushUniVar $ PortableTerm tyNesting0 inT
             pure do
-              outT' ← normalize (nestedNormBinds nesting [Just $ PortableTerm nesting arg']) outT
+              outT' ← normalize (nestedNormBinds tyNesting0 [Just $ PortableTerm tyNesting0 arg']) outT
               inferBod (Just arg') outT'
       (Op a _op b, Infer) → do
         -- Deadly sin. Should be fixed.
@@ -537,13 +542,15 @@ infer = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer
                 ( \case
                     LookupFound x _ → do
                       ctx ← ask @BindsT
-                      self ← normalize (NormBinds nesting $ fst <$> ctx) record
+                      valNesting ← currValNesting -- = valNesting0?
+                      self ← normalize (NormBinds valNesting $ fst <$> ctx) record
                       -- TODO: This replaces `self` with the entire record.
                       -- It doesn't filter out only the accessible fields.
                       -- It's quite easy to filter by updating the lookupField, but do we need it really?
                       -- As I understand it, the inference should fail first.
                       traceShowM x
-                      x' ← normalize (nestedNormBinds nesting [Just $ PortableTerm nesting self]) x
+                      tyNesting ← currTyNesting
+                      x' ← normalize (nestedNormBinds tyNesting [Just $ PortableTerm tyNesting self]) x
                       traceShowM x'
                       pure x'
                     _ → stackError "Field not found"
@@ -556,8 +563,9 @@ infer = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer
           id
           recordTy
           ( \var (mScope, mT) → beforeEx mScope var do
-              u ← pushExVar $ Just $ PortableTerm nesting $ Builtin U32
-              row ← pushExVar $ Just $ PortableTerm nesting $ rowOf $ typOf u
+              tyNesting ← currTyNesting
+              u ← pushExVar $ Just $ PortableTerm tyNesting $ Builtin U32
+              row ← pushExVar $ Just $ PortableTerm tyNesting $ rowOf $ typOf u
               pure do
                 writeMeta (mScope, mT) var $ recordOf row
                 body row
@@ -608,9 +616,10 @@ infer = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer
               -- I'm not satisfied by this solution, but instMeta solution is
               -- even more verbose since it accepts full TermT as input.
               beforeEx mScope var do
-                i ← pushExVar $ Just $ PortableTerm nesting $ Builtin U32
-                inT ← pushExVar $ Just $ PortableTerm nesting $ typOf i
-                outT ← pushExVar $ Just $ PortableTerm nesting $ typOf i
+                tyNesting ← currTyNesting
+                i ← pushExVar $ Just $ PortableTerm tyNesting $ Builtin U32
+                inT ← pushExVar $ Just $ PortableTerm tyNesting $ typOf i
+                outT ← pushExVar $ Just $ PortableTerm tyNesting $ typOf i
                 pure do
                   writeMeta (mScope, mT) var (Pi Nothing inT outT)
                   infer a $ Check $ inT
@@ -622,9 +631,10 @@ infer = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer
               case inNameM of
                 Nothing → pure outT
                 Just _inNameM → do
+                  tyNesting ← currTyNesting
                   -- a' ← normalize (NormBinds $ fst <$> ctx) a
                   normalize
-                    (nestedNormBinds nesting [Just $ PortableTerm nesting a])
+                    (nestedNormBinds tyNesting [Just $ PortableTerm tyNesting a])
                     outT
             t → stackError $ "inferApp " <> pTerm' t
       (NatLit _, Infer) → pure $ Builtin U32
@@ -706,7 +716,7 @@ infer = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer
         ctx ← ask @BindsT
         case ctx !? x of
           Nothing → stackError $ "Unknown var @" <> pretty x
-          Just (_, ty) → pure $ unport ty nesting
+          Just (_, ty) → pure $ unport ty tyNesting0
       -- {-
       --     (Quantification _ name kind ty, mode) → scoped_ do
       --       u ← pushExVar $ Just $ Builtin U32
@@ -722,20 +732,20 @@ infer = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer
       --         infer (HM.insert name (Nothing, kind') ctx) ty mode -}
       (Pi inNameM x y, Check (App (Builtin Type) u)) → do
         infer x $ Check $ typOf u
-        (if isJust inNameM then local @BindsT (|> (Nothing, PortableTerm nesting x)) else id)
+        (if isJust inNameM then local @BindsT (|> (Nothing, PortableTerm valNesting0 x)) else id)
           $ infer y
           $ Check
           $ typOf u
       (Pi inNameM x y, Infer) → scoped do
-        u ← pushExVar $ Just $ PortableTerm nesting $ Builtin U32
+        u ← pushExVar $ Just $ PortableTerm tyNesting0 $ Builtin U32
         pure do
           infer (Pi inNameM x y) $ Check $ typOf u
           pure $ typOf u
-      (Builtin x, Infer) → pure $ unport (typOfBuiltin x) nesting
+      (Builtin x, Infer) → pure $ unport (typOfBuiltin x) tyNesting0
       (BuiltinsVar, Infer) →
         pure
           $ App (Builtin Record)
-          $ FieldsLit FRow ((\b → (TagLit $ identOfBuiltin b, unport (typOfBuiltin b) (nesting + 1))) <$> builtinsList) Nothing
+          $ FieldsLit FRow ((\b → (TagLit $ identOfBuiltin b, unport (typOfBuiltin b) (tyNesting0 + 1))) <$> builtinsList) Nothing
       (ExVar (ExVar' i), mode) →
         sendIO (readIORef i) >>= \case
           Left t → infer (unport t nesting) mode
