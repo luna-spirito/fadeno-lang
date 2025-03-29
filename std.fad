@@ -1,4 +1,4 @@
-Type+ = fadeno.Type+
+// Type+ = fadeno.Type+
 // U32 = fadeno.U32
 
 // Kind = Type+ 1
@@ -19,4 +19,5 @@ Type+ = fadeno.Type+
 // \f a. f a
 // in Type+
 // in
-in \x y z w. fadeno y
+// in \x y z w. {( .x = self x | .y = self y )}
+{ .x = 4 }.x

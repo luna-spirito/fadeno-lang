@@ -18,7 +18,7 @@ import Data.ByteString.Char8 qualified as BS
 import Data.Foldable (foldrM)
 import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, splitAt, viewr, (!?), (|>))
 import GHC.Exts (IsList (..))
-import Normalize (EqRes (..), NormCtx (..), isEq, nestedNormBinds, normalize, parseBQQ)
+import Normalize (EqRes (..), NormCtx (..), isEq, normalize, normalizeFile, parseBQQ)
 import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), Ident (..), PortableTermT (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, portTerm, recordOf, render, rowOf, typOf, unport)
 import Prettyprinter (Doc, annotate, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)

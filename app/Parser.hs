@@ -135,7 +135,7 @@ data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
 
 data Fields = Fields ![(TermT, TermT)] !(Maybe TermT) deriving (Show, Eq, Lift)
 
-data BlockT = BlockLet !Ident !(Maybe TermT) !TermT | BlockRewrite !TermT
+data BlockT = BlockLet !Ident !(Maybe TermT) !TermT !(Lambda TermT) | BlockRewrite !TermT !TermT
   deriving (Show, Eq, Lift)
 
 -- -- Ident is just for debugging here.
@@ -156,7 +156,7 @@ data TermT
   = -- Term-level
 
     -- | Annotations only allowed on Block.
-    Block !BlockT !TermT
+    Block !BlockT
   | Lam !Ident !(Lambda TermT)
   | Op !TermT !OpT !TermT
   | App !TermT !TermT
@@ -171,71 +171,9 @@ data TermT
     Pi !TermT !(Either (Ident, Lambda TermT) TermT)
   | Builtin !BuiltinT
   | BuiltinsVar
-  | -- Int is for nestness. ExVar and UniVar "inhabit space" between
-    -- regular bindings, so ExVar 0 is more nested than Var 0
-    ExVar !Ident !Int !(Maybe TermT)
+  | ExVar !Ident !Int !(Maybe TermT)
   | UniVar !Ident !Int !TermT
   deriving (Show, Eq, Lift)
-
--- portTerm ∷ Int → Int → TermT → TermT
--- portTerm oldGlobal newGlobal = rec
---  where
---   rec ∷ TermT → TermT
---   rec = \case
---     Block{} → undefined
---     Lam arg bod → Lam arg $ rec bod
---     Op a op b → Op (rec a) op (rec b)
---     App f' a' → App (rec f') (rec a')
---     old@NatLit{} → old
---     old@TagLit{} → old
---     FieldsLit f' a b → FieldsLit f' (bimap rec rec <$> a) (rec <$> b)
---     old@Sorry{} → old
---     Var i →
---       Var
---         $ if i >= oldGlobal
---           then i - oldGlobal + newGlobal
---           else i
---     Quantification q n k in_ → Quantification q n (rec k) (rec in_)
---     Pi nameM in_ out_ → Pi nameM (rec in_) (rec out_)
---     old@Builtin{} → old
---     BuiltinsVar → BuiltinsVar
---     old@ExVar{} → old
---     old@UniVar{} → old
-
--- nested' ∷ (Int, Int) → TermT → TermT
--- nested' (valBy, metaBy) = rec (0 ∷ Int)
---  where
---   rec = \case
---     Block{} → undefined
---     Lam arg bod → Lam arg $ rec (fstGlobal + 1) bod
---     Op a op b → Op (rec a) op (rec b)
---     App f' a' → App (rec f') (rec a')
---     old@NatLit{} → old
---     old@TagLit{} → old
---     FieldsLit f' a b →
---       let fstGlobal' = case f' of
---             FRecord → fstGlobal
---             FRow → fstGlobal + 1
---        in FieldsLit f' (bimap (rec') (rec') <$> a) (rec' <$> b)
---     old@Sorry{} → old
---     Var i →
---       Var
---         $ if i >= fstGlobal
---           then i + valBy
---           else i
---     Quantification q n k in_ → Quantification q n (rec k) (rec (fstGlobal + 1) in_)
---     Pi nameM in_ out_ → Pi nameM (rec in_) (rec (if isJust nameM then fstGlobal + 1 else fstGlobal) out_)
---     old@Builtin{} → old
---     BuiltinsVar → BuiltinsVar
---     ExVar ex (origValN, origMetaN) →
---       ExVar
---         ex
---         ( if origValN >= fstGlobal -- >, not >=!
---             then origValN + valBy
---             else origValN
---         , origMetaN + metaBy
---         )
---     UniVar a origMetaN c → UniVar a (origMetaN + metaBy) $ rec c
 
 typOf ∷ TermT → TermT
 typOf = App $ Builtin Type
@@ -286,7 +224,7 @@ infxl a oper = a >>= infxl'
       <|> pure prev
 
 sepBy ∷ Parser' () → Parser' a → Parser' [a]
-sepBy sep x = (:) <$> x <*> many (sep *> x)
+sepBy sep x = ((:) <$> x <*> many (sep *> x)) <|> pure []
 
 -- Syntax is *a little* ambigious. I'm very sorry.
 
@@ -306,7 +244,7 @@ parsePrim = token do
               FieldsLit <$> maybeInsertSelf do
                 let parseField = do
                       n ← parsePrim
-                      token $(char ':')
+                      token $(char '=')
                       v ← parseTop
                       pure (n, v)
                 knownFields ← sepBy (token $(char '|')) parseField
@@ -433,14 +371,14 @@ parseBlock = do
     someEntries =
       ( do
           (name, ty, expr) ← binding
-          rest ← (local (|> name) manyEntries)
-          pure $ Block (BlockLet name ty expr) rest
+          rest ← Lambda <$> (local (|> name) manyEntries)
+          pure $ Block (BlockLet name ty expr rest)
       )
         <|> ( do
                 token $ $(string "rewrite")
                 rewrite ← parseTop
                 rest ← manyEntries
-                pure $ Block (BlockRewrite rewrite) rest
+                pure $ Block (BlockRewrite rewrite rest)
             )
     manyEntries =
       someEntries
@@ -509,13 +447,12 @@ isSimple =
           else pure ()
       complexity = \case
         Lam _ (Lambda x) → ping *> complexity x
-        Block defs x →
+        Block defs →
           ping
             *> ( case defs of
-                  BlockLet _ b c → for_ b complexity *> complexity c
-                  BlockRewrite r → ping *> complexity r
+                  BlockLet _ b c x → for_ b complexity *> complexity c *> complexity (unLambda x)
+                  BlockRewrite r x → ping *> complexity r *> complexity x
                )
-            *> complexity x
         Op a _ c → complexity a *> complexity c
         App f a → complexity f *> complexity a
         NatLit _ → ping
@@ -555,32 +492,51 @@ pTerm (oldPrec, vars) =
     block@(Block{}) →
       ( 1
       , let
-          collect term = case term of
-            Block entry next →
-              let (tEntries, tIn_) = collect next
-               in (entry : tEntries, tIn_)
-            _ → pure term
-          (entries, in_) = collect block
-          (renderedEntries, vars'') =
-            foldl'
-              ( \(acc, vars') → \case
-                  BlockLet name tyM val →
-                    ( ( maybe mempty (\ty → "/:" <+> pTerm (2, vars') ty <> line) tyM -- TODO: split if complicated type
+          go vars' = \case
+            Block def → case def of
+              BlockLet name tyM val in_ →
+                let entry =
+                      ( maybe mempty (\ty → "/:" <+> pTerm (2, vars') ty <> line) tyM -- TODO: split if complicated type
                           <> pIdent name
                           <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTerm (0, vars') val)
                       )
-                        : acc
-                    , vars' |> name
-                    )
-                  BlockRewrite x → (("rewrite" <+> pTerm (0, vars') x) : acc, vars')
-              )
-              (mempty, vars)
-              entries
+                    (entries, rest, vars'') = go (vars' |> name) $ unLambda in_
+                 in (entry : entries, rest, vars'')
+              BlockRewrite x in_ →
+                let
+                  entry = "rewrite" <+> pTerm (0, vars') x
+                  (entries, rest, vars'') = go vars' in_
+                 in
+                  (entry : entries, rest, vars'')
+            r → ([], r, vars')
          in
-          vsep (reverse renderedEntries)
-            <> line
-            <> annotate (color Cyan) "in"
-            <+> nest 2 (pTerm (1, vars'') in_)
+          let (entries, rest, vars'') = go vars block
+           in -- collect term = case term of
+              --   Block entry →
+              --     let (tEntries, tIn_) = collect next
+              --      in (entry : tEntries, tIn_)
+              --   _ → pure term
+              -- (entries, in_) = collect block
+              -- (renderedEntries, vars'') =
+              --   foldl'
+              --     ( \(acc, vars') → \case
+              --         BlockLet name tyM val →
+              --           ( ( maybe mempty (\ty → "/:" <+> pTerm (2, vars') ty <> line) tyM -- TODO: split if complicated type
+              --                 <> pIdent name
+              --                 <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTerm (0, vars') val)
+              --             )
+              --               : acc
+              --           , vars' |> name
+              --           )
+              --         BlockRewrite x → (("rewrite" <+> pTerm (0, vars') x) : acc, vars')
+              --     )
+              --     (mempty, vars)
+              --     entries
+
+              vsep entries
+                <> line
+                <> annotate (color Cyan) "in"
+                <+> nest 2 (pTerm (1, vars'') rest)
       )
     Op a op b →
       let prec = case op of
@@ -621,7 +577,7 @@ pTerm (oldPrec, vars) =
           (vars', Fields knownFields rest) = case fields of
             Left (Lambda a) → (vars |> Ident "self", a)
             Right a → (vars, a)
-          field (n, v) = pTerm (6, vars') n <+> ":" <+> pTerm (0, vars') v
+          field (n, v) = pTerm (6, vars') n <+> "=" <+> pTerm (0, vars') v
           -- TODO: separator other than " " if not isSimple.
           renderRest = case rest of
             Nothing → mempty
