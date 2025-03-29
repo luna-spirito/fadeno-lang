@@ -5,9 +5,47 @@ import Control.Effect.Lift (Lift, sendIO)
 import Data.RRBVector (Vector, drop, replicate, splitAt, viewl, (|>))
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (BlockT (..), BuiltinT (..), ExVar' (..), Fields (..), OpT (..), PortableTermT (..), TermT (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render, unport)
+import Parser (BlockT (..), BuiltinT (..), Fields (..), Lambda (..), OpT (..), TermT (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
 import RIO hiding (Reader, Vector, ask, drop, link, local, replicate, runReader, to, toList)
 import System.IO.Unsafe (unsafePerformIO)
+
+nested ∷ Int → TermT → TermT
+nested locs = \case
+  Block{} → undefined
+  Lam arg bod → Lam arg $ recLambda bod
+  Op a op b → Op (rec a) op (rec b)
+  App f' a' → App (rec f') (rec a')
+  old@NatLit{} → old
+  old@TagLit{} → old
+  FieldsLit flit →
+    let with f = case flit of
+          Left row → Left $ Lambda $ f (locs + 1) $ unLambda row
+          Right record → Right $ f locs record
+     in FieldsLit $ with \locs' (Fields knownFields rest) →
+          Fields (bimap (nested locs') (nested locs') <$> knownFields) $ nested locs' <$> rest
+  Sorry n x → Sorry n $ rec x
+  Var i →
+    Var
+      $ if i >= locs
+        then i + 1
+        else i
+  Quantification q n k in_ → Quantification q n (rec k) (recLambda in_)
+  Pi in_ out_ → Pi (rec in_) (either (Left . fmap recLambda) (Right . rec) out_)
+  old@Builtin{} → old
+  BuiltinsVar → BuiltinsVar
+  -- ExVar ex (origValN, origMetaN) →
+  --   ExVar
+  --     ex
+  --     ( if origValN >= fstGlobal -- >, not >=!
+  --         then origValN + valBy
+  --         else origValN
+  --     , origMetaN + metaBy
+  --     )
+  old@ExVar{} → _
+  old@ExVar{} → _
+ where
+  rec = nested locs
+  recLambda = Lambda . nested (locs + 1) . unLambda
 
 -- class HasTerm m a where
 --   extractTerm ∷ a → m TermT
@@ -28,6 +66,7 @@ import System.IO.Unsafe (unsafePerformIO)
 -- TODO: implement REWRITES, and implement ExVar substitution via REWRITES
 -- NOTE: normalize shouldn't process both normalizations and rewrites at the same time.
 
+{-
 -- | Intensional equality.
 data EqRes
   = EqYes -- provably eq
@@ -221,3 +260,4 @@ normalizeFile ∷ FilePath → IO ()
 normalizeFile x = do
   t ← parseFile x
   render . pTerm' =<< normalize (NormBinds 0 []) t
+-}

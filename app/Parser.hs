@@ -6,7 +6,6 @@ import Control.Effect.Empty qualified as E
 import Data.ByteString.Char8 (pack)
 import Data.RRBVector (Vector, findIndexR, (!?), (|>))
 import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string)
-import GHC.IO.Unsafe (unsafePerformIO)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (Lift (..))
 import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, layoutSmart, line, nest, softline, vsep, (<+>))
@@ -134,76 +133,74 @@ builtinsList = [U32, Tag, Row, Record, Type, RecordGet]
 
 data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
 
-data Fields = FRow | FRecord deriving (Show, Eq, Lift)
+data Fields = Fields ![(TermT, TermT)] !(Maybe TermT) deriving (Show, Eq, Lift)
 
 data BlockT = BlockLet !Ident !(Maybe TermT) !TermT | BlockRewrite !TermT
   deriving (Show, Eq, Lift)
 
--- Ident is just for debugging here.
-newtype ExVar' = ExVar' (IORef (Either PortableTermT (Ident, Int, Maybe PortableTermT))) deriving (Eq)
+-- -- Ident is just for debugging here.
+-- newtype ExVar' = ExVar' (IORef (Either PortableTermT (Ident, Int, Maybe PortableTermT))) deriving (Eq)
 
-instance Show ExVar' where
-  show (ExVar' x) = case unsafePerformIO $ readIORef x of
-    Left t → show t
-    Right n → show n
+-- instance Show ExVar' where
+--   show (ExVar' x) = case unsafePerformIO $ readIORef x of
+--     Left t → show t
+--     Right n → show n
 
-instance Lift ExVar' where
-  liftTyped _ = error "Cannot lift ExVar"
+-- instance Lift ExVar' where
+--   liftTyped _ = error "Cannot lift ExVar"
+
+newtype Lambda a = Lambda {unLambda ∷ a}
+  deriving (Show, Eq, Lift)
 
 data TermT
   = -- Term-level
 
     -- | Annotations only allowed on Block.
     Block !BlockT !TermT
-  | Lam !Ident TermT
+  | Lam !Ident !(Lambda TermT)
   | Op !TermT !OpT !TermT
   | App !TermT !TermT
   | NatLit !Word32
   | TagLit !Ident
-  | FieldsLit !Fields ![(TermT, TermT)] !(Maybe TermT) -- TODO: remove list?
+  | FieldsLit !(Either (Lambda Fields) Fields) -- record
   | Sorry !Ident !TermT
   | Var !Int
   | -- Type-level
-    Quantification !Quantifier !Ident !TermT !TermT
+    Quantification !Quantifier !Ident !TermT !(Lambda TermT)
   | -- | Cedille: Π x : T | T’ / Fadeno: x : T -> T'
-    Pi !(Maybe Ident) !TermT !TermT
+    Pi !TermT !(Either (Ident, Lambda TermT) TermT)
   | Builtin !BuiltinT
   | BuiltinsVar
   | -- Int is for nestness. ExVar and UniVar "inhabit space" between
     -- regular bindings, so ExVar 0 is more nested than Var 0
-    ExVar !ExVar'
-  | UniVar !Ident !Int !PortableTermT
+    ExVar !Ident !Int !(Maybe TermT)
+  | UniVar !Ident !Int !TermT
   deriving (Show, Eq, Lift)
 
-data PortableTermT = PortableTerm !Int !TermT deriving (Show, Eq, Lift)
-
-portTerm ∷ Int → Int → TermT → TermT
-portTerm oldGlobal newGlobal = rec
- where
-  rec ∷ TermT → TermT
-  rec = \case
-    Block{} → undefined
-    Lam arg bod → Lam arg $ rec bod
-    Op a op b → Op (rec a) op (rec b)
-    App f' a' → App (rec f') (rec a')
-    old@NatLit{} → old
-    old@TagLit{} → old
-    FieldsLit f' a b → FieldsLit f' (bimap rec rec <$> a) (rec <$> b)
-    old@Sorry{} → old
-    Var i →
-      Var
-        $ if i >= oldGlobal
-          then i - oldGlobal + newGlobal
-          else i
-    Quantification q n k in_ → Quantification q n (rec k) (rec in_)
-    Pi nameM in_ out_ → Pi nameM (rec in_) (rec out_)
-    old@Builtin{} → old
-    BuiltinsVar → BuiltinsVar
-    old@ExVar{} → old
-    old@UniVar{} → old
-
-unport ∷ PortableTermT → Int → TermT
-unport (PortableTerm old term) new = portTerm old new term
+-- portTerm ∷ Int → Int → TermT → TermT
+-- portTerm oldGlobal newGlobal = rec
+--  where
+--   rec ∷ TermT → TermT
+--   rec = \case
+--     Block{} → undefined
+--     Lam arg bod → Lam arg $ rec bod
+--     Op a op b → Op (rec a) op (rec b)
+--     App f' a' → App (rec f') (rec a')
+--     old@NatLit{} → old
+--     old@TagLit{} → old
+--     FieldsLit f' a b → FieldsLit f' (bimap rec rec <$> a) (rec <$> b)
+--     old@Sorry{} → old
+--     Var i →
+--       Var
+--         $ if i >= oldGlobal
+--           then i - oldGlobal + newGlobal
+--           else i
+--     Quantification q n k in_ → Quantification q n (rec k) (rec in_)
+--     Pi nameM in_ out_ → Pi nameM (rec in_) (rec out_)
+--     old@Builtin{} → old
+--     BuiltinsVar → BuiltinsVar
+--     old@ExVar{} → old
+--     old@UniVar{} → old
 
 -- nested' ∷ (Int, Int) → TermT → TermT
 -- nested' (valBy, metaBy) = rec (0 ∷ Int)
@@ -300,11 +297,13 @@ parsePrim = token do
     (NatLit <$> number)
       <|> (TagLit <$> ($(char '.') *> (Ident <$> ident')))
       <|> ( do
-              fields ← token $ $(char '{') *> (($(char '(') $> FRow) <|> pure FRecord)
-              let maybeInsertSelf = case fields of
-                    FRow → local (|> Ident "self")
-                    FRecord → id
-              maybeInsertSelf do
+              token $(char '{')
+              row ← (($(char '(') $> True) <|> pure False)
+              let maybeInsertSelf act =
+                    if row
+                      then Left . Lambda <$> local (|> Ident "self") act
+                      else Right <$> act
+              FieldsLit <$> maybeInsertSelf do
                 let parseField = do
                       n ← parsePrim
                       token $(char ':')
@@ -315,11 +314,9 @@ parsePrim = token do
                   token $ $(string "||")
                   parseMath0
                 token do
-                  case fields of
-                    FRow → $(char ')')
-                    FRecord → pure ()
+                  when row $ $(char ')')
                   $(char '}')
-                pure $ FieldsLit fields knownFields rest
+                pure $ Fields knownFields rest
           )
       <|> (BuiltinsVar <$ (notFollowedBy $(string "fadeno") identSym))
       <|> ( Var
@@ -327,7 +324,7 @@ parsePrim = token do
                 i ← notFollowedBy ident $ token $(char '=')
                 vars ← ask
                 case findIndexR (== i) vars of
-                  Just n → pure n
+                  Just n → pure $ length vars - n - 1
                   Nothing → err =<< getPos -- TODO: better errors, overall
           )
       <|> ( $(char '(')
@@ -362,7 +359,7 @@ parseTy =
             token
               $ ((,App (Builtin Type) $ NatLit 0) <$> ident)
               <|> ($(char '(') *> ((,) <$> ident <*> kind) <* $(char ')'))
-          Quantification q ty ki <$> local (|> ty) manyEntries
+          Quantification q ty ki . Lambda <$> local (|> ty) manyEntries
         manyEntries =
           someEntries <|> (token $(char '.') *> parseTy)
       someEntries
@@ -376,15 +373,15 @@ parseTy =
         )
     <|> do
       -- Fused: parseApp <|> (->)
-      inName ← optional $ (ident <* $(char ':'))
+      inNameM ← optional $ (ident <* $(char ':'))
       inTy ← parseApp
       ( ( do
             token $ $(string "->")
-            outT ← maybe id (local . flip (|>)) inName parseTy
-            pure $ Pi inName inTy outT
+            outTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local (|> name)) inNameM parseTy
+            pure $ Pi inTy outTy
         )
           <|> ( do
-                  guard $ isNothing inName
+                  guard $ isNothing inNameM
                   pure inTy
               )
         )
@@ -464,7 +461,7 @@ parseLam = token do
       [] → parseTop
       (x : xs) → local (|> x) $ parseBod xs
   bod ← parseBod idents
-  pure $ foldr Lam bod idents
+  pure $ foldr (\n → Lam n . Lambda) bod idents
 
 -- 0
 parseTop ∷ Parser' TermT
@@ -511,7 +508,7 @@ isSimple =
           then E.empty
           else pure ()
       complexity = \case
-        Lam _ x → ping *> complexity x
+        Lam _ (Lambda x) → ping *> complexity x
         Block defs x →
           ping
             *> ( case defs of
@@ -523,19 +520,19 @@ isSimple =
         App f a → complexity f *> complexity a
         NatLit _ → ping
         TagLit _ → ping
-        FieldsLit _ x y →
+        FieldsLit (either unLambda id → Fields x y) →
           for_ x (\(a, b) → complexity a *> complexity b) *> for_ y complexity
         Sorry _ _ → ping
         Var _ → ping
-        Quantification _ _ b c → ping *> complexity b *> complexity c
-        Pi _ b c → ping *> complexity b *> complexity c
+        Quantification _ _ b (Lambda c) → ping *> complexity b *> complexity c
+        Pi b c → ping *> complexity b *> either (complexity . unLambda . snd) complexity c
         Builtin _ → ping
         BuiltinsVar → ping
-        ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
-          Left y → complexityPortable y
-          Right _ → ping
-        UniVar _ _ c → ping *> complexityPortable c
-      complexityPortable (PortableTerm _ a) = complexity a
+        ExVar{} → ping
+        -- case unsafePerformIO (readIORef x) of
+        -- Left y → complexityPortable y
+        -- Right _ → ping
+        UniVar _ _ _ → ping
    in runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
 
 -- TODO: Concise syntax for `\` and `forall`
@@ -544,16 +541,16 @@ pTerm (oldPrec, vars) =
   withPrec oldPrec . \case
     Lam arg x →
       ( 0
-      , let sep = case x of
+      , let sep = case unLambda x of
               Lam _ _ → " "
               _
-                | isSimple x → " "
+                | isSimple (unLambda x) → " "
                 | otherwise → line
          in annotate (color Magenta) "\\"
               <> pIdent arg
               <> annotate (color Magenta) "."
               <> sep
-              <> pTerm (0, vars |> arg) x
+              <> pTerm (0, vars |> arg) (unLambda x)
       )
     block@(Block{}) →
       ( 1
@@ -600,10 +597,17 @@ pTerm (oldPrec, vars) =
             q' = case q of
               Forall → "forall"
               Exists → "exists"
-         in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm (4, vars |> name) ty
+         in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm (4, vars |> name) (unLambda ty)
       )
     Sorry x _ → (6, "sorry/" <> pIdent x) -- 6 and not 4 since type is not rendered
-    Pi inName inTy outTy → (4, maybe mempty (\x → pIdent x <+> ": ") inName <> pTerm (5, vars) inTy <+> "->" <+> pTerm (4, maybe id (flip (|>)) inName vars) outTy)
+    Pi inTy outTy →
+      ( 4
+      , either (\(name, _) → pIdent name <+> ": ") mempty outTy <> pTerm (5, vars) inTy
+          <+> "->"
+          <+> case outTy of
+            Left (name, outTy') → pTerm (4, vars |> name) $ unLambda outTy'
+            Right outTy' → pTerm (4, vars) outTy'
+      )
     App (App (Builtin RecordGet) (TagLit tag)) rec →
       (6, pTerm (6, vars) rec <> "." <> pIdent tag)
     App lam arg → (5, pTerm (5, vars) lam <+> pTerm (6, vars) arg)
@@ -611,12 +615,12 @@ pTerm (oldPrec, vars) =
     BuiltinsVar → (6, "fadeno")
     NatLit x → (6, pretty x)
     TagLit x → (6, "." <> pIdent x)
-    FieldsLit fields knownFields rest →
+    FieldsLit fields →
       ( 6
       , let
-          vars' = case fields of
-            FRecord → vars
-            FRow → vars |> Ident "self"
+          (vars', Fields knownFields rest) = case fields of
+            Left (Lambda a) → (vars |> Ident "self", a)
+            Right a → (vars, a)
           field (n, v) = pTerm (6, vars') n <+> ":" <+> pTerm (0, vars') v
           -- TODO: separator other than " " if not isSimple.
           renderRest = case rest of
@@ -627,19 +631,20 @@ pTerm (oldPrec, vars) =
             [x] → " " <> field x <> " "
             x : xs → " " <> field x <> " |" <> renderFields xs
           (braceS, braceE) = case fields of
-            FRecord → (mempty, mempty)
-            FRow → ("(", ")")
+            Left _ → ("(", ")")
+            Right _ → (mempty, mempty)
          in
           "{" <> braceS <> renderFields knownFields <> renderRest <> braceE <> "}"
       )
-    Var x → (6, maybe ("@" <> pretty x) pIdent $ vars !? x)
+    Var x → (6, maybe ("@" <> pretty x) pIdent $ vars !? (length vars - x - 1))
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
-    ExVar (ExVar' x) → case unsafePerformIO (readIORef x) of
-      Left t → (oldPrec, pTerm (oldPrec, vars) $ unport t $ length vars)
-      Right (n, l, t) → (6, "(exi@" <> pretty l <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) (unport t' $ length vars)) t <> ")")
-    UniVar x' l t → (6, "(uni@" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) (unport t $ length vars) <> ")")
+    ExVar n l t → (6, "(exi@" <> pretty l <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) t') t <> ")")
+    -- case unsafePerformIO (readIORef x) of
+    -- Left t → (oldPrec, pTerm (oldPrec, vars) $ unport t $ length vars)
+    -- Right (n, l, t) → (6, "(exi@" <> pretty l <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) (unport t' $ length vars)) t <> ")")
+    UniVar x' l t → (6, "(uni@" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
 
 pTerm' ∷ TermT → Doc AnsiStyle
 pTerm' = pTerm (0, [])

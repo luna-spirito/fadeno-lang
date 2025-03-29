@@ -19,4 +19,4 @@ Type+ = fadeno.Type+
 // \f a. f a
 // in Type+
 // in
-in fadeno
+in \x y z w. fadeno y
