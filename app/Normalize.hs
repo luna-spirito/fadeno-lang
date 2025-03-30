@@ -175,7 +175,7 @@ nested =
       (\_ → (+ 1))
       (+ 1)
       ( \term locs → case term of
-          Var i → Just $ pure $ Var $ if i >= locs then i + 1 else i
+          Var i | i >= locs → Just $ pure $ Var $ i + 1
           _ → Nothing
       )
       0

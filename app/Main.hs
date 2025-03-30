@@ -18,8 +18,8 @@ import Data.ByteString.Char8 qualified as BS
 import Data.Foldable (foldrM)
 import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, splitAt, viewr, (!?), (|>))
 import GHC.Exts (IsList (..))
-import Normalize (EqRes (..), NormCtx (..), isEq, normalize, normalizeFile, parseBQQ)
-import Parser (BlockT (..), BuiltinT (..), Fields (..), Ident (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf, typOf)
+import Normalize (EqRes (..), NormCtx (..), isEq, nested, normalize, normalizeFile, parseBQQ, rewrite)
+import Parser (BlockT (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf, typOf)
 import Prettyprinter (Doc, annotate, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, filter, link, local, runReader, toList)
@@ -191,9 +191,55 @@ pMode = \case
 
 -- TODO: beforeEx DOESN'T CONSIDER INTRODUCED VARIABLES, ACTUALLY!
 
+nestMode ∷ InferMode a → InferMode a
+nestMode = \case
+  Infer → Infer
+  Check x → Check $ nested x
+
+mapTermFor ∷ (Applicative f) ⇒ InferMode a → ((TermT → f TermT) → a → f a)
+mapTermFor = \case
+  Infer → id
+  Check _ → const pure
+
+scopedUniVar ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → Int → m a → m a
+scopedUniVar mapTerm uni1 act = do
+  (resolved, res) ← listen @(IntMap TermT) act
+  let
+    ensureNotOcc =
+      rewrite
+        (const id)
+        id
+        ( \term () → case term of
+            UniVar _ uni2 _ | uni1 == uni2 → Just $ stackError "UniVar leaked"
+            _ → Nothing
+        )
+        ()
+  for_ resolved ensureNotOcc
+  mapTerm ensureNotOcc res
+
+scopedVar ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → m a → m a
+scopedVar mapTerm act = do
+  (resolved, res) ← intercept @(IntMap TermT) act
+  let
+    unnest =
+      rewrite
+        (const (+ 1))
+        (+ 1)
+        ( \term locs → case term of
+            Var i | i == locs → Just $ stackError "Var leaked"
+            Var i | i > locs → Just $ pure $ Var $ i - 1
+            _ → Nothing
+        )
+        0
+  tell =<< for resolved unnest
+  mapTerm unnest res
+
+insertBinds ∷ (Maybe TermT, TermT) → Vector (Maybe TermT, TermT) → Vector (Maybe TermT, TermT)
+insertBinds new old = (bimap (nested <$>) nested <$> old) |> new
+
 -- | Either infers a normalized type for the value and context, or checks a value against the normalized type.
-infer ∷ ∀ sig m a. (Has Solve sig m) ⇒ TermT → InferMode a → m a
-infer = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer' t mode
+infer ∷ ∀ sig m a. (Has Solve sig m) ⇒ Vector (Maybe TermT, TermT) → TermT → InferMode a → m a
+infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer' t mode
  where
   -- Here, we will convert Checks to Infers.
   -- However, converting Infer to a Check when checking a term is hereby declared a deadly sin.
@@ -201,42 +247,57 @@ infer = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer
   infer' = curry \case
     (term, Check (Quantification Forall n xTy yT)) → do
       uniId ← fresh
-      _filterOutInInstantiations
-      infer term $ Check $ normalize [UniVar n uniId _] yT
+      scopedUniVar (const pure) uniId $ infer binds term $ Check $ normalize [Just $ UniVar n uniId xTy] $ unLambda yT
+    -- (term, Check (Quantification Forall _ xTy yT)) → scoped_ do
+    --   x' ← pushUniVar $ PortableTerm tyNesting0 xTy
+    --   pure do
+    --     ctx ← ask @BindsT
+    --     yT' ← normalize (nestedNormBinds tyNesting0 [Just $ PortableTerm tyNesting0 x']) yT
+    --     infer term $ Check yT'
+    -- TODO: breaks.
+    -- (term, Check ((Quantification Exists xName Ty yT))) → scoped_ do -- TODO: not just for Ty!
+    --   x' ← pushExVar
+    --   yT' ← normalize (HM.singleton xName x') yT
+    --   infer ctx term $ Check $ yT'
+    (Block (BlockLet name tyM val into), mode) → do
+      ty ← stackScope ("let" <+> pIdent name) case tyM of
+        Nothing → infer binds val Infer
+        Just ty → do
+          -- TODO: check ty' to be a type?
+          -- EDIT: typechecking is undecidable... so... uh... no?
+          let ty' = normalize (fst <$> binds) ty
+          infer binds val $ Check ty'
+          pure ty'
+      let
+        val' = normalize (fst <$> binds) val
+        withLog act = case (unLambda into) of
+          Block{} → act
+          _ → stackScope "in" act
+      withLog
+        $ scopedVar (mapTermFor mode)
+        $ infer (insertBinds (Just val', ty) binds) (unLambda into)
+        $ nestMode mode
+    --   (Block (BlockLet name tyM val) into, mode) → do
+    --     ctx ← ask @BindsT
+    --     ty ← stackScope ("let" <+> pIdent name) case tyM of
+    --       Nothing → infer val Infer
+    --       Just ty → do
+    --         -- TODO: check ty' to be a type?
+    --         -- EDIT: typechecking is undecidable... so... uh... no?
+    --         -- void $ infer ctx ty Infer
+    --         ty' ← normalize (NormBinds 0 $ fst <$> ctx) ty
+    --         infer val $ Check ty'
+    --         pure ty'
+    --     val' ← normalize (NormBinds valNesting0 $ fst <$> ctx) val
+    --     let withBs' act = case into of
+    --           Block{} → act into
+    --           _ → stackScope "in" $ act into
+    --     withBs' \bs' →
+    --       local (|> (Just $ PortableTerm valNesting0 val', PortableTerm tyNesting0 ty))
+    --         $ infer bs' mode
+    (Lam arg bod, Infer) → _
     _ → _
 
--- valNesting0 ← currValNesting
--- tyNesting0 ← currTyNesting
--- case (orA, orB) of
---   (term, Check (Quantification Forall _ xTy yT)) → scoped_ do
---     x' ← pushUniVar $ PortableTerm tyNesting0 xTy
---     pure do
---       ctx ← ask @BindsT
---       yT' ← normalize (nestedNormBinds tyNesting0 [Just $ PortableTerm tyNesting0 x']) yT
---       infer term $ Check yT'
---   -- TODO: breaks.
---   -- (term, Check ((Quantification Exists xName Ty yT))) → scoped_ do -- TODO: not just for Ty!
---   --   x' ← pushExVar
---   --   yT' ← normalize (HM.singleton xName x') yT
---   --   infer ctx term $ Check $ yT'
---   (Block (BlockLet name tyM val) into, mode) → do
---     ctx ← ask @BindsT
---     ty ← stackScope ("let" <+> pIdent name) case tyM of
---       Nothing → infer val Infer
---       Just ty → do
---         -- TODO: check ty' to be a type?
---         -- EDIT: typechecking is undecidable... so... uh... no?
---         -- void $ infer ctx ty Infer
---         ty' ← normalize (NormBinds 0 $ fst <$> ctx) ty
---         infer val $ Check ty'
---         pure ty'
---     val' ← normalize (NormBinds valNesting0 $ fst <$> ctx) val
---     let withBs' act = case into of
---           Block{} → act into
---           _ → stackScope "in" $ act into
---     withBs' \bs' →
---       local (|> (Just $ PortableTerm valNesting0 val', PortableTerm tyNesting0 ty))
---         $ infer bs' mode
 --   (Lam arg bod, Infer) →
 --     scoped do
 --       u ← pushExVar $ Just $ PortableTerm tyNesting0 $ Builtin U32
