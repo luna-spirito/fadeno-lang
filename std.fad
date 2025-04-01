@@ -20,7 +20,8 @@
 // in Type+
 // in
 // in \x y z w. {( .x = self x | .y = self y )}
-\x.
-  y = 4
-  z = 5
-  in \never. u = 3 in \w. u + x + (y + z) + w
+// \x.
+//   y = 4
+//   z = 5
+//   in \never. u = 3 in \w. u + x + (y + z) + w
+\x. 4

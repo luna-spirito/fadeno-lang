@@ -4,6 +4,7 @@ import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.State.Church (evalState, get, modify)
 import Control.Effect.Empty qualified as E
 import Data.ByteString.Char8 (pack)
+import Data.Hashable (Hashable (..))
 import Data.RRBVector (Vector, findIndexR, (!?), (|>))
 import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
@@ -152,6 +153,15 @@ data BlockT = BlockLet !Ident !(Maybe TermT) !TermT !(Lambda TermT) | BlockRewri
 newtype Lambda a = Lambda {unLambda ∷ a}
   deriving (Show, Eq, Lift)
 
+newtype ExVarId = ExVarId (Vector Int)
+  deriving (Show, Eq, Ord)
+
+instance Hashable ExVarId where
+  hashWithSalt salt (ExVarId x) = hashWithSalt salt $ toList x
+
+instance Lift ExVarId where
+  liftTyped _ = error "unsupported"
+
 data TermT
   = -- Term-level
 
@@ -171,7 +181,7 @@ data TermT
     Pi !TermT !(Either (Ident, Lambda TermT) TermT)
   | Builtin !BuiltinT
   | BuiltinsVar
-  | ExVar !Ident !Int !(Maybe TermT)
+  | ExVar !Ident !ExVarId !(Maybe TermT)
   | UniVar !Ident !Int !TermT
   deriving (Show, Eq, Lift)
 
@@ -596,7 +606,7 @@ pTerm (oldPrec, vars) =
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
-    ExVar n l t → (6, "(exi@" <> pretty l <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) t') t <> ")")
+    ExVar n l t → (6, "(exi@" <> pretty (show l) <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) t') t <> ")")
     -- case unsafePerformIO (readIORef x) of
     -- Left t → (oldPrec, pTerm (oldPrec, vars) $ unport t $ length vars)
     -- Right (n, l, t) → (6, "(exi@" <> pretty l <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) (unport t' $ length vars)) t <> ")")

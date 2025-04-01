@@ -1,13 +1,10 @@
 module Normalize where
 
-import Control.Algebra
-import Control.Effect.Lift (Lift, sendIO)
-import Data.RRBVector (Vector, drop, replicate, splitAt, viewl, (|>))
+import Data.RRBVector (Vector, drop, viewl, (|>))
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (BlockT (..), BuiltinT (..), Fields (..), Lambda (..), OpT (..), TermT (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
 import RIO hiding (Reader, Vector, ask, drop, link, local, replicate, runReader, to, toList)
-import System.IO.Unsafe (unsafePerformIO)
 
 -- class HasTerm m a where
 --   extractTerm ∷ a → m TermT
@@ -102,13 +99,14 @@ data NormCtx
   | NormRewrite !TermT !TermT -- on normalized
 
 -- Rewrites & simplifies. In that order. Doesn't rewrite the simplified result.
-rewrite ∷ ∀ f via. (Monad f) ⇒ (TermT → via → via) → (via → via) → (TermT → via → Maybe (f TermT)) → via → TermT → f TermT
+rewrite ∷ ∀ f via. (Monad f) ⇒ (TermT → via → via) → (via → via) → (TermT → via → f (Maybe TermT)) → via → TermT → f TermT
 rewrite onLet onNest rewriter = go
  where
   go ∷ via → TermT → f TermT
-  go via term = case rewriter term via of
-    Just act → act
-    Nothing → go' via term
+  go via term =
+    rewriter term via >>= \case
+      Just res → pure res
+      Nothing → go' via term
 
   go' ∷ via → TermT → f TermT
   go' via = \case
@@ -175,8 +173,8 @@ nested =
       (\_ → (+ 1))
       (+ 1)
       ( \term locs → case term of
-          Var i | i >= locs → Just $ pure $ Var $ i + 1
-          _ → Nothing
+          Var i | i >= locs → pure $ Just $ Var $ i + 1
+          _ → pure Nothing
       )
       0
 
@@ -188,15 +186,27 @@ normalize origBinds =
       (\old → (fmap nested <$> old) |> Nothing)
       ( \term binds → case term of
           Var i →
-            Just
-              $ pure
+            pure
+              $ Just
               $ let after = drop (length binds - i - 1) binds
                  in case after of
                       (viewl → Just (Just val, _)) → val
                       _ → Var $ i - foldl' (\acc x → if isJust x then acc + 1 else acc) 0 after
-          _ → Nothing
+          _ → pure Nothing
       )
       origBinds
+
+rewriteTerm ∷ TermT → TermT → TermT → TermT
+rewriteTerm what0 with0 =
+  runIdentity
+    . rewrite
+      (const (bimap nested nested))
+      (bimap nested nested)
+      ( \term (what, with) → pure $ case isEq term what of
+          EqYes → Just with
+          _ → Nothing
+      )
+      (what0, with0)
 
 applyLambda ∷ Lambda TermT → TermT → TermT
 applyLambda bod val = normalize [Just val] $ unLambda bod
