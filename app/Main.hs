@@ -14,13 +14,14 @@ import Control.Effect.Lift (Lift, sendIO)
 import Control.Effect.Reader (Reader, ask, local)
 import Control.Effect.State (State, get, modify, state)
 import Control.Effect.Writer (Writer, censor, listen, tell)
+import Data.ByteString.Char8 (pack)
 import Data.ByteString.Char8 qualified as BS
 import Data.Foldable (foldrM)
 import Data.IntMap qualified as IM
 import Data.List (sort, sortBy)
 import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, splitAt, viewl, viewr, (!?), (|>))
 import GHC.Exts (IsList (..))
-import Normalize (EqRes (..), NormCtx (..), isEq, nested, normalize, normalizeFile, parseBQQ, rewrite)
+import Normalize (EqRes (..), NormCtx (..), isEq, nested, nestedBy, normalize, normalizeFile, parseBQQ, rewrite)
 import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Fields (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf, typOf)
 import Prettyprinter (Doc, annotate, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
@@ -239,7 +240,7 @@ scopedUniVar mapTerm uni1 act = do
   mapTerm ensureNotOcc res
 
 freshIdent ∷ (Has Solve sig m) ⇒ m Ident
-freshIdent = UIdent <$> fresh
+freshIdent = Ident . ("/" <>) . pack . show <$> fresh
 
 scopedExVar ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → Int → m a → m a
 scopedExVar mapTerm ex1 act = do
@@ -301,8 +302,7 @@ scopedExVar mapTerm ex1 act = do
                       $ Quantification Forall n (App (Builtin Type) (Var 0))
                       $ Lambda
                       $ rewriteExVar ex (Var 0)
-                      $ nested
-                      $ nested acc
+                      $ nestedBy 2 acc
                   Just ty → do
                     n ← freshIdent
                     pure $ Quantification Forall n ty $ Lambda $ rewriteExVar ex (Var 0) $ nested acc
@@ -312,11 +312,40 @@ scopedExVar mapTerm ex1 act = do
     )
     res
 
+withMono ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → (Ident → ExVarId → Maybe TermT → m a) → (TermT → m a) → TermT → m a
+withMono mapTerm onMeta onOther = go
+ where
+  go = \case
+    Sorry _ v → go v
+    ExVar n i ty → onMeta n i ty
+    Quantification Forall n xTy x → do
+      exId ← fresh
+      scopedExVar mapTerm exId $ go $ normalize [Just $ ExVar n (ExVarId [exId]) $ Just xTy] $ unLambda x
+    Quantification Exists n xTy x → do
+      uniId ← fresh
+      scopedUniVar mapTerm uniId $ go $ normalize [Just $ UniVar n uniId xTy] $ unLambda x
+    r → onOther r
+
 -- TODO: We could implement "bindings update" as an effect.
 -- Performance improvements over rewriting all the bindings.
 
-solveBinds ∷ HashMap ExVarId TermT → Vector (Maybe TermT, TermT) → Vector (Maybe TermT, TermT)
-solveBinds exs = fmap $ bimap (fmap _) _
+resolve ∷ Resolved → TermT → TermT
+resolve (HM.null → True) = id
+resolve exs =
+  runIdentity
+    . rewrite
+      (const (+ 1))
+      (+ 1)
+      ( \term locs → pure $ case term of
+          ExVar _ ex2 _
+            | Just val ← ex2 `HM.lookup` exs →
+                Just $ nestedBy locs val
+          _ → Nothing
+      )
+      0
+
+resolveBinds ∷ HashMap ExVarId TermT → Vector (Maybe TermT, TermT) → Vector (Maybe TermT, TermT)
+resolveBinds exs = fmap $ bimap (fmap $ resolve exs) $ resolve exs
 
 insertBinds ∷ (Maybe TermT, TermT) → Vector (Maybe TermT, TermT) → Vector (Maybe TermT, TermT)
 insertBinds new old = (bimap (nested <$>) nested <$> old) |> new
@@ -397,7 +426,7 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
     (Op a _op b, Infer) → do
       -- Deadly sin. Should be fixed.
       (exs, ()) ← listen @Resolved $ infer binds a $ Check $ Builtin U32
-      _infer binds b $ Check $ Builtin U32
+      infer (resolveBinds exs binds) b $ Check $ Builtin U32
       pure $ Builtin U32
     --   (Op a _op b, Infer) → do
     --     -- Deadly sin. Should be fixed.
@@ -488,6 +517,28 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
     --       App (Builtin Record) row → body row
     --       _ → stackError "Not a record"
     -- -}
+    (App f a, Infer) → do
+      (exs, fTy) ← listen $ infer binds f Infer
+      let binds' = resolveBinds exs binds
+      withMono
+        id
+        ( \(Ident n) (ExVarId var) t → do
+            let inT = ExVar (Ident $ n <> "/in") (ExVarId $ var <> [0]) Nothing
+            let outT = ExVar (Ident $ n <> "/out") (ExVarId $ var <> [1]) Nothing
+            tell $ HM.singleton (ExVarId var) $ Pi inT $ Right outT
+            stackLog "TODO proper meta instantiation"
+            infer binds' a $ Check inT
+            pure outT
+        )
+        \case
+          Pi inT outTE → do
+            infer binds' a $ Check $ inT
+            pure $ case outTE of
+              Left (_, outT) →
+                normalize [Just a] $ unLambda outT
+              Right outT → outT
+          t → stackError $ "inferApp " <> pTerm' t
+        fTy
     -- (App f a, Infer) → do
     --   fTy ← infer f Infer
     --   withMono
@@ -593,7 +644,9 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
     --         ([], Just row)
     --     (Sorry _ x, Infer) → normalize (HM.mapMaybe fst ctx) x -- TODO: dedup
     -- -}
-    -- (Var x, Infer) → _
+    (Var i, Infer) → case binds !? (length binds - i - 1) of
+      Nothing → stackError $ "Unknown var @" <> pretty i
+      Just (_, ty) → pure ty
     -- (Var x, Infer) → do
     --   ctx ← ask @BindsT
     --   case ctx !? x of
@@ -636,11 +689,11 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
     --       Check ty2 → subtype (unport ty nesting) ty2
     --     Right (_, _, Nothing) → stackError "Cannot infer value of existential metavariable"
     -- -- (UniVar _ _ t, Infer) → pure t
-    -- (k, Infer) → error $ show k
-    -- (term, Check c) → stackScope ("check via infer" <+> pTerm' term <+> ":" <+> pTerm' c) do
-    --   ty ← infer term Infer
-    --   subtype ty c
-    _ → error "..."
+    (k, Infer) → error $ show k
+
+-- (term, Check c) → stackScope ("check via infer" <+> pTerm' term <+> ":" <+> pTerm' c) do
+--   ty ← infer term Infer
+--   subtype ty c
 
 -- type Solve = Reader BindsT :+: State MetaVarsT :+: Fresh :+: Error (Doc AnsiStyle) :+: StackLog :+: Lift IO
 
@@ -842,26 +895,6 @@ instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1
                         instMeta (scope1, t1) origVar1 $ unport val' nesting
                       _ → r
               _ → r
-
-withMono ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → TermT → (ExVar' → (Int, Maybe PortableTermT) → m a) → (TermT → m a) → m a
-withMono tmap = \a onMeta onOther → withMono' onMeta onOther a
- where
-  withMono' onMeta onOther = \wrapped → do
-    nesting ← length <$> ask @BindsT
-    let port = PortableTerm nesting
-    case wrapped of
-      Sorry _ v → withMono' onMeta onOther v
-      ExVar (ExVar' var) →
-        sendIO (readIORef var) >>= \case
-          Left v → withMono' onMeta onOther $ unport v nesting
-          Right (_, scope, t) → onMeta (ExVar' var) (scope, t)
-      Quantification Forall _name kind v → scoped' tmap do
-        ty ← pushExVar $ Just $ PortableTerm nesting kind
-        pure $ withMono' onMeta onOther =<< normalize (nestedNormBinds nesting [Just $ port ty]) v
-      Quantification Exists _name kind v → scoped' tmap do
-        ty ← pushUniVar $ port kind
-        pure $ withMono' onMeta onOther =<< normalize (nestedNormBinds nesting [Just $ port ty]) v
-      r → onOther r
 
 data LookupRes
   = LookupFound !(TermT) !([(TermT, TermT)], Maybe TermT)

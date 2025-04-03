@@ -166,17 +166,20 @@ rewrite onLet onNest rewriter = go
     ExVar n i t → ExVar n i <$> traverse (go via) t
     UniVar n i t → UniVar n i <$> go via t
 
-nested ∷ TermT → TermT
-nested =
+nestedBy ∷ Int → TermT → TermT
+nestedBy by =
   runIdentity
     . rewrite
       (\_ → (+ 1))
       (+ 1)
       ( \term locs → case term of
-          Var i | i >= locs → pure $ Just $ Var $ i + 1
+          Var i | i >= locs → pure $ Just $ Var $ i + by
           _ → pure Nothing
       )
       0
+
+nested ∷ TermT → TermT
+nested = nestedBy 1
 
 normalize ∷ Vector (Maybe TermT) → TermT → TermT
 normalize origBinds =

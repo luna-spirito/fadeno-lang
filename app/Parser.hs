@@ -39,7 +39,7 @@ data OpT
   | Div
   deriving (Show, Eq, Ord, Lift)
 
-data Ident = Ident !ByteString | UIdent !Int
+newtype Ident = Ident ByteString
   deriving (Show, Eq, Ord, Generic, Lift)
 
 instance Hashable Ident
@@ -427,7 +427,6 @@ parseTop =
 pIdent ∷ Ident → Doc AnsiStyle
 pIdent = \case
   Ident x → pretty $ decodeUtf8Lenient x
-  UIdent x → "/" <> pretty x
 
 pOp ∷ OpT → Doc AnsiStyle
 pOp = \case
