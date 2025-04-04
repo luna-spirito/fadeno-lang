@@ -1,4 +1,5 @@
-// Type+ = fadeno.Type+
+Type+ = fadeno.Type+
+in Type+
 // U32 = fadeno.U32
 
 // Kind = Type+ 1
@@ -25,4 +26,3 @@
 //   z = 5
 //   in \never. u = 3 in \w. u + x + (y + z) + w
 // \x. 4
-\f x. f x
