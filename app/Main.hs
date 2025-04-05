@@ -204,40 +204,6 @@ resolve exs =
       )
       0
 
-data InferMode a where
-  Infer ∷ InferMode TermT
-  Check ∷ TermT → InferMode ()
-
-pMode ∷ InferMode a → Doc AnsiStyle
-pMode = \case
-  Infer → "_"
-  Check t → pTerm' t
-
--- insertCtx ∷ (Maybe TermT, TermT) → BindsT → BindsT -- TODO: This is absolutely 100% wrong.
--- insertCtx (xVal, xTy) xs =
---   ( if isJust xVal
---       then xs
---       else (bimap (fmap (nestedVal 1)) (nestedVal 1) <$> xs)
---   )
---     `revSnoc` (xVal, xTy)
-
--- Infer value in nested context.
--- inferNested ∷ ∀ sig m a. (Has Solve sig m) ⇒ BindsT → TermT → InferMode a → m a
--- inferNested ctx val Infer = nested (-1) <$> infer ctx val Infer
--- inferNested ctx val (Check ty) = infer ctx val $ Check $ nested 1 ty
-
--- TODO: beforeEx DOESN'T CONSIDER INTRODUCED VARIABLES, ACTUALLY!
-
-nestMode ∷ InferMode a → InferMode a
-nestMode = \case
-  Infer → Infer
-  Check x → Check $ nested x
-
-mapTermFor ∷ (Applicative f) ⇒ InferMode a → ((TermT → f TermT) → a → f a)
-mapTermFor = \case
-  Infer → id
-  Check _ → const pure
-
 scopedVar ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → m a → m a
 scopedVar mapTerm act = do
   (resolved, res) ← intercept @Resolved act
@@ -355,6 +321,87 @@ withMono mapTerm onMeta onOther = go
       scopedUniVar mapTerm uniId $ go $ normalize [Just $ UniVar n uniId xTy] $ unLambda x
     r → onOther r
 
+data LookupRes
+  = LookupFound !TermT !([(TermT, TermT)], Maybe TermT)
+  | LookupMissing
+  | LookupUnknown
+  deriving (Show)
+
+tmapLookupRes ∷ (TermT → TermT) → LookupRes → LookupRes
+tmapLookupRes f = \case
+  LookupFound a b → LookupFound (f a) b
+  x → x
+
+-- Lookups in FRow. **FRow**.
+-- The type is too restrictive about requiring a continuation.
+withLookupField ∷ (Has Solve sig m) ⇒ (LookupRes → m a) → ((TermT → m TermT) → a → m a) → Bool → TermT → ([(TermT, TermT)], Maybe TermT) → m a
+withLookupField cont f refine needle = rec []
+ where
+  notARow x = stackError $ "Not a row:" <+> pTerm' x
+  rec prev = \case
+    ([], Nothing) → cont LookupMissing
+    ([], Just next) →
+      withMono
+        f
+        ( \(Ident n) (ExVarId var) →
+            if refine
+              then \case
+                (Just (App (Builtin Row) mT)) → do
+                  let val' = ExVar (Ident $ n <> "/head") (ExVarId $ var <> [0]) $ Just mT
+                  let rest' = ExVar (Ident $ n <> "/tail") (ExVarId $ var <> [1]) $ Just $ rowOf mT
+                  writeMeta (Ident n) (ExVarId var) (Just $ rowOf mT) $ FieldsLit $ Left $ Lambda $ Fields [(needle, val')] $ Just rest'
+                  cont $ LookupFound val' (toList prev, Just rest')
+                t → notARow $ ExVar (Ident n) (ExVarId var) t
+              else const $ cont LookupMissing
+        )
+        ( \case
+            FieldsLit (Left r) → rec prev (vals, rest)
+            x → stackError $ "lookupField todo" <+> pTerm' x
+        )
+        next
+    -- \case
+    --   FieldsLit FRow vals rest → rec prev (vals, rest)
+    --   x → stackError $ "lookupField todo " <> pTerm' x
+    ((name, val) : xs, rest) →
+      isEq needle name >>= \case
+        EqYes → cont $ LookupFound val (toList prev <> xs, rest)
+        EqUnknown → cont LookupUnknown
+        EqNot → rec (prev |> (name, val)) (xs, rest)
+
+data InferMode a where
+  Infer ∷ InferMode TermT
+  Check ∷ TermT → InferMode ()
+
+pMode ∷ InferMode a → Doc AnsiStyle
+pMode = \case
+  Infer → "_"
+  Check t → pTerm' t
+
+-- insertCtx ∷ (Maybe TermT, TermT) → BindsT → BindsT -- TODO: This is absolutely 100% wrong.
+-- insertCtx (xVal, xTy) xs =
+--   ( if isJust xVal
+--       then xs
+--       else (bimap (fmap (nestedVal 1)) (nestedVal 1) <$> xs)
+--   )
+--     `revSnoc` (xVal, xTy)
+
+-- Infer value in nested context.
+-- inferNested ∷ ∀ sig m a. (Has Solve sig m) ⇒ BindsT → TermT → InferMode a → m a
+-- inferNested ctx val Infer = nested (-1) <$> infer ctx val Infer
+-- inferNested ctx val (Check ty) = infer ctx val $ Check $ nested 1 ty
+
+-- TODO: beforeEx DOESN'T CONSIDER INTRODUCED VARIABLES, ACTUALLY!
+
+nestMode ∷ InferMode a → InferMode a
+nestMode = \case
+  Infer → Infer
+  Check x → Check $ nested x
+
+mapTermFor ∷ (Applicative f) ⇒ InferMode a → ((TermT → f TermT) → a → f a)
+mapTermFor = \case
+  Infer → id
+  Check _ → const pure
+
 -- TODO: We could implement "bindings update" as an effect.
 -- Performance improvements over rewriting all the bindings.
 
@@ -429,7 +476,7 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
         outT ← withResolved \_ →
           scopedVar id
             $ infer (insertBinds (Nothing, inT') binds) (unLambda bod) Infer
-        withResolved \exs → pure $ resolve exs $ Pi inT' $ Right outT
+        withResolved \exs → pure $ Pi (resolve exs inT') $ Right outT
     (Op a _op b, Infer) → runSeqResolve do
       -- Deadly sin. Should be fixed.
       withResolved \_ → infer binds a $ Check $ Builtin U32
@@ -437,14 +484,14 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
       pure $ Builtin U32
     (Lam _ bod, Check (Pi inT outT)) → do
       case outT of
-        Right outT' → scopedVar (const pure) $ infer (binds |> (Nothing, inT)) (unLambda bod) $ Check outT'
+        Right outT' → scopedVar (const pure) $ infer (inserBinds (Nothing, inT) binds) (unLambda bod) $ Check outT'
         Left (_, outT') → do
           n ← freshIdent
           u ← fresh
           let var = UniVar n u inT
           scopedVar (const pure)
             $ scopedUniVar (const pure) u
-            $ infer (binds |> (Just var, inT)) (unLambda bod)
+            $ infer (insertBinds (Just var, inT) binds) (unLambda bod)
             $ Check
             $ normalize [Just var]
             $ unLambda outT'
@@ -459,45 +506,45 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
     --       inferBod (Just arg') outT'
     --   -- Override for second-class RecordGet
     --   -- TODO: Create a speci type for RecordGet
-    --   (App (App (Builtin RecordGet) tag) record, Infer) → do
-    --     recordTy ← infer record Infer
-    --     let body row = do
-    --           traceShowM $ pTerm' row
-    --           withLookupField
-    --             ( \case
-    --                 LookupFound x _ → do
-    --                   ctx ← ask @BindsT
-    --                   valNesting ← currValNesting -- = valNesting0?
-    --                   self ← normalize (NormBinds valNesting $ fst <$> ctx) record
-    --                   -- TODO: This replaces `self` with the entire record.
-    --                   -- It doesn't filter out only the accessible fields.
-    --                   -- It's quite easy to filter by updating the lookupField, but do we need it really?
-    --                   -- As I understand it, the inference should fail first.
-    --                   traceShowM x
-    --                   tyNesting ← currTyNesting
-    --                   x' ← normalize (nestedNormBinds tyNesting [Just $ PortableTerm tyNesting self]) x
-    --                   traceShowM x'
-    --                   pure x'
-    --                 _ → stackError "Field not found"
-    --             )
-    --             id
-    --             True
-    --             tag
-    --             ([], Just row)
-    --     withMono
-    --       id
-    --       recordTy
-    --       ( \var (mScope, mT) → beforeEx mScope var do
-    --           tyNesting ← currTyNesting
-    --           u ← pushExVar $ Just $ PortableTerm tyNesting $ Builtin U32
-    --           row ← pushExVar $ Just $ PortableTerm tyNesting $ rowOf $ typOf u
-    --           pure do
-    --             writeMeta (mScope, mT) var $ recordOf row
-    --             body row
-    --       )
-    --       \case
-    --         App (Builtin Record) row → body row
-    --         _ → stackError "Not a record"
+    -- (App (App (Builtin RecordGet) tag) record, Infer) → do
+    --   (exs, recordTy) ← listen @Resolved $ infer record Infer
+    --   let body row = do
+    --         traceShowM $ pTerm' row
+    --         withLookupField
+    --           ( \case
+    --               LookupFound x _ → do
+    --                 ctx ← ask @BindsT
+    --                 valNesting ← currValNesting -- = valNesting0?
+    --                 self ← normalize (NormBinds valNesting $ fst <$> ctx) record
+    --                 -- TODO: This replaces `self` with the entire record.
+    --                 -- It doesn't filter out only the accessible fields.
+    --                 -- It's quite easy to filter by updating the lookupField, but do we need it really?
+    --                 -- As I understand it, the inference should fail first.
+    --                 traceShowM x
+    --                 tyNesting ← currTyNesting
+    --                 x' ← normalize (nestedNormBinds tyNesting [Just $ PortableTerm tyNesting self]) x
+    --                 traceShowM x'
+    --                 pure x'
+    --               _ → stackError "Field not found"
+    --           )
+    --           id
+    --           True
+    --           tag
+    --           ([], Just row)
+    --   withMono
+    --     id
+    --     ( \var (mScope, mT) → beforeEx mScope var do
+    --         tyNesting ← currTyNesting
+    --         u ← pushExVar $ Just $ PortableTerm tyNesting $ Builtin U32
+    --         row ← pushExVar $ Just $ PortableTerm tyNesting $ rowOf $ typOf u
+    --         pure do
+    --           writeMeta (mScope, mT) var $ recordOf row
+    --           body row
+    --     )
+    --     \case
+    --       App (Builtin Record) row → body row
+    --       _ → stackError "Not a record"
+    --     recordTy
     -- {-
     --   recordTy ← infer ctx record Infer
     --   let body row =
@@ -911,49 +958,6 @@ instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1
 -}
 
 {-
-
-data LookupRes
-  = LookupFound !(TermT) !([(TermT, TermT)], Maybe TermT)
-  | LookupMissing
-  | LookupUnknown
-  deriving (Show)
-
-tmapLookupRes ∷ (TermT → TermT) → LookupRes → LookupRes
-tmapLookupRes f = \case
-  LookupFound a b → LookupFound (f a) b
-  x → x
-
--- Lookups in FRow. **FRow**.
--- The type is too restrictive about requiring a continuation.
-withLookupField ∷ (Has Solve sig m) ⇒ (LookupRes → m a) → ((TermT → m TermT) → a → m a) → Bool → TermT → ([(TermT, TermT)], Maybe TermT) → m a
-withLookupField cont f refine needle = rec []
- where
-  notARow x = stackError $ "Not a row:" <+> pTerm' x
-  rec prev = \case
-    ([], Nothing) → cont LookupMissing
-    ([], Just next) → withMono
-      f
-      next
-      ( \var →
-          if refine
-            then \case
-              (mScope, Just (PortableTerm origin (App (Builtin Row) mT))) →
-                beforeEx mScope var do
-                  rest' ← pushExVar (Just $ PortableTerm origin $ rowOf mT)
-                  val' ← pushExVar (Just $ PortableTerm origin mT)
-                  writeMeta (mScope, Just $ PortableTerm origin $ rowOf mT) var $ FieldsLit FRow [(needle, val')] $ Just rest'
-                  pure $ cont $ LookupFound val' (toList prev, Just rest')
-              _ → notARow $ ExVar var
-            else const $ cont LookupMissing
-      )
-      \case
-        FieldsLit FRow vals rest → rec prev (vals, rest)
-        x → stackError $ "lookupField todo " <> pTerm' x
-    ((name, val) : xs, rest) →
-      isEq needle name >>= \case
-        EqYes → cont $ LookupFound val (toList prev <> xs, rest)
-        EqUnknown → cont LookupUnknown
-        EqNot → rec (prev |> (name, val)) (xs, rest)
 
 typOfBuiltin ∷ BuiltinT → PortableTermT
 typOfBuiltin =

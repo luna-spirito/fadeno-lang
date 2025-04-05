@@ -1,0 +1,24 @@
+// unpack dstd. Record Union Text Gear GearTemplate EventId _-Map>_
+
+// Event = Union
+//   { .import = ({ .from : IPFS }) }
+
+// cfg = { .core = {( .events = Gear (EventId -Map> Event) )} }
+
+// /: GearTemplate cfg.core (Text -Map> Record {( .name = Text | .revisions = List Text )})
+// unwrapImports = 
+
+// Bad!
+// fadeno.Serialized : forall (u : U32). Type+ u -> Type+ u
+// fadeno.ser : forall (u : U32) (a : Type+ u). a -> Serialized a
+// fadeno.deser : forall (u : U32) (a : Type+ u). Serialized a -> a
+
+Serializer = \a. Record
+  {(.ser = a -> Binary
+  | .deser = Binary -> Union { .ok = {( .val = a )} | .fail = {()} }
+  | .restore = w : a -> self.deser (self.ser w) = { .tag = .ok | .val = w }
+  )}
+
+// fadeno.uni : forall (u : U32). a : Type+ u -> Serializer a
+
+
