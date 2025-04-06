@@ -22,7 +22,7 @@ import Data.List (sort, sortBy)
 import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, splitAt, viewl, viewr, (!?), (|>))
 import GHC.Exts (IsList (..))
 import Normalize (EqRes (..), NormCtx (..), isEq, nested, nestedBy, normalize, normalizeFile, parseBQQ, rewrite)
-import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Fields (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf, typOf)
+import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf, typOf)
 import Prettyprinter (Doc, annotate, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, filter, link, local, runReader, toList)
@@ -321,16 +321,56 @@ withMono mapTerm onMeta onOther = go
       scopedUniVar mapTerm uniId $ go $ normalize [Just $ UniVar n uniId xTy] $ unLambda x
     r → onOther r
 
--- data LookupRes
---   = LookupFound !TermT
---   | LookupMissing
---   | LookupUnknown
---   deriving (Show)
+data LookupRes a
+  = LookupFound !a
+  | LookupMissing !(Vector TermT)
+  | LookupUnknown
+  deriving (Show)
 
 -- tmapLookupRes ∷ Applicative m ⇒ (TermT → m TermT) → LookupRes → m LookupRes
 -- tmapLookupRes f = \case
 --   LookupFound a → LookupFound <$> (f a)
 --   x → pure x
+
+{- | Accepts `tag`, `row` and `record`. Provides access to the field `tag` in `row`,
+performs refines if necessary.
+-}
+rowGet ∷ ∀ sig m a. (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → TermT → (TermT → m a) → TermT → TermT → m (LookupRes a)
+rowGet mapTerm tag cont = go
+ where
+  notARow x = stackError $ "Not a row:" <+> pTerm' x
+  go ∷ TermT → TermT → m (LookupRes a)
+  go row record =
+    withMono
+      ( \f → \case
+          LookupFound a → LookupFound <$> mapTerm f a
+          LookupMissing keys → LookupMissing <$> traverse f keys
+          LookupUnknown → pure LookupUnknown
+      )
+      ( \(Ident n) (ExVarId var) → \case
+          Just (App (Builtin Row) mT) → do
+            let val' = ExVar (Ident $ n <> "/head") (ExVarId $ var <> [0]) $ Just mT
+            let rest' = ExVar (Ident $ n <> "/tail") (ExVarId $ var <> [1]) $ Just $ rowOf mT
+            writeMeta (Ident n) (ExVarId var) (Just $ rowOf mT) $ Union (Field tag val') $ Right rest'
+            LookupFound <$> cont val'
+          t → notARow $ ExVar (Ident n) (ExVarId var) t
+      )
+      \case
+        Unit → pure $ LookupMissing []
+        Union a bE → runSeqResolve do
+          a' ← withResolved \_ → go a record
+          case a' of
+            LookupFound res → pure $ LookupFound res
+            LookupMissing coll1 → do
+              b' ← withResolved \exs → case bE of
+                Right b → go (resolve exs b) $ _ record
+              case b' of
+                LookupFound res → pure $ LookupFound res
+                LookupMissing coll2 → pure $ LookupMissing $ coll1 <> coll2
+                LookupUnknown → pure LookupUnknown
+            LookupUnknown → pure LookupUnknown
+        _ → _
+      row
 
 -- Lookups in FRow. **FRow**.
 -- The type is too restrictive about requiring a continuation.
@@ -339,54 +379,54 @@ withMono mapTerm onMeta onOther = go
 -- I. e. implicit pattern matching?
 -- {( .a = U32 | .b = Text )} </: forall x. {( .a = x | .b = x )}
 -- exists x. {( .a = x | .b = x )} </: {( .a = U32 | .b = Text )}
-underField ∷ (Has Solve sig m) ⇒ Bool → TermT → (TermT → m ()) → ([(TermT, TermT)], Maybe TermT) → m (Maybe ([(TermT, TermT)], Maybe TermT))
-underField refine needle cont = rec
- where
-  notARow x = stackError $ "Not a row:" <+> pTerm' x
-  rec = \case
-    ([], Nothing) → pure Nothing
-    ([], Just next) →
-      withMono
-        (\f → traverse (bitraverse (traverse (bitraverse f f)) (traverse f)))
-        ( \(Ident n) (ExVarId var) →
-            if refine
-              then \case
-                (Just (App (Builtin Row) mT)) → do
-                  let val' = ExVar (Ident $ n <> "/head") (ExVarId $ var <> [0]) $ Just mT
-                  let rest' = ExVar (Ident $ n <> "/tail") (ExVarId $ var <> [1]) $ Just $ rowOf mT
-                  writeMeta (Ident n) (ExVarId var) (Just $ rowOf mT) $ FieldsLit $ Left $ Lambda $ Fields [(needle, val')] $ Just rest'
-                  cont val'
-                  pure $ Just ([], Just rest')
-                t → notARow $ ExVar (Ident n) (ExVarId var) t
-              else const $ pure Nothing
-        )
-        ( \case
-            FieldsLit (Left fi) → do
-              _
-            -- n ← freshIdent
-            -- u ← fresh
-            -- let var = UniVar n u $ recordOf $ FieldsLit (Left fi) -- TODO: probably wrong kind?
-            -- let norm = normalize [Just var]
-            -- let (Fields known rest) = unLambda fi
-            -- res ← rec (bimap norm norm <$> known, norm <$> rest)
-            -- pure $ (\(a, b) → ([], Just $ FieldsLit $ Left $ Lambda $ Fields a b)) <$> res
-            x → stackError $ "lookupField todo" <+> pTerm' x
-        )
-        next
-    -- \case
-    --   FieldsLit FRow vals rest → rec prev (vals, rest)
-    --   x → stackError $ "lookupField todo " <> pTerm' x
-    ((name, val) : xs, rest) →
-      case isEq needle name of
-        EqYes → runSeqResolve do
-          withResolved \_ → cont val
-          withResolved \exs → pure $ Just (bimap (resolve exs) (resolve exs) <$> xs, resolve exs <$> rest)
-        EqUnknown → pure Nothing
-        EqNot → runSeqResolve do
-          resM ← withResolved \_ → rec (xs, rest)
-          case resM of
-            Nothing → pure Nothing
-            Just (xs', rest') → withResolved \exs → pure $ Just ((resolve exs name, resolve exs val) : xs', rest')
+-- underField ∷ (Has Solve sig m) ⇒ Bool → TermT → (TermT → m ()) → ([(TermT, TermT)], Maybe TermT) → m (Maybe ([(TermT, TermT)], Maybe TermT))
+-- underField refine needle cont = rec
+--  where
+--   notARow x = stackError $ "Not a row:" <+> pTerm' x
+--   rec = \case
+--     ([], Nothing) → pure Nothing
+--     ([], Just next) →
+--       withMono
+--         (\f → traverse (bitraverse (traverse (bitraverse f f)) (traverse f)))
+--         ( \(Ident n) (ExVarId var) →
+--             if refine
+--               then \case
+--                 (Just (App (Builtin Row) mT)) → do
+--                   let val' = ExVar (Ident $ n <> "/head") (ExVarId $ var <> [0]) $ Just mT
+--                   let rest' = ExVar (Ident $ n <> "/tail") (ExVarId $ var <> [1]) $ Just $ rowOf mT
+--                   writeMeta (Ident n) (ExVarId var) (Just $ rowOf mT) $ FieldsLit $ Left $ Lambda $ Fields [(needle, val')] $ Just rest'
+--                   cont val'
+--                   pure $ Just ([], Just rest')
+--                 t → notARow $ ExVar (Ident n) (ExVarId var) t
+--               else const $ pure Nothing
+--         )
+--         ( \case
+--             FieldsLit (Left fi) → do
+--               _
+--             -- n ← freshIdent
+--             -- u ← fresh
+--             -- let var = UniVar n u $ recordOf $ FieldsLit (Left fi) -- TODO: probably wrong kind?
+--             -- let norm = normalize [Just var]
+--             -- let (Fields known rest) = unLambda fi
+--             -- res ← rec (bimap norm norm <$> known, norm <$> rest)
+--             -- pure $ (\(a, b) → ([], Just $ FieldsLit $ Left $ Lambda $ Fields a b)) <$> res
+--             x → stackError $ "lookupField todo" <+> pTerm' x
+--         )
+--         next
+--     -- \case
+--     --   FieldsLit FRow vals rest → rec prev (vals, rest)
+--     --   x → stackError $ "lookupField todo " <> pTerm' x
+--     ((name, val) : xs, rest) →
+--       case isEq needle name of
+--         EqYes → runSeqResolve do
+--           withResolved \_ → cont val
+--           withResolved \exs → pure $ Just (bimap (resolve exs) (resolve exs) <$> xs, resolve exs <$> rest)
+--         EqUnknown → pure Nothing
+--         EqNot → runSeqResolve do
+--           resM ← withResolved \_ → rec (xs, rest)
+--           case resM of
+--             Nothing → pure Nothing
+--             Just (xs', rest') → withResolved \exs → pure $ Just ((resolve exs name, resolve exs val) : xs', rest')
 
 -- lookupField ∷ (Has Solve sig m) ⇒ Bool → TermT → ([(TermT, TermT)], Maybe TermT) → m LookupRes
 -- lookupField refine needle = rec
@@ -461,6 +501,7 @@ mapTermFor = \case
 -- Performance improvements over rewriting all the bindings.
 
 resolveBinds ∷ HashMap ExVarId TermT → Vector (Maybe TermT, TermT) → Vector (Maybe TermT, TermT)
+resolveBinds (HM.null → True) = id
 resolveBinds exs = fmap $ bimap (fmap $ resolve exs) $ resolve exs
 
 insertBinds ∷ (Maybe TermT, TermT) → Vector (Maybe TermT, TermT) → Vector (Maybe TermT, TermT)
@@ -1052,21 +1093,18 @@ instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1)
           f' ← withResolved \_ → instMeta' f
           a' ← withResolved \exs → instMeta' $ resolve exs a
           pure $ App f' a'
-        FieldsLit fields →
-          runSeqResolve
-            let
-              body (Fields known rest) =
-                Fields
-                  <$> for
-                    known
-                    ( \(name, val) → do
-                        name' ← withResolved \exs → instMeta' $ resolve exs name
-                        val' ← withResolved \exs → instMeta' $ resolve exs val
-                        pure (name', val')
-                    )
-                  <*> for rest (\r → withResolved \exs → instMeta' $ resolve exs r)
-             in
-              FieldsLit <$> either (fmap (Left . Lambda) . body . unLambda) (fmap Right . body) fields
+        Field a b → runSeqResolve do
+          a' ← withResolved \_ → instMeta' a
+          b' ← withResolved \exs → instMeta' $ resolve exs b
+          pure $ Field a' b'
+        Union a b → runSeqResolve do
+          a' ← withResolved \_ → instMeta' a
+          b' ← withResolved \exs →
+            either
+              (\(n, b'') → fmap (Left . (n,) . Lambda) $ scopedVar id $ instMeta' $ resolve exs $ unLambda b'')
+              (fmap Right . instMeta' . resolve exs)
+              b
+          pure $ Union a' b'
         Var x → pure $ Var x -- TODO: I hope this is correct, but needs to be rechecked.
         Builtin x → pure $ Builtin x
         NatLit x → pure $ NatLit x
