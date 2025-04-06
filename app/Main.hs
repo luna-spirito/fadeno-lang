@@ -321,28 +321,33 @@ withMono mapTerm onMeta onOther = go
       scopedUniVar mapTerm uniId $ go $ normalize [Just $ UniVar n uniId xTy] $ unLambda x
     r → onOther r
 
-data LookupRes
-  = LookupFound !TermT !([(TermT, TermT)], Maybe TermT)
-  | LookupMissing
-  | LookupUnknown
-  deriving (Show)
+-- data LookupRes
+--   = LookupFound !TermT
+--   | LookupMissing
+--   | LookupUnknown
+--   deriving (Show)
 
-tmapLookupRes ∷ (TermT → TermT) → LookupRes → LookupRes
-tmapLookupRes f = \case
-  LookupFound a b → LookupFound (f a) b
-  x → x
+-- tmapLookupRes ∷ Applicative m ⇒ (TermT → m TermT) → LookupRes → m LookupRes
+-- tmapLookupRes f = \case
+--   LookupFound a → LookupFound <$> (f a)
+--   x → pure x
 
 -- Lookups in FRow. **FRow**.
 -- The type is too restrictive about requiring a continuation.
-withLookupField ∷ (Has Solve sig m) ⇒ (LookupRes → m a) → ((TermT → m TermT) → a → m a) → Bool → TermT → ([(TermT, TermT)], Maybe TermT) → m a
-withLookupField cont f refine needle = rec []
+-- TODO: This approach is really problematic. A much better one to consider
+-- is to "unpack" the record once and then just let the application access its fields.
+-- I. e. implicit pattern matching?
+-- {( .a = U32 | .b = Text )} </: forall x. {( .a = x | .b = x )}
+-- exists x. {( .a = x | .b = x )} </: {( .a = U32 | .b = Text )}
+underField ∷ (Has Solve sig m) ⇒ Bool → TermT → (TermT → m ()) → ([(TermT, TermT)], Maybe TermT) → m (Maybe ([(TermT, TermT)], Maybe TermT))
+underField refine needle cont = rec
  where
   notARow x = stackError $ "Not a row:" <+> pTerm' x
-  rec prev = \case
-    ([], Nothing) → cont LookupMissing
+  rec = \case
+    ([], Nothing) → pure Nothing
     ([], Just next) →
       withMono
-        f
+        (\f → traverse (bitraverse (traverse (bitraverse f f)) (traverse f)))
         ( \(Ident n) (ExVarId var) →
             if refine
               then \case
@@ -350,12 +355,21 @@ withLookupField cont f refine needle = rec []
                   let val' = ExVar (Ident $ n <> "/head") (ExVarId $ var <> [0]) $ Just mT
                   let rest' = ExVar (Ident $ n <> "/tail") (ExVarId $ var <> [1]) $ Just $ rowOf mT
                   writeMeta (Ident n) (ExVarId var) (Just $ rowOf mT) $ FieldsLit $ Left $ Lambda $ Fields [(needle, val')] $ Just rest'
-                  cont $ LookupFound val' (toList prev, Just rest')
+                  cont val'
+                  pure $ Just ([], Just rest')
                 t → notARow $ ExVar (Ident n) (ExVarId var) t
-              else const $ cont LookupMissing
+              else const $ pure Nothing
         )
         ( \case
-            FieldsLit (Left r) → rec prev (vals, rest)
+            FieldsLit (Left fi) → do
+              _
+            -- n ← freshIdent
+            -- u ← fresh
+            -- let var = UniVar n u $ recordOf $ FieldsLit (Left fi) -- TODO: probably wrong kind?
+            -- let norm = normalize [Just var]
+            -- let (Fields known rest) = unLambda fi
+            -- res ← rec (bimap norm norm <$> known, norm <$> rest)
+            -- pure $ (\(a, b) → ([], Just $ FieldsLit $ Left $ Lambda $ Fields a b)) <$> res
             x → stackError $ "lookupField todo" <+> pTerm' x
         )
         next
@@ -363,10 +377,51 @@ withLookupField cont f refine needle = rec []
     --   FieldsLit FRow vals rest → rec prev (vals, rest)
     --   x → stackError $ "lookupField todo " <> pTerm' x
     ((name, val) : xs, rest) →
-      isEq needle name >>= \case
-        EqYes → cont $ LookupFound val (toList prev <> xs, rest)
-        EqUnknown → cont LookupUnknown
-        EqNot → rec (prev |> (name, val)) (xs, rest)
+      case isEq needle name of
+        EqYes → runSeqResolve do
+          withResolved \_ → cont val
+          withResolved \exs → pure $ Just (bimap (resolve exs) (resolve exs) <$> xs, resolve exs <$> rest)
+        EqUnknown → pure Nothing
+        EqNot → runSeqResolve do
+          resM ← withResolved \_ → rec (xs, rest)
+          case resM of
+            Nothing → pure Nothing
+            Just (xs', rest') → withResolved \exs → pure $ Just ((resolve exs name, resolve exs val) : xs', rest')
+
+-- lookupField ∷ (Has Solve sig m) ⇒ Bool → TermT → ([(TermT, TermT)], Maybe TermT) → m LookupRes
+-- lookupField refine needle = rec
+--  where
+--   notARow x = stackError $ "Not a row:" <+> pTerm' x
+--   rec = \case
+--     ([], Nothing) → pure LookupMissing
+--     ([], Just next) →
+--       withMono
+--         tmapLookupRes
+--         ( \(Ident n) (ExVarId var) →
+--             if refine
+--               then \case
+--                 (Just (App (Builtin Row) mT)) → do
+--                   let val' = ExVar (Ident $ n <> "/head") (ExVarId $ var <> [0]) $ Just mT
+--                   let rest' = ExVar (Ident $ n <> "/tail") (ExVarId $ var <> [1]) $ Just $ rowOf mT
+--                   writeMeta (Ident n) (ExVarId var) (Just $ rowOf mT) $ FieldsLit $ Left $ Lambda $ Fields [(needle, val')] $ Just rest'
+--                   pure $ LookupFound val'
+--                 t → notARow $ ExVar (Ident n) (ExVarId var) t
+--               else const $ pure LookupMissing
+--         )
+--         ( \case
+--             FieldsLit (Left r) → scopedVar tmapLookupRes do
+--               rec (vals, rest)
+--             x → stackError $ "lookupField todo" <+> pTerm' x
+--         )
+--         next
+-- \case
+--   FieldsLit FRow vals rest → rec prev (vals, rest)
+--   x → stackError $ "lookupField todo " <> pTerm' x
+-- ((name, val) : xs, rest) →
+--   isEq needle name >>= \case
+--     EqYes → cont $ LookupFound val (toList prev <> xs, rest)
+--     EqUnknown → cont LookupUnknown
+--     EqNot → rec (xs, rest)
 
 data InferMode a where
   Infer ∷ InferMode TermT
@@ -484,7 +539,7 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
       pure $ Builtin U32
     (Lam _ bod, Check (Pi inT outT)) → do
       case outT of
-        Right outT' → scopedVar (const pure) $ infer (inserBinds (Nothing, inT) binds) (unLambda bod) $ Check outT'
+        Right outT' → scopedVar (const pure) $ infer (insertBinds (Nothing, inT) binds) (unLambda bod) $ Check outT'
         Left (_, outT') → do
           n ← freshIdent
           u ← fresh
