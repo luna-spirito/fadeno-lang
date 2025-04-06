@@ -4,6 +4,7 @@ import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.State.Church (evalState, get, modify)
 import Control.Effect.Empty qualified as E
 import Data.ByteString.Char8 (pack)
+import Data.Foldable1 (foldl1')
 import Data.Hashable (Hashable (..))
 import Data.RRBVector (Vector, findIndexR, (!?), (|>))
 import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string)
@@ -95,7 +96,7 @@ ident' = byteStringOf (skipSome identSym)
 ident ∷ Parser' Ident
 ident = token do
   result ← ident'
-  guard $ not $ result `elem` (["in", "+", "-", "/", "*", "->", "forall", "unpack", "fadeno"] ∷ [ByteString])
+  guard $ not $ result `elem` (["in", "+", "-", "/", "*", "->", "/\\", "forall", "unpack", "fadeno"] ∷ [ByteString])
   pure $ Ident result
 
 {-
@@ -134,8 +135,6 @@ builtinsList = [U32, Tag, Row, Record, Type, RecordGet]
 
 data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
 
-data Fields = Fields ![(TermT, TermT)] !(Maybe TermT) deriving (Show, Eq, Lift)
-
 data BlockT = BlockLet !Ident !(Maybe TermT) !TermT !(Lambda TermT) | BlockRewrite !TermT !TermT
   deriving (Show, Eq, Lift)
 
@@ -172,13 +171,15 @@ data TermT
   | App !TermT !TermT
   | NatLit !Word32
   | TagLit !Ident
-  | FieldsLit !(Either (Lambda Fields) Fields) -- record
+  | Field !TermT !TermT
+  | Unit
   | Sorry !Ident !TermT
   | Var !Int
   | -- Type-level
     Quantification !Quantifier !Ident !TermT !(Lambda TermT)
   | -- | Cedille: Π x : T | T’ / Fadeno: x : T -> T'
     Pi !TermT !(Either (Ident, Lambda TermT) TermT)
+  | Union !TermT !(Either (Ident, Lambda TermT) TermT)
   | Builtin !BuiltinT
   | BuiltinsVar
   | ExVar !Ident !ExVarId !(Maybe TermT)
@@ -246,28 +247,19 @@ parsePrim = token do
       <|> (TagLit <$> ($(char '.') *> (Ident <$> ident')))
       <|> ( do
               token $(char '{')
-              row ← (($(char '(') $> True) <|> pure False)
-              let maybeInsertSelf act =
-                    if row
-                      then Left . Lambda <$> local (|> Ident "self") act
-                      else Right <$> act
-              FieldsLit <$> maybeInsertSelf do
-                let parseField = do
-                      n ← parsePrim
-                      token $(char '=')
-                      v ← parseTop
-                      pure (n, v)
-                knownFields ← sepBy (token $(char '|')) parseField
-                rest ← optional do
-                  token $ $(string "||")
-                  parseMath0
-                token do
-                  when row $ $(char ')')
-                  $(char '}')
-                pure $ Fields knownFields rest
+              let parseField = do
+                    n ← parsePrim
+                    token $(char '=')
+                    v ← parseTop
+                    pure (n, v)
+              knownFields ← sepBy (token $(char '|')) parseField
+              token $(char '}')
+              case knownFields of
+                x : xs → pure $ foldl1' (\a → Union a . Right) $ fmap (uncurry Field) (x :| xs)
+                [] → pure Unit
           )
       <|> (BuiltinsVar <$ (notFollowedBy $(string "fadeno") identSym))
-      <|> ( Var
+      <|> ( Var -- TODO: { x = 4 }
               <$> do
                 i ← notFollowedBy ident $ token $(char '=')
                 vars ← ask
@@ -320,7 +312,7 @@ parseTy =
             pure $ Sorry n ty
         )
     <|> do
-      -- Fused: parseApp <|> (->)
+      -- Fused: parseApp <|> (->) <|> (/\)
       inNameM ← optional $ (ident <* $(char ':'))
       inTy ← parseApp
       ( ( do
@@ -328,6 +320,11 @@ parseTy =
             outTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local (|> name)) inNameM parseTy
             pure $ Pi inTy outTy
         )
+          <|> ( do
+                  token $ $(string "/\\")
+                  rightTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local (|> name)) inNameM parseTy
+                  pure $ Union inTy rightTy
+              )
           <|> ( do
                   guard $ isNothing inNameM
                   pure inTy
@@ -466,12 +463,13 @@ isSimple =
         App f a → complexity f *> complexity a
         NatLit _ → ping
         TagLit _ → ping
-        FieldsLit (either unLambda id → Fields x y) →
-          for_ x (\(a, b) → complexity a *> complexity b) *> for_ y complexity
+        Unit → pure ()
+        Field a b → complexity a *> complexity b
         Sorry _ _ → ping
         Var _ → ping
         Quantification _ _ b (Lambda c) → ping *> complexity b *> complexity c
         Pi b c → ping *> complexity b *> either (complexity . unLambda . snd) complexity c
+        Union a b → complexity a *> either (complexity . unLambda . snd) complexity b
         Builtin _ → ping
         BuiltinsVar → ping
         ExVar{} → ping
@@ -573,6 +571,12 @@ pTerm (oldPrec, vars) =
             Left (name, outTy') → pTerm (4, vars |> name) $ unLambda outTy'
             Right outTy' → pTerm (4, vars) outTy'
       )
+    Union a b →
+      ( 4
+      , case b of
+          Left (n, b') → pIdent n <+> ":" <+> pTerm (5, vars) a <+> "/\\" <+> pTerm (6, vars) (unLambda b')
+          Right b' → pTerm (5, vars) a <+> "/\\" <+> pTerm (6, vars) b'
+      )
     App (App (Builtin RecordGet) (TagLit tag)) rec →
       (6, pTerm (6, vars) rec <> "." <> pIdent tag)
     App lam arg → (5, pTerm (5, vars) lam <+> pTerm (6, vars) arg)
@@ -580,27 +584,29 @@ pTerm (oldPrec, vars) =
     BuiltinsVar → (6, "fadeno")
     NatLit x → (6, pretty x)
     TagLit x → (6, "." <> pIdent x)
-    FieldsLit fields →
-      ( 6
-      , let
-          (vars', Fields knownFields rest) = case fields of
-            Left (Lambda a) → (vars |> Ident "self", a)
-            Right a → (vars, a)
-          field (n, v) = pTerm (6, vars') n <+> "=" <+> pTerm (0, vars') v
-          -- TODO: separator other than " " if not isSimple.
-          renderRest = case rest of
-            Nothing → mempty
-            Just rest' → "|| " <> pTerm (2, vars') rest' <> " "
-          renderFields = \case
-            [] → mempty
-            [x] → " " <> field x <> " "
-            x : xs → " " <> field x <> " |" <> renderFields xs
-          (braceS, braceE) = case fields of
-            Left _ → ("(", ")")
-            Right _ → (mempty, mempty)
-         in
-          "{" <> braceS <> renderFields knownFields <> renderRest <> braceE <> "}"
-      )
+    Field name val → (6, "{" <+> pTerm (6, vars) name <+> "=" <+> pTerm (6, vars) val <+> "}")
+    -- Field name val →
+    --   ( 6
+    --   , let
+    --       -- (vars', Fields knownFields rest) = case fields of
+    --       --   Left (Lambda a) → (vars |> Ident "self", a)
+    --       --   Right a → (vars, a)
+    --       field (n, v) = pTerm (6, vars) n <+> "=" <+> pTerm (0, vars) v
+    --       -- TODO: separator other than " " if not isSimple.
+    --       renderRest = case rest of
+    --         Nothing → mempty
+    --         Just rest' → "|| " <> pTerm (2, vars') rest' <> " "
+    --       renderFields = \case
+    --         [] → mempty
+    --         [x] → " " <> field x <> " "
+    --         x : xs → " " <> field x <> " |" <> renderFields xs
+    --       (braceS, braceE) = case fields of
+    --         Left _ → ("(", ")")
+    --         Right _ → (mempty, mempty)
+    --      in
+    --       "{" <> braceS <> renderFields knownFields <> renderRest <> braceE <> "}"
+    --   )
+    Unit → (6, "{}")
     Var x → (6, maybe ("@" <> pretty x) pIdent $ vars !? (length vars - x - 1))
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')

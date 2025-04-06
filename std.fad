@@ -1,5 +1,5 @@
-Type+ = fadeno.Type+
-in Type+
+// Type+ = fadeno.Type+
+// in Type+
 // U32 = fadeno.U32
 
 // Kind = Type+ 1
@@ -26,3 +26,4 @@ in Type+
 //   z = 5
 //   in \never. u = 3 in \w. u + x + (y + z) + w
 // \x. 4
+(\x. fadeno.record-get x { .d = 6 | .a = 3 | .b = 4 }) .a

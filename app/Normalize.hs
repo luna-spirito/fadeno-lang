@@ -1,9 +1,10 @@
 module Normalize where
 
+import Data.Foldable1 (foldl1')
 import Data.RRBVector (Vector, drop, viewl, (|>))
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (BlockT (..), BuiltinT (..), Fields (..), Lambda (..), OpT (..), TermT (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
+import Parser (BlockT (..), BuiltinT (..), Lambda (..), OpT (..), TermT (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
 import RIO hiding (Reader, Vector, ask, drop, link, local, replicate, runReader, to, toList)
 
 -- class HasTerm m a where
@@ -63,6 +64,8 @@ isEq = curry \case
   (TagLit a, TagLit b)
     | a == b → EqYes
   (TagLit _, _) → EqNot
+  (Unit, Unit) → EqYes
+  (Unit, _) → EqNot
   (Quantification q1 _n1 k1 t1, Quantification q2 _n2 k2 t2)
     | q1 == q2 → case isEq k1 k2 of
         EqYes → isEq (unLambda t1) (unLambda t2)
@@ -86,13 +89,22 @@ isEq = curry \case
       EqYes → isEq outT1 outT2
       x → x
   (Pi{}, _) → EqNot
-  (FieldsLit _, _) → error "isEq Fields todo"
+  (Field a1 b1, Field a2 b2) → case isEq a1 a2 of
+    EqYes → isEq b1 b2
+    x → x
+  (Field{}, _) → EqNot
+  (Union _ _, _) → error "TODO isEq Union"
  where
   -- TODO: FRow???
   tryEq a b cont =
     case isEq a b of
       EqYes → cont
       _ → EqUnknown
+
+builtinsVar ∷ TermT
+builtinsVar = case builtinsList of
+  [] → Unit
+  (x : xs) → foldl1' (\a → Union a . Right) $ (\b → Field (TagLit $ identOfBuiltin b) (Builtin b)) <$> (x :| xs)
 
 data NormCtx
   = NormBinds !(Vector (Maybe TermT))
@@ -130,39 +142,51 @@ rewrite onLet onNest rewriter = go
       a' ← go via a
       pure $ case f' of
         Lam _ bod → applyLambda bod a'
-        App (Builtin RecordGet) name →
+        App (Builtin RecordGet) name1 →
           let
-            rec = a'
             search = \case
-              FieldsLit (Right (Fields [] (Just rest))) → search rest
-              FieldsLit (Right (Fields ((name2, val) : xs) rest))
-                | name == name2 → val
-                | otherwise → search $ FieldsLit (Right (Fields xs rest))
-              x → recordGet name x
+              Field name2 val
+                | name1 == name2 → val
+                | otherwise → search Unit
+              Union (Union l (Right m)) (Right r) → search $ Union l $ Right $ Union m $ Right r
+              Union (Field name2 val) (Right r)
+                | name1 == name2 → val
+                | TagLit _ ← name1, TagLit _ ← name2 → search r
+              x → recordGet name1 x
            in
-            search rec
+            search a'
         _ → App f' a'
     NatLit x → pure $ NatLit x
     TagLit x → pure $ TagLit x
-    FieldsLit fields →
-      let withFields f = case fields of
-            Left row → Left . Lambda <$> f (onNest via) (unLambda row)
-            Right record → Right <$> f via record
-       in FieldsLit <$> withFields \via' (Fields knownFields rest) →
-            Fields
-              <$> traverse (bitraverse (go via') (go via')) knownFields
-              <*> traverse (go via') rest
+    Field name val → Field <$> go via name <*> go via val
+    Unit → pure Unit
+    -- FieldsLit fields →
+    --   let withFields f = case fields of
+    --         Left row → Left . Lambda <$> f (onNest via) (unLambda row)
+    --         Right record → Right <$> f via record
+    --    in FieldsLit <$> withFields \via' (Fields knownFields rest) →
+    --         Fields
+    --           <$> traverse (bitraverse (go via') (go via')) knownFields
+    --           <*> traverse (go via') rest
     Sorry n x → Sorry n <$> go via x
     Var i → pure $ Var i
     Quantification q x a b → Quantification q x <$> go via a <*> (Lambda <$> go (onNest via) (unLambda b))
     Builtin x → pure $ Builtin x
-    BuiltinsVar → pure BuiltinsVar
+    BuiltinsVar → pure builtinsVar
     Pi inT outT → do
       inT' ← go via inT
       outT' ← case outT of
         Left (n, x) → Left . (n,) . Lambda <$> go (onNest via) (unLambda x)
         Right x → Right <$> go via x
       pure $ Pi inT' outT'
+    Union a b → do
+      a' ← go via a
+      b' ← either (\(n, b') → Left . (n,) . Lambda <$> go (onNest via) (unLambda b')) (fmap Right . go via) b
+      pure $ case (a', b') of
+        (Unit, _) → either (\(_, b'') → normalize [Just Unit] $ unLambda b'') id b'
+        (_, Right Unit) → a'
+        (_, Left (_, Lambda Unit)) → a'
+        _ → Union a' b'
     ExVar n i t → ExVar n i <$> traverse (go via) t
     UniVar n i t → UniVar n i <$> go via t
 
@@ -219,7 +243,9 @@ applyLambda bod val = normalize [Just val] $ unLambda bod
 normalizeBuiltin ∷ TermT → TermT
 normalizeBuiltin = normalize (Just . Builtin <$> fromList builtinsList)
 
--- | Parse builtin
+{- | Parse builtin
+Just a variation of parseQQ that has all the builtins in scope from the start.
+-}
 parseBQQ ∷ QuasiQuoter
 parseBQQ =
   QuasiQuoter
