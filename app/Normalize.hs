@@ -110,6 +110,70 @@ data NormCtx
   = NormBinds !(Vector (Maybe TermT))
   | NormRewrite !TermT !TermT -- on normalized
 
+data TagsetDropRes = TDFound !TermT | TDMissing | TDUnknown
+
+-- | Produces a non-dependent union.
+union ∷ TermT → TermT → TermT
+union = curry \case
+  (Unit, r) → r
+  (l, Unit) → l
+  (l, r) → Union l $ Right r
+
+-- | Processes application of `f` onto `a`.
+postApp ∷ TermT → TermT → TermT
+postApp f a = case f of
+  Lam _ bod → applyLambda bod a
+  App (Builtin RecordGet) name1 →
+    let
+      search = \case
+        Field name2 val
+          | name1 == name2 → val
+          | otherwise → search Unit
+        Union (Union l (Right m)) (Right r) → search $ Union l $ Right $ Union m $ Right r
+        Union (Field name2 val) (Right r)
+          | name1 == name2 → val
+          | TagLit _ ← name1, TagLit _ ← name2 → search r
+        x → recordGet name1 x
+     in
+      search a
+  App (Builtin RecordKeepFields) tags → recordSelectFields True tags a
+  App (Builtin RecordDropFields) tags → recordSelectFields False tags a
+  _ → App f a
+ where
+  tagsetDrop ∷ TermT → TermT → TagsetDropRes
+  tagsetDrop x = \case
+    Union l (Right r) → case tagsetDrop x l of
+      TDFound l' → TDFound $ union l' r
+      TDUnknown → TDUnknown
+      TDMissing → tagsetDrop x r
+    Unit → TDMissing
+    Field n _ → case isEq x n of
+      EqYes → TDFound Unit
+      EqNot → TDMissing
+      EqUnknown → TDUnknown
+    _ → TDUnknown
+
+  recordSelectFields keep tags fields = case tags of
+    Unit → if keep then fields else Unit
+    _ →
+      let
+        stuck =
+          let fun = if keep then RecordKeepFields else RecordDropFields
+           in App (App (Builtin fun) tags) fields
+        p n v right = case tagsetDrop n tags of
+          TDFound tags' →
+            (if keep then union (Field n v) else id) $ recordSelectFields keep tags' right
+          TDMissing →
+            (if keep then id else union (Field n v)) $ recordSelectFields keep tags right
+          TDUnknown → stuck
+       in
+        case fields of
+          Unit → Unit
+          Union (Union l (Right m)) (Right r) → recordSelectFields keep tags $ Union l $ Right $ Union m $ Right r
+          Union (Field n v) (Right r) → p n v r
+          Field n v → p n v Unit
+          _ → stuck
+
 -- Rewrites & simplifies. In that order. Doesn't rewrite the simplified result.
 rewrite ∷ ∀ f via. (Monad f) ⇒ (TermT → via → via) → (via → via) → (TermT → via → f (Maybe TermT)) → via → TermT → f TermT
 rewrite onLet onNest rewriter = go
@@ -140,22 +204,7 @@ rewrite onLet onNest rewriter = go
     App f a → do
       f' ← go via f
       a' ← go via a
-      pure $ case f' of
-        Lam _ bod → applyLambda bod a'
-        App (Builtin RecordGet) name1 →
-          let
-            search = \case
-              Field name2 val
-                | name1 == name2 → val
-                | otherwise → search Unit
-              Union (Union l (Right m)) (Right r) → search $ Union l $ Right $ Union m $ Right r
-              Union (Field name2 val) (Right r)
-                | name1 == name2 → val
-                | TagLit _ ← name1, TagLit _ ← name2 → search r
-              x → recordGet name1 x
-           in
-            search a'
-        _ → App f' a'
+      pure $ postApp f' a'
     NatLit x → pure $ NatLit x
     TagLit x → pure $ TagLit x
     Field name val → Field <$> go via name <*> go via val

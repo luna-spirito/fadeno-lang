@@ -21,7 +21,7 @@ import Data.IntMap qualified as IM
 import Data.List (sort, sortBy)
 import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, splitAt, viewl, viewr, (!?), (|>))
 import GHC.Exts (IsList (..))
-import Normalize (EqRes (..), NormCtx (..), isEq, nested, nestedBy, normalize, normalizeFile, parseBQQ, rewrite)
+import Normalize (EqRes (..), NormCtx (..), isEq, nested, nestedBy, normalize, normalizeFile, parseBQQ, rewrite, union)
 import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf, typOf)
 import Prettyprinter (Doc, annotate, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
@@ -29,68 +29,8 @@ import RIO hiding (Reader, Vector, ask, filter, link, local, runReader, toList)
 import RIO.HashMap qualified as HM
 import RIO.Partial qualified as P
 
--- TODO: Refactor unwraps?
--- TODO: portM/unportM?
-
-{-
-Whenever a node interacts with a negative package, DO NOT UNWRAP.
-Instead, create a new, specialized package.
-
-Also, maybe YES sub-packages?, but NO deep substitutions. This messes things up.
-What could help is: BI-DIRECTIONALLY phase primary ports through custom node's auxiliary?
-This could help even in regular code I guess.
-\x
-  y = [3, 4, x]
-  z = (9, y)
-  w = (10, y)
-  in (z, w)
-... will automatically inline `y`.
-
-So, let's first separate tags and ports?
-
-\y ->
-  // x = +> (y, y)
-  x = (y, y)
-  in MkPair x x
-
-builtins/rec \rec ->
-  \y -> if y == 0
-    then y*rec (y-1)
-    else 0
-
-EDIT: instead of "phasing" primary ports, just fix the entry point and "suck in" all the other nodes.
-EDIT: "phasing/sucking in/out" is not that bad since it increases optimality, but it as well reduces the compilation
-capabilities by reducing the amount of available information.
-"Phasing in" is clearly not as bad as "phasing out", but I'm not sure it's worth the effort and it still can yield worse performance
-in some edge cases (ex. partial erasure), although usually it's better.
-
-28.12.24: Phasing in/out, while could be a good thing for optimality, is not always this way.
-We'd better stick to the approach of "trusting the programmer", at least for now.
-Whatever programmer says to be the node, will be the node, with no "extra"s or "exclusion"s.
-Also, we package local variables as a transparent optimization, but we don't guarantee doing this or doing this the best way, but
-we do guarantee that we do it only when it preserves optimality.
-
-28.12.24: Solution:
-No phasings. Instead, each time a specialisation occurs (i. e. you interact with negative package), DO NOT UNWRAP it.
--}
-
--- TODO: Currently identifiers with `/` are reserved.
--- Correct type-checking also depends on this. This is absolutely horrible.
--- TODO: just calm down and use freaking substitutions.
--- You can't guarantee correctness of the mess you've written if you
--- continue to do things this way.
--- TODO: meaningful names for compiler-generated Vars, UniVars, ExVars
--- TODO: Type of existential is not checked when instantiating.
-
-{-
-13.02.25
-I'm currently working on implenting Type universes.
-Currently we have <term (3)> : <type (U32)> : Type+ 0 : Type+ 1 : ... : Type+ Aleph
-
-Type+ Aleph doesn't have a type. And, therefore, it can only be inferred, but user can't include it in the code.
-EDIT: Since type-checking is undecidable, type-checking type annotations is a horrendously stupid idea.
-Aleph will be available at the level of type annotations only.
--}
+-- TODO: You currently don't perform `resolve` in terms processed...
+-- This is probably an error.
 
 -- censor + listen
 intercept ∷ ∀ w m sig a. (Has (Writer w) sig m, Monoid w) ⇒ m a → m (w, a)
@@ -323,7 +263,7 @@ withMono mapTerm onMeta onOther = go
 
 data LookupRes a
   = LookupFound !a
-  | LookupMissing !(Vector TermT)
+  | LookupMissing !TermT -- Tagset
   | LookupUnknown
   deriving (Show)
 
@@ -344,7 +284,7 @@ rowGet mapTerm tag cont = go
     withMono
       ( \f → \case
           LookupFound a → LookupFound <$> mapTerm f a
-          LookupMissing keys → LookupMissing <$> traverse f keys
+          LookupMissing keys → LookupMissing <$> f keys
           LookupUnknown → pure LookupUnknown
       )
       ( \(Ident n) (ExVarId var) → \case
@@ -356,20 +296,28 @@ rowGet mapTerm tag cont = go
           t → notARow $ ExVar (Ident n) (ExVarId var) t
       )
       \case
-        Unit → pure $ LookupMissing []
-        Union a bE → runSeqResolve do
-          a' ← withResolved \_ → go a record
-          case a' of
+        Unit → pure $ LookupMissing Unit
+        Field n v → case isEq n tag of
+          EqYes → LookupFound <$> cont v
+          EqNot → pure $ LookupMissing $ Field n v
+          EqUnknown → pure $ LookupUnknown
+        Union l rE → runSeqResolve do
+          l' ← withResolved \_ → go l record
+          case l' of
             LookupFound res → pure $ LookupFound res
             LookupMissing coll1 → do
-              b' ← withResolved \exs → case bE of
-                Right b → go (resolve exs b) $ _ record
-              case b' of
+              let
+                recordL = normalize [] $ App (App (Builtin RecordKeepFields) coll1) record
+                recordR = normalize [] $ App (App (Builtin RecordDropFields) coll1) record
+              r' ← withResolved \exs → case rE of
+                Left (_, r) → go (normalize [Just recordL] $ resolve exs $ unLambda r) recordR
+                Right r → go (resolve exs r) $ recordR
+              case r' of
                 LookupFound res → pure $ LookupFound res
-                LookupMissing coll2 → pure $ LookupMissing $ coll1 <> coll2
+                LookupMissing coll2 → pure $ LookupMissing $ Union coll1 $ Right coll2
                 LookupUnknown → pure LookupUnknown
             LookupUnknown → pure LookupUnknown
-        _ → _
+        x → notARow x
       row
 
 -- Lookups in FRow. **FRow**.
@@ -504,6 +452,11 @@ resolveBinds ∷ HashMap ExVarId TermT → Vector (Maybe TermT, TermT) → Vecto
 resolveBinds (HM.null → True) = id
 resolveBinds exs = fmap $ bimap (fmap $ resolve exs) $ resolve exs
 
+resolveMode ∷ HashMap ExVarId TermT → InferMode a → InferMode a
+resolveMode exs = \case
+  Infer → Infer
+  Check a → Check $ resolve exs a
+
 insertBinds ∷ (Maybe TermT, TermT) → Vector (Maybe TermT, TermT) → Vector (Maybe TermT, TermT)
 insertBinds new old = (bimap (nested <$>) nested <$> old) |> new
 
@@ -529,8 +482,8 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
     --   x' ← pushExVar
     --   yT' ← normalize (HM.singleton xName x') yT
     --   infer ctx term $ Check $ yT'
-    (Block (BlockLet name tyM val into), mode) → do
-      ty ← stackScope ("let" <+> pIdent name) case tyM of
+    (Block (BlockLet name tyM val into), mode) → runSeqResolve do
+      ty ← withResolved \_ → stackScope ("let" <+> pIdent name) case tyM of
         Nothing → infer binds val Infer
         Just ty → do
           -- TODO: check ty' to be a type?
@@ -542,10 +495,12 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
           withLog act = case (unLambda into) of
             Block{} → act
             _ → stackScope "in" act
-      withLog
-        $ scopedVar (mapTermFor mode)
-        $ infer (insertBinds (Just val', ty) binds) (unLambda into)
-        $ nestMode mode
+      withResolved \exs →
+        withLog
+          $ scopedVar (mapTermFor mode)
+          $ infer (insertBinds (Just val', ty) binds) (unLambda into)
+          $ nestMode
+          $ resolveMode exs mode
     --   (Block (BlockLet name tyM val) into, mode) → do
     --     ctx ← ask @BindsT
     --     ty ← stackScope ("let" <+> pIdent name) case tyM of
@@ -574,7 +529,6 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
             $ infer (insertBinds (Nothing, inT') binds) (unLambda bod) Infer
         withResolved \exs → pure $ Pi (resolve exs inT') $ Right outT
     (Op a _op b, Infer) → runSeqResolve do
-      -- Deadly sin. Should be fixed.
       withResolved \_ → infer binds a $ Check $ Builtin U32
       withResolved \exs → infer (resolveBinds exs binds) b $ Check $ Builtin U32
       pure $ Builtin U32
@@ -602,6 +556,71 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
     --       inferBod (Just arg') outT'
     --   -- Override for second-class RecordGet
     --   -- TODO: Create a speci type for RecordGet
+    (App (App (Builtin RecordGet) tag) record, mode) → runSeqResolve do
+      recordT ← withResolved \_ → infer binds record Infer
+      withResolved \exs → infer (resolveBinds exs binds) tag $ Check $ Builtin Tag
+      withResolved \exs →
+        let
+          body row extraExs = do
+            let exs' = exs <> extraExs
+            res ←
+              rowGet
+                (mapTermFor mode)
+                tag
+                ( \ty → case mode of
+                    Infer → pure ty
+                    Check ty2 → subtype row $ resolve exs' ty2
+                )
+                row
+                record
+            case res of
+              LookupFound x → pure x
+              _ → stackError "App RecordGet"
+         in
+          withMono
+            (mapTermFor mode)
+            ( \(Ident n) (ExVarId var) tyM → do
+                let
+                  tVar = ExVar (Ident $ n <> "/t") (ExVarId $ var <> [0]) Nothing
+                  rowVar = ExVar (Ident $ n <> "/row") (ExVarId $ var <> [1]) (Just $ rowOf tVar)
+                runSeqResolve do
+                  withResolved \_ → writeMeta (Ident n) (ExVarId var) tyM $ recordOf rowVar
+                  withResolved \exs2 → body rowVar exs2
+            )
+            ( \case
+                App (Builtin Record) row → body row mempty
+                _ → stackError "Not a record"
+            )
+            (resolve exs recordT)
+    (Field n v, Infer) → runSeqResolve do
+      withResolved \_ → infer binds n $ Check $ Builtin Tag
+      withResolved \exs → recordOf . Field n <$> infer (resolveBinds exs binds) v Infer
+    (Union l (Right r), Infer) →
+      runSeqResolve
+        $ (union <$> (withResolved \_ → infer binds l Infer) <*> (withResolved \exs → infer (resolveBinds exs binds) r Infer))
+    (Unit, Infer) → pure $ App (Builtin Record) Unit
+    -- (Field n v, Check (App (Builtin Record) row)) → checkFields
+    -- res ← rowGet
+    --   _
+    --   _
+    --   _
+    --   _
+    --   _
+    -- case res of
+    --   LookupFound x → pure x
+    -- withResolved \_ → infer binds n $ Check $ Builtin Tag
+    -- withResolved \exs → recordOf . Field n <$> infer (resolveBinds exs binds) v Infer
+    -- withResolved \exs → infer (resolveBinds exs binds) tag $ Check $ Builtin Tag
+    -- res ← rowGet
+    --   _
+    --   tag
+    --   _
+    --   _
+    --   record
+    -- case res of
+    --   LookupFound x → pure x
+    --   LookupMissing _ → stackError "Not a field"
+    --   LookupUnknown → stackError "Stuck while trying to get a field"
     -- (App (App (Builtin RecordGet) tag) record, Infer) → do
     --   (exs, recordTy) ← listen @Resolved $ infer record Infer
     --   let body row = do
@@ -726,8 +745,9 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
     --               (nestedNormBinds tyNesting [Just $ PortableTerm tyNesting a])
     --               outT
     --       t → stackError $ "inferApp " <> pTerm' t
+
     (NatLit _, Infer) → pure $ Builtin U32
-    -- (TagLit _, Infer) → pure $ Builtin Tag
+    (TagLit _, Infer) → pure $ Builtin Tag
     -- {-
     --     (FieldsLit FRecord knownVal rest, Infer) → do
     --       knownTy ← for knownVal \(name, val) → do
@@ -833,11 +853,12 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
     --   pure do
     --     infer (Pi inNameM x y) $ Check $ typOf u
     --     pure $ typOf u
-    -- (Builtin x, Infer) → pure $ unport (typOfBuiltin x) tyNesting0
-    -- (BuiltinsVar, Infer) →
-    --   pure
-    --     $ App (Builtin Record)
-    --     $ FieldsLit FRow ((\b → (TagLit $ identOfBuiltin b, unport (typOfBuiltin b) (tyNesting0 + 1))) <$> builtinsList) Nothing
+    (Builtin x, Infer) → pure $ typOfBuiltin x
+    (BuiltinsVar, Infer) →
+      pure
+        $ App (Builtin Record)
+        $ foldl' (\l new → l `union` (Field (TagLit $ identOfBuiltin new) (typOfBuiltin new))) Unit builtinsList
+    -- \$ FieldsLit FRow ((\b → (TagLit $ identOfBuiltin b, unport (typOfBuiltin b) (tyNesting0 + 1))) <$> builtinsList) Nothing
     -- (ExVar (ExVar' i), mode) →
     --   sendIO (readIORef i) >>= \case
     --     Left t → infer (unport t nesting) mode
@@ -1053,11 +1074,9 @@ instMeta = (\f a b c → stackScope "instMeta" $ f a b c) \(scope1, t1) origVar1
               _ → r
 -}
 
-{-
-
-typOfBuiltin ∷ BuiltinT → PortableTermT
+typOfBuiltin ∷ BuiltinT → TermT
 typOfBuiltin =
-  PortableTerm 0 . \case
+  \case
     U32 → [parseBQQ| Type+ 0 |]
     Tag → [parseBQQ| Type+ 0 |]
     Row → [parseBQQ| forall (u : U32). Type+ u -> Type+ u |]
@@ -1068,10 +1087,12 @@ typOfBuiltin =
       [parseBQQ|
         forall (u : U32) (row : Row (Type+ u)) (t : Type+ u).
           tag : Tag ->
-          record : Record {(tag : t || row)} ->
+          record : Record ({(tag) = t} /\ row) ->
           t
       |]
--}
+    RecordKeepFields → [parseBQQ| exists a. a|]
+    -- Fix.
+    RecordDropFields → [parseBQQ| exists a. a|]
 
 instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ Ident → ExVarId → Maybe TermT → TermT → m ()
 instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1) t1 →

@@ -26,4 +26,5 @@
 //   z = 5
 //   in \never. u = 3 in \w. u + x + (y + z) + w
 // \x. 4
-(\x. fadeno.record-get x { .d = 6 | .a = 3 | .b = 4 }) .a
+// (\x. fadeno.record-get x { .d = 6 | .a = 3 | .b = 4 }) .a
+{ .d = 6 }.d
