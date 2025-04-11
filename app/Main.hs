@@ -569,7 +569,7 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
                 tag
                 ( \ty → case mode of
                     Infer → pure ty
-                    Check ty2 → subtype row $ resolve exs' ty2
+                    Check ty2 → subtype ty $ resolve exs' ty2
                 )
                 row
                 record
@@ -1218,12 +1218,32 @@ subtype = \a b →
     (App (Builtin Row) fields1, App (Builtin Row) fields2) →
       -- TODO: Implement proper row subtyping (width and depth) using FieldsLit structure and potentially lookupField logic.
       stackError $ "Row subtyping not implemented yet:" <+> pTerm' fields1 <+> "<:" <+> pTerm' fields2
+    (App (Builtin Record) fields0, App (Builtin Row) fieldsTy0) →
+      let
+        unknownShape = stackError "Unknown shape when checking for Row"
+        go fields fieldsTy =
+          withMono
+            (const pure)
+            (\_ _ _ → unknownShape)
+            ( \case
+                Unit → pure ()
+                Field _ v → subtype v fieldsTy
+                Union l (Right r) → runSeqResolve do
+                  withResolved \_ → go l fieldsTy
+                  withResolved \exs → go r (resolve exs fieldsTy)
+                _ → unknownShape
+            )
+            fields
+       in
+        go fields0 fieldsTy0
     -- Application (App f1 a1 <: App f2 a2) - Very restricted for now
     (App f1 a1, App f2 a2) → case isEq f1 f2 of
-      EqYes → subtype a1 a2 -- Only if functions are identical, assume covariant args (this is often wrong!)
+      EqYes → case isEq a1 a2 of
+        EqYes → pure ()
+        _ → stackError $ "Cannot subtype applications with different arguments:" <+> pTerm' a1 <+> "vs" <+> pTerm' f2
       _ → stackError $ "Cannot subtype applications with different functions:" <+> pTerm' f1 <+> "vs" <+> pTerm' f2
     -- Catch-all: if no rule matches, they are not subtypes
-    (t1, t2) → stackError $ "Subtype check failed, no rule applies for:" <+> pTerm' t1 <+> "<:" <+> pTerm' t2
+    (t1, t2) → stackError $ "Subtype check failed, no rule applies for:" <+> pretty (tshow t1) <+> "<:" <+> pretty (tshow t2)
 
 runSolveM ∷ (Applicative m) ⇒ WriterC Resolved (FreshC (ErrorC (Doc AnsiStyle) m)) a → m (Either (Doc AnsiStyle) a)
 runSolveM =
