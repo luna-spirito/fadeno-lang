@@ -247,19 +247,37 @@ scopedExVar mapTerm ex1 act = do
     )
     res
 
-withMono ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → (Ident → ExVarId → Maybe TermT → m a) → (TermT → m a) → TermT → m a
+withMono ∷
+  (Has Solve sig m) ⇒
+  ((TermT → m TermT) → a → m a) →
+  -- | onMeta
+  ReaderC (Ident, ExVarId, Maybe TermT) m TermT →
+  -- | onOther
+  (Resolved → TermT → m a) →
+  TermT →
+  m a
 withMono mapTerm onMeta onOther = go
  where
   go = \case
     Sorry _ v → go v
-    ExVar n i ty → onMeta n i ty
+    ExVar n i ty → do
+      val ← runReader (n, i, ty) onMeta
+      runSeqResolve do
+        withResolved \_ → writeMeta n i ty val
+        withResolved \exs → onOther exs val
     Quantification Forall n xTy x → do
       exId ← fresh
       scopedExVar mapTerm exId $ go $ normalize [Just $ ExVar n (ExVarId [exId]) $ Just xTy] $ unLambda x
     Quantification Exists n xTy x → do
       uniId ← fresh
       scopedUniVar mapTerm uniId $ go $ normalize [Just $ UniVar n uniId xTy] $ unLambda x
-    r → onOther r
+    r → onOther [] r
+
+subExVar ∷ (Has (Reader (Ident, ExVarId, Maybe TermT) :+: Fresh) sig m) ⇒ ByteString → Maybe TermT → m TermT
+subExVar subName subTy = do
+  subI ← fresh
+  (Ident baseName, ExVarId baseI, _ ∷ Maybe TermT) ← ask
+  pure $ ExVar (Ident $ baseName <> "/" <> subName) (ExVarId $ baseI <> [subI]) subTy
 
 data LookupRes a
   = LookupFound !a
@@ -287,37 +305,41 @@ rowGet mapTerm tag cont = go
           LookupMissing keys → LookupMissing <$> f keys
           LookupUnknown → pure LookupUnknown
       )
-      ( \(Ident n) (ExVarId var) → \case
-          Just (App (Builtin Row) mT) → do
-            let val' = ExVar (Ident $ n <> "/head") (ExVarId $ var <> [0]) $ Just mT
-            let rest' = ExVar (Ident $ n <> "/tail") (ExVarId $ var <> [1]) $ Just $ rowOf mT
-            writeMeta (Ident n) (ExVarId var) (Just $ rowOf mT) $ Union (Field tag val') $ Right rest'
-            LookupFound <$> cont val'
-          t → notARow $ ExVar (Ident n) (ExVarId var) t
+      ( do
+          (_ ∷ Ident, _ ∷ ExVarId, ty) ← ask
+          case ty of
+            Just (App (Builtin Row) mT) → do
+              h ← subExVar "head" (Just mT)
+              t ← subExVar "tail" (Just $ rowOf mT)
+              pure $ Union h (Right t)
+            _ → do
+              (n, var, _ ∷ Maybe TermT) ← ask
+              notARow $ ExVar n var ty
       )
-      \case
-        Unit → pure $ LookupMissing Unit
-        Field n v → case isEq n tag of
-          EqYes → LookupFound <$> cont v
-          EqNot → pure $ LookupMissing $ Field n v
-          EqUnknown → pure $ LookupUnknown
-        Union l rE → runSeqResolve do
-          l' ← withResolved \_ → go l record
-          case l' of
-            LookupFound res → pure $ LookupFound res
-            LookupMissing coll1 → do
-              let
-                recordL = normalize [] $ App (App (Builtin RecordKeepFields) coll1) record
-                recordR = normalize [] $ App (App (Builtin RecordDropFields) coll1) record
-              r' ← withResolved \exs → case rE of
-                Left (_, r) → go (normalize [Just recordL] $ resolve exs $ unLambda r) recordR
-                Right r → go (resolve exs r) $ recordR
-              case r' of
-                LookupFound res → pure $ LookupFound res
-                LookupMissing coll2 → pure $ LookupMissing $ Union coll1 $ Right coll2
-                LookupUnknown → pure LookupUnknown
-            LookupUnknown → pure LookupUnknown
-        x → notARow x
+      ( \_ → \case
+          Unit → pure $ LookupMissing Unit
+          Field n v → case isEq n tag of
+            EqYes → LookupFound <$> cont v
+            EqNot → pure $ LookupMissing $ Field n v
+            EqUnknown → pure $ LookupUnknown
+          Union l rE → runSeqResolve do
+            l' ← withResolved \_ → go l record
+            case l' of
+              LookupFound res → pure $ LookupFound res
+              LookupMissing coll1 → do
+                let
+                  recordL = normalize [] $ App (App (Builtin RecordKeepFields) coll1) record
+                  recordR = normalize [] $ App (App (Builtin RecordDropFields) coll1) record
+                r' ← withResolved \exs → case rE of
+                  Left (_, r) → go (normalize [Just recordL] $ resolve exs $ unLambda r) recordR
+                  Right r → go (resolve exs r) $ recordR
+                case r' of
+                  LookupFound res → pure $ LookupFound res
+                  LookupMissing coll2 → pure $ LookupMissing $ Union coll1 $ Right coll2
+                  LookupUnknown → pure LookupUnknown
+              LookupUnknown → pure LookupUnknown
+          x → notARow x
+      )
       row
 
 -- Lookups in FRow. **FRow**.
@@ -579,26 +601,59 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
          in
           withMono
             (mapTermFor mode)
-            ( \(Ident n) (ExVarId var) tyM → do
-                let
-                  tVar = ExVar (Ident $ n <> "/t") (ExVarId $ var <> [0]) Nothing
-                  rowVar = ExVar (Ident $ n <> "/row") (ExVarId $ var <> [1]) (Just $ rowOf tVar)
-                runSeqResolve do
-                  withResolved \_ → writeMeta (Ident n) (ExVarId var) tyM $ recordOf rowVar
-                  withResolved \exs2 → body rowVar exs2
+            ( do
+                tVar ← subExVar "t" Nothing
+                rowVar ← subExVar "row" $ Just $ rowOf tVar
+                pure $ recordOf rowVar
             )
-            ( \case
-                App (Builtin Record) row → body row mempty
+            ( \exs2 → \case
+                App (Builtin Record) row → body row exs2
                 _ → stackError "Not a record"
             )
             (resolve exs recordT)
     (Field n v, Infer) → runSeqResolve do
       withResolved \_ → infer binds n $ Check $ Builtin Tag
       withResolved \exs → recordOf . Field n <$> infer (resolveBinds exs binds) v Infer
-    (Union l (Right r), Infer) →
-      runSeqResolve
-        $ (union <$> (withResolved \_ → infer binds l Infer) <*> (withResolved \exs → infer (resolveBinds exs binds) r Infer))
-    (Unit, Infer) → pure $ App (Builtin Record) Unit
+    (Union l (Right r), Infer) → runSeqResolve do
+      l' ← withResolved \_ → infer binds l Infer
+      r' ← withResolved \exs → infer (resolveBinds exs binds) (resolve exs r) Infer
+      let
+        withMono' f term =
+          withMono
+            id
+            ( do
+                t ← subExVar "t" Nothing
+                recordOf <$> subExVar "row" (Just $ rowOf t)
+            )
+            f
+            term
+      withResolved \exs →
+        withMono'
+          ( \exs2 l'' →
+              withMono'
+                ( \exs3 r'' →
+                    case (resolve exs3 l'', r'') of
+                      (App (Builtin Record) a, App (Builtin Record) b) → pure $ App (Builtin Record) (Union a $ Right b)
+                      (App (Builtin Row) a, _) → do
+                        subtype r'' $ rowOf a
+                        pure $ rowOf a
+                      (_, App (Builtin Row) b) → do
+                        subtype l'' $ rowOf b
+                        pure $ rowOf b
+                      _ → stackError "Invalid operands for /\\"
+                )
+                (resolve exs2 r')
+          )
+          (resolve exs l')
+    -- withMono
+    --   (mapTermFor mode)
+    --   _
+    --   _
+    --   _
+
+    -- runSeqResolve
+    --   $ (union <$> (withResolved \_ → infer binds l Infer) <*> (withResolved \exs → infer (resolveBinds exs binds) r Infer))
+    (Unit, Infer) → pure $ recordOf Unit
     -- (Field n v, Check (App (Builtin Record) row)) → checkFields
     -- res ← rowGet
     --   _
@@ -696,25 +751,28 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
     -- -}
     (App f a, Infer) → runSeqResolve do
       fTy ← withResolved \_ → infer binds f Infer
-      withMono
-        id
-        ( \(Ident n) (ExVarId var) t → do
-            let inT = ExVar (Ident $ n <> "/in") (ExVarId $ var <> [0]) Nothing
-            let outT = ExVar (Ident $ n <> "/out") (ExVarId $ var <> [1]) Nothing
-            withResolved \_ → writeMeta (Ident n) (ExVarId var) t $ Pi inT $ Right outT
-            stackLog "TODO proper meta instantiation"
-            withResolved \exs → infer (resolveBinds exs binds) a $ Check inT
-            withResolved \exs → pure $ resolve exs outT
-        )
-        \case
-          Pi inT outTE → do
-            withResolved \exs → infer (resolveBinds exs binds) a $ Check $ inT
-            pure $ case outTE of
-              Left (_, outT) →
-                normalize [Just a] $ unLambda outT
-              Right outT → outT
-          t → stackError $ "inferApp " <> pTerm' t
-        fTy
+      withResolved \exs →
+        withMono
+          id
+          -- ( \(Ident n) (ExVarId var) t → do
+          --     let inT = ExVar (Ident $ n <> "/in") (ExVarId $ var <> [0]) Nothing
+          --     let outT = ExVar (Ident $ n <> "/out") (ExVarId $ var <> [1]) Nothing
+          --     withResolved \_ → writeMeta (Ident n) (ExVarId var) t $ Pi inT $ Right outT
+          --     stackLog "TODO proper meta instantiation"
+          --     withResolved \exs → infer (resolveBinds exs binds) a $ Check inT
+          --     withResolved \exs → pure $ resolve exs outT
+          -- )
+          (Pi <$> subExVar "in" Nothing <*> (Right <$> subExVar "out" Nothing))
+          ( \exs2 → \case
+              Pi inT outTE → do
+                infer (resolveBinds (exs <> exs2) binds) a $ Check $ inT
+                pure $ case outTE of
+                  Left (_, outT) →
+                    normalize [Just a] $ unLambda outT
+                  Right outT → outT
+              t → stackError $ "inferApp " <> pTerm' t
+          )
+          fTy
     -- (App f a, Infer) → do
     --   fTy ← infer f Infer
     --   withMono
@@ -1224,8 +1282,8 @@ subtype = \a b →
         go fields fieldsTy =
           withMono
             (const pure)
-            (\_ _ _ → unknownShape)
-            ( \case
+            (lift unknownShape)
+            ( \_ → \case
                 Unit → pure ()
                 Field _ v → subtype v fieldsTy
                 Union l (Right r) → runSeqResolve do

@@ -18,6 +18,6 @@ Record = fadeno.Record
 /: forall (u : U32) (a : Type+ u). a -> a
 id = \x. x
 
-Union = Record ({ .tag = Tag } /\ {})
+Union = Record (meta : { .tag = Tag } /\ { .val = U32 })
 
 in Union
