@@ -230,7 +230,7 @@ scopedExVar mapTerm ex1 act = do
                       pure
                         $ Quantification Forall uN (Builtin U32)
                         $ Lambda
-                        $ Quantification Forall n (App (Builtin Type) (Var 0))
+                        $ Quantification Forall n (App (Builtin TypePlus) (Var 0))
                         $ Lambda
                         $ rewriteExVar ex (Var 0)
                         $ nestedBy 2 acc
@@ -1197,7 +1197,7 @@ typOfBuiltin =
     Tag → [parseBQQ| Type+ 0 |]
     Row → [parseBQQ| forall (u : U32). Type+ u -> Type+ u |]
     Record → [parseBQQ| forall (u : U32). Row (Type+ u) -> Type+ u |]
-    Type → [parseBQQ| u : U32 -> Type+ (u + 1) |]
+    TypePlus → [parseBQQ| u : U32 -> Type+ (u + 1) |]
     Eq → [parseBQQ| forall (u : U32) (a : Type+ u). a -> Type+ u |]
     RecordGet →
       [parseBQQ|
@@ -1320,7 +1320,7 @@ subtype = \a b →
     -- Builtin Types (must be identical)
     (Builtin a, Builtin b) | a == b → pure ()
     -- Type Universes (Type L1 <: Type L2 where L1 <= L2)
-    (App (Builtin Type) a, App (Builtin Type) b) → do
+    (App (Builtin TypePlus) a, App (Builtin TypePlus) b) → do
       case (a, b) of
         (NatLit x, NatLit y) | x <= y → pure ()
         -- If one level is existential, unify it with the other level constraint.

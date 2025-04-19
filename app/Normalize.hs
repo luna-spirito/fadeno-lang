@@ -4,7 +4,7 @@ import Data.Foldable1 (foldl1')
 import Data.RRBVector (Vector, drop, viewl, (|>))
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (BlockT (..), BuiltinT (..), Lambda (..), OpT (..), TermT (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
+import Parser (BlockT (..), BuiltinT (..), Lambda (..), OpT (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
 import RIO hiding (Reader, Vector, ask, drop, link, local, replicate, runReader, to, toList)
 
 -- class HasTerm m a where
@@ -67,9 +67,7 @@ isEq = curry \case
   (Unit, Unit) → EqYes
   (Unit, _) → EqNot
   (Quantification q1 _n1 k1 t1, Quantification q2 _n2 k2 t2)
-    | q1 == q2 → case isEq k1 k2 of
-        EqYes → isEq (unLambda t1) (unLambda t2)
-        x → x
+    | q1 == q2 → forceEq k1 k2 $ isEq (unLambda t1) (unLambda t2)
   (Quantification{}, _) → EqUnknown
   (Builtin a, Builtin b)
     | a == b → EqYes
@@ -81,21 +79,22 @@ isEq = curry \case
   -- TODO: Handle mixed?
   -- Shame.
   (Pi inT1 (Left (_, outT1)), Pi inT2 (Left (_, outT2))) →
-    case isEq inT1 inT2 of
-      EqYes → isEq (unLambda outT1) (unLambda outT2)
-      x → x
+    forceEq inT1 inT2 $ isEq (unLambda outT1) (unLambda outT2)
   (Pi inT1 (Right outT1), Pi inT2 (Right outT2)) →
-    case isEq inT1 inT2 of
-      EqYes → isEq outT1 outT2
-      x → x
+    forceEq inT1 inT2 $ isEq outT1 outT2
   (Pi{}, _) → EqNot
-  (Field a1 b1, Field a2 b2) → case isEq a1 a2 of
-    EqYes → isEq b1 b2
-    x → x
+  (Field a1 b1, Field a2 b2) → forceEq a1 a2 $ isEq b1 b2
   (Field{}, _) → EqNot
   (Union _ _, _) → error "TODO isEq Union"
+  (ListLit (Vector' (viewl → Just (x, xs))), ListLit (Vector' (viewl → Just (y, ys)))) →
+    forceEq x y $ isEq (ListLit $ Vector' xs) (ListLit $ Vector' ys)
+  (ListLit _, _) → EqNot
  where
   -- TODO: FRow???
+  forceEq a b cont =
+    case isEq a b of
+      EqYes → cont
+      x → x
   tryEq a b cont =
     case isEq a b of
       EqYes → cont
@@ -209,6 +208,7 @@ rewrite onLet onNest rewriter = go
     TagLit x → pure $ TagLit x
     Field name val → Field <$> go via name <*> go via val
     Unit → pure Unit
+    ListLit (Vector' vec) → ListLit . Vector' <$> traverse (go via) vec
     -- FieldsLit fields →
     --   let withFields f = case fields of
     --         Left row → Left . Lambda <$> f (onNest via) (unLambda row)

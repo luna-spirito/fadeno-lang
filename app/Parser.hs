@@ -7,6 +7,7 @@ module Parser (
   BlockT (..),
   Lambda (..),
   ExVarId (..),
+  Vector' (..),
   TermT (..),
   typOf,
   rowOf,
@@ -30,13 +31,16 @@ import Data.ByteString.Char8 (pack)
 import Data.ByteString.Char8 qualified as BS
 import Data.Foldable1 (foldl1')
 import Data.Hashable (Hashable (..))
+import Data.Kind (Type)
 import Data.RRBVector (Vector, findIndexR, (!?), (|>))
 import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string)
+import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (Lift (..))
-import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, layoutSmart, line, nest, softline, vsep, (<+>))
+import Language.Haskell.TH.Syntax qualified as TH
+import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, encloseSep, layoutSmart, line, nest, softline, vsep, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
-import RIO hiding (Reader, Vector, ask, local)
+import RIO hiding (Reader, Vector, ask, local, toList)
 
 -- newtype RevList a = UnsafeRevList {unUnsafeRevList ∷ [a]} deriving (Functor, Show)
 
@@ -153,7 +157,7 @@ data BuiltinT
   | Tag
   | Row
   | Record
-  | Type -- Type+ 0, Type+ 1, ..., Type+ Aleph
+  | TypePlus -- Type+ 0, Type+ 1, ..., Type+ Aleph
   | Eq
   | RecordGet -- Second-class!
   | RecordKeepFields
@@ -161,7 +165,7 @@ data BuiltinT
   -- If -- TODO: Make Choice counterpart for Record
   deriving (Show, Eq, Lift)
 builtinsList ∷ [BuiltinT]
-builtinsList = [U32, Tag, Row, Record, Type, RecordGet, RecordKeepFields, RecordDropFields]
+builtinsList = [U32, Tag, Row, Record, TypePlus, RecordGet, RecordKeepFields, RecordDropFields]
 
 data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
 
@@ -180,6 +184,21 @@ instance Hashable ExVarId where
 instance Lift ExVarId where
   liftTyped _ = error "unsupported"
 
+-- Vector + Lift
+newtype Vector' a = Vector' (Vector a)
+  deriving (Show, Eq, Functor, Foldable, Traversable)
+
+instance IsList (Vector' a) where
+  type Item (Vector' a) = a
+  fromList = Vector' . fromList
+  toList (Vector' v) = toList v
+
+-- Need Lift a constraint for liftTyped [a]
+instance (Lift a) ⇒ Lift (Vector' a) where
+  liftTyped ∷ ∀ (m ∷ Type → Type). (TH.Quote m) ⇒ Vector' a → TH.Code m (Vector' a)
+  liftTyped (Vector' v) =
+    [||Vector' (fromList $$(liftTyped (toList v)))||]
+
 data TermT
   = -- Term-level
 
@@ -194,6 +213,7 @@ data TermT
   | Unit
   | Sorry !Ident !TermT
   | Var !Int
+  | ListLit !(Vector' TermT)
   | -- Type-level
     Quantification !Quantifier !Ident !TermT !(Lambda TermT)
   | -- | Cedille: Π x : T | T’ / Fadeno: x : T -> T'
@@ -206,7 +226,7 @@ data TermT
   deriving (Show, Eq, Lift)
 
 typOf ∷ TermT → TermT
-typOf = App $ Builtin Type
+typOf = App $ Builtin TypePlus
 
 rowOf ∷ TermT → TermT
 rowOf = App $ Builtin Row
@@ -227,7 +247,7 @@ identOfBuiltin =
     Tag → "Tag"
     Row → "Row"
     Record → "Record"
-    Type → "Type+"
+    TypePlus → "Type+"
     Eq → "Eq"
     RecordGet → "record-get"
     RecordKeepFields → "record-keep-fields"
@@ -256,7 +276,7 @@ infxl a oper = a >>= infxl'
       <|> pure prev
 
 sepBy ∷ Parser' () → Parser' a → Parser' [a]
-sepBy sep x = ((:) <$> x <*> many (sep *> x)) <|> pure []
+sepBy with x = ((:) <$> x <*> many (with *> x)) <|> pure []
 
 -- Syntax is *a little* ambigious. I'm very sorry.
 
@@ -280,6 +300,7 @@ parsePrim = token do
     (NatLit <$> number)
       <|> (TagLit <$> ($(char '.') *> ident))
       <|> ( do
+              -- Record parsing
               token $(char '{')
               let parseField = do
                     n ← parsePrim
@@ -292,8 +313,15 @@ parsePrim = token do
                 x : xs → pure $ foldl1' (\a → Union a . Right) $ fmap (uncurry Field) (x :| xs)
                 [] → pure Unit
           )
+      <|> ( do
+              token $(char '[')
+              elems ← fromList <$> sepBy (token $(char '|')) parseTop
+              token $(char ']')
+              pure (ListLit elems)
+          )
       <|> (BuiltinsVar <$ (notFollowedBy $(string "fadeno") identSym))
       <|> ( Var <$> do
+              -- Variable parsing
               -- TODO: { x = 4 }
               Ident iName iOp ← notFollowedBy ident parseEq
               vars ← ask
@@ -304,7 +332,7 @@ parsePrim = token do
                   _ → pure $ length vars - n - 1
                 Nothing → err =<< getPos -- TODO: better errors, overall
           )
-      <|> ( $(char '(')
+      <|> ( $(char '(') -- Parentheses parsing
               *> parseTop
               <* $(char ')')
           )
@@ -333,7 +361,7 @@ parseTy =
         someEntries = do
           (ty, ki) ←
             token
-              $ ((,App (Builtin Type) $ NatLit 0) <$> ident)
+              $ ((,App (Builtin TypePlus) $ NatLit 0) <$> ident)
               <|> ($(char '(') *> ((,) <$> ident <*> kind) <* $(char ')'))
           Quantification q ty ki . Lambda <$> local (|> ty) manyEntries
         manyEntries =
@@ -524,6 +552,7 @@ isSimple =
         Field a b → complexity a *> complexity b
         Sorry _ _ → ping
         Var _ → ping
+        ListLit vs → ping *> traverse_ complexity vs
         Quantification _ _ b (Lambda c) → ping *> complexity b *> complexity c
         Pi b c → ping *> complexity b *> either (complexity . unLambda . snd) complexity c
         Union a b → complexity a *> either (complexity . unLambda . snd) complexity b
@@ -542,7 +571,7 @@ pTerm (oldPrec, vars) =
   withPrec oldPrec . \case
     Lam arg x →
       ( 0
-      , let sep = case unLambda x of
+      , let sep' = case unLambda x of
               Lam _ _ → " "
               _
                 | isSimple (unLambda x) → " "
@@ -550,7 +579,7 @@ pTerm (oldPrec, vars) =
          in annotate (color Magenta) "\\"
               <> pIdent arg
               <> annotate (color Magenta) "."
-              <> sep
+              <> sep'
               <> pTerm (0, vars |> arg) (unLambda x)
       )
     block@(Block{}) →
@@ -613,7 +642,7 @@ pTerm (oldPrec, vars) =
     Quantification q name kind ty →
       ( 5
       , let kind' = case kind of
-              App (Builtin Type) (NatLit 0) → mempty
+              App (Builtin TypePlus) (NatLit 0) → mempty
               _ → " :" <+> pTerm (5, vars) kind
             q' = case q of
               Forall → "forall"
@@ -670,7 +699,8 @@ pTerm (oldPrec, vars) =
     --      in
     --       "{" <> braceS <> renderFields knownFields <> renderRest <> braceE <> "}"
     --   )
-    Unit → (7, "{}") -- Shifted from 6
+    Unit → (7, "{}")
+    ListLit vec → (7, encloseSep "[" "]" "| " $ fmap (\x → pTerm (0, vars) x <> " ") (toList vec))
     Var x → (7, maybe ("@" <> pretty x) pIdent $ vars !? (length vars - x - 1))
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')

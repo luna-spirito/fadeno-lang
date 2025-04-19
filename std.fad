@@ -27,4 +27,4 @@ b = 5
 // Union = \cases.
 //   Record (meta : { .tag = Tag } /\ fadeno.record-get meta.tag cases)
 
-in 3 => 4 => 5 // fadeno.record-get
+in [3 => 4 => 5 | 8 ] // fadeno.record-get
