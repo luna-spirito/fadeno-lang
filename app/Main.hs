@@ -6,7 +6,7 @@ import Control.Algebra
 import Control.Carrier.Error.Church (ErrorC, runError)
 import Control.Carrier.Fresh.Church (FreshC, evalFresh)
 import Control.Carrier.Reader (ReaderC, runReader)
-import Control.Carrier.State.Church (StateC, evalState, runState)
+import Control.Carrier.State.Church (StateC, evalState, execState, runState)
 import Control.Carrier.Writer.Church (WriterC, execWriter, runWriter)
 import Control.Effect.Error (Error, Throw, throwError)
 import Control.Effect.Fresh (Fresh, fresh)
@@ -23,7 +23,7 @@ import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, splitAt, viewl, vi
 import GHC.Exts (IsList (..))
 import Normalize (EqRes (..), NormCtx (..), isEq, nested, nestedBy, normalize, normalizeFile, parseBQQ, rewrite, union)
 import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf, typOf)
-import Prettyprinter (Doc, annotate, indent, line, nest, pretty, (<+>))
+import Prettyprinter (Doc, annotate, group, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, filter, link, local, runReader, toList)
 import RIO.HashMap qualified as HM
@@ -433,6 +433,22 @@ rowGet mapTerm tag cont = go
 --     EqUnknown → cont LookupUnknown
 --     EqNot → rec (xs, rest)
 
+-- | Traverses all the values of a **record** with no free variables.
+traverseFields_ ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → () → m ()) → (TermT → m ()) → TermT → m ()
+traverseFields_ mapTerm f = go
+ where
+  unknown = stackError "Expected all fields to be known"
+  go = withMono
+    mapTerm
+    (lift unknown)
+    \_ → \case
+      Unit → pure ()
+      Field _ v → f v
+      Union a (Right b) → runSeqResolve do
+        withResolved \_ → go a
+        withResolved \exs → go (resolve exs b)
+      _ → unknown
+
 data InferMode a where
   Infer ∷ InferMode TermT
   Check ∷ TermT → InferMode ()
@@ -484,7 +500,7 @@ insertBinds new old = (bimap (nested <$>) nested <$> old) |> new
 
 -- | Either infers a normalized type for the value and context, or checks a value against the normalized type.
 infer ∷ ∀ sig m a. (Has Solve sig m) ⇒ Vector (Maybe TermT, TermT) → TermT → InferMode a → m a
-infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $ infer' t mode
+infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode mode) $ infer' t mode
  where
   -- Here, we will convert Checks to Infers.
   -- However, converting Infer to a Check when checking a term is hereby declared a deadly sin.
@@ -614,9 +630,13 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
     (Field n v, Infer) → runSeqResolve do
       withResolved \_ → infer binds n $ Check $ Builtin Tag
       withResolved \exs → recordOf . Field n <$> infer (resolveBinds exs binds) v Infer
-    (Union l (Right r), Infer) → runSeqResolve do
+    (Union l rE, Infer) → runSeqResolve do
       l' ← withResolved \_ → infer binds l Infer
-      r' ← withResolved \exs → infer (resolveBinds exs binds) (resolve exs r) Infer
+      r' ← withResolved \exs →
+        let binds' = resolveBinds exs binds
+         in case rE of
+              Right r → infer binds' (resolve exs r) Infer
+              Left (_, r) → scopedVar id $ infer (insertBinds (Nothing, recordOf $ normalize (fst <$> binds') l) $ resolveBinds exs binds) (unLambda r) Infer
       let
         withMono' f term =
           withMono
@@ -627,32 +647,73 @@ infer binds = \t mode → stackScope ("<" <> pTerm' t <> "> : " <> pMode mode) $
             )
             f
             term
+        checkRowTy ∷ TermT → StateC (Maybe TermT) m ()
+        checkRowTy =
+          traverseFields_
+            (\f () → get >>= traverse @Maybe f >>= put)
+            ( \t →
+                get >>= \case
+                  Nothing → put . Just =<< infer [] t Infer
+                  Just ofT' → runSeqResolve do
+                    withResolved \_ → lift $ subtype t ofT'
+                    withResolved \exs → put $ Just $ resolve exs ofT'
+            )
+        recordsAsRows a b = execState Nothing $ runSeqResolve $ do
+          withResolved \_ → checkRowTy a
+          withResolved \exs → checkRowTy (resolve exs b)
       withResolved \exs →
         withMono'
           ( \exs2 l'' →
               withMono'
                 ( \exs3 r'' →
                     case (resolve exs3 l'', r'') of
-                      (App (Builtin Record) a, App (Builtin Record) b) → pure $ App (Builtin Record) (Union a $ Right b)
                       (App (Builtin Row) a, _) → do
                         subtype r'' $ rowOf a
                         pure $ rowOf a
                       (_, App (Builtin Row) b) → do
                         subtype l'' $ rowOf b
                         pure $ rowOf b
+                      (App (Builtin Record) a, App (Builtin Record) b) →
+                        if isRight rE
+                          then pure $ App (Builtin Record) (Union a $ Right b)
+                          else -- \*screams*
+
+                            let t =
+                                  Quantification Forall (Ident "u") (Builtin U32)
+                                    $ Lambda
+                                    $ Quantification Forall (Ident "a") (typOf $ Var 0)
+                                    $ Lambda
+                                    $ rowOf
+                                    $ typOf
+                                    $ Var 0
+                             in maybe t rowOf <$> recordsAsRows a b
                       _ → stackError "Invalid operands for /\\"
                 )
                 (resolve exs2 r')
           )
           (resolve exs l')
-    -- withMono
-    --   (mapTermFor mode)
-    --   _
-    --   _
-    --   _
-
-    -- runSeqResolve
-    --   $ (union <$> (withResolved \_ → infer binds l Infer) <*> (withResolved \exs → infer (resolveBinds exs binds) r Infer))
+    -- (Union l (Left (_, r)), Infer) → runSeqResolve do
+    --   l' ← withResolved \_ → infer binds l Infer
+    --   let
+    --     checkRowTy ofT = execState ofT . traverseFields_
+    --       (\f () → get >>= f >>= put)
+    --       (\t → get >>= \case
+    --         Nothing → put . Just =<< infer [] t Infer
+    --         Just ofT' → runSeqResolve do
+    --           withResolved \_ → subtype t ofT'
+    --           withResolved \exs → put $ Just $ resolve exs ofT')
+    --   withResolved \exs → withMono
+    --     (mapTermFor mode)
+    --     (rowOf <$> subExVar "t" Nothing)
+    --     (\exs2 lT → runSeqResolve do
+    --       rowT ← withResolved \_ → case lT of
+    --         App (Builtin Row) bingo → pure $ Just bingo
+    --         App (Builtin Record) weh → checkRowTy Nothing weh
+    --         _ → stackError "Not a row"
+    --       r' ← withResolved \exs3 → infer (insertBinds (Nothing, recordOf $ resolve) $ resolveBinds (exs <> exs2 <> exs3) binds) (unLambda r) Infer
+    --       _
+    --     )
+    --     l'
     (Unit, Infer) → pure $ recordOf Unit
     -- (Field n v, Check (App (Builtin Record) row)) → checkFields
     -- res ← rowGet
@@ -1273,27 +1334,12 @@ subtype = \a b →
 
     -- Record/Row types (requires structural subtyping logic)
     (App (Builtin Record) row1, App (Builtin Record) row2) → subtype row1 row2 -- Delegate to row subtyping
-    (App (Builtin Row) fields1, App (Builtin Row) fields2) →
-      -- TODO: Implement proper row subtyping (width and depth) using FieldsLit structure and potentially lookupField logic.
-      stackError $ "Row subtyping not implemented yet:" <+> pTerm' fields1 <+> "<:" <+> pTerm' fields2
+    (App (Builtin Row) fields1, App (Builtin Row) fields2) → subtype fields1 fields2
     (App (Builtin Record) fields0, App (Builtin Row) fieldsTy0) →
-      let
-        unknownShape = stackError "Unknown shape when checking for Row"
-        go fields fieldsTy =
-          withMono
-            (const pure)
-            (lift unknownShape)
-            ( \_ → \case
-                Unit → pure ()
-                Field _ v → subtype v fieldsTy
-                Union l (Right r) → runSeqResolve do
-                  withResolved \_ → go l fieldsTy
-                  withResolved \exs → go r (resolve exs fieldsTy)
-                _ → unknownShape
-            )
-            fields
-       in
-        go fields0 fieldsTy0
+      traverseFields_
+        (const pure)
+        (\ty → subtype ty fieldsTy0)
+        fields0
     -- Application (App f1 a1 <: App f2 a2) - Very restricted for now
     (App f1 a1, App f2 a2) → case isEq f1 f2 of
       EqYes → case isEq a1 a2 of
