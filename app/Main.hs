@@ -6,28 +6,24 @@ import Control.Algebra
 import Control.Carrier.Error.Church (ErrorC, runError)
 import Control.Carrier.Fresh.Church (FreshC, evalFresh)
 import Control.Carrier.Reader (ReaderC, runReader)
-import Control.Carrier.State.Church (StateC, evalState, execState, runState)
+import Control.Carrier.State.Church (StateC, execState, runState)
 import Control.Carrier.Writer.Church (WriterC, execWriter, runWriter)
 import Control.Effect.Error (Error, Throw, throwError)
 import Control.Effect.Fresh (Fresh, fresh)
 import Control.Effect.Lift (Lift, sendIO)
 import Control.Effect.Reader (Reader, ask, local)
-import Control.Effect.State (State, get, modify, put, state)
+import Control.Effect.State (get, put)
 import Control.Effect.Writer (Writer, censor, listen, tell)
 import Data.ByteString.Char8 (pack)
-import Data.ByteString.Char8 qualified as BS
-import Data.Foldable (foldrM)
-import Data.IntMap qualified as IM
-import Data.List (sort, sortBy)
-import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, splitAt, viewl, viewr, (!?), (|>))
+import Data.List (sortBy)
+import Data.RRBVector (Vector, viewl, (!?), (|>))
 import GHC.Exts (IsList (..))
-import Normalize (EqRes (..), NormCtx (..), isEq, nested, nestedBy, normalize, normalizeFile, parseBQQ, rewrite, union)
+import Normalize (EqRes (..), isEq, nested, nestedBy, normalize, parseBQQ, rewrite, union)
 import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf, typOf)
 import Prettyprinter (Doc, annotate, group, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, filter, link, local, runReader, toList)
 import RIO.HashMap qualified as HM
-import RIO.Partial qualified as P
 
 -- TODO: You currently don't perform `resolve` in terms processed...
 -- This is probably an error.
@@ -176,7 +172,7 @@ scopedUniVar mapTerm uni1 act = do
   mapTerm ensureNotOcc res
 
 freshIdent ∷ (Has Solve sig m) ⇒ m Ident
-freshIdent = Ident . ("/" <>) . pack . show <$> fresh
+freshIdent = (`Ident` False) . ("/" <>) . pack . show <$> fresh
 
 scopedExVar ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → Int → m a → m a
 scopedExVar mapTerm ex1 act = do
@@ -276,8 +272,9 @@ withMono mapTerm onMeta onOther = go
 subExVar ∷ (Has (Reader (Ident, ExVarId, Maybe TermT) :+: Fresh) sig m) ⇒ ByteString → Maybe TermT → m TermT
 subExVar subName subTy = do
   subI ← fresh
-  (Ident baseName, ExVarId baseI, _ ∷ Maybe TermT) ← ask
-  pure $ ExVar (Ident $ baseName <> "/" <> subName) (ExVarId $ baseI <> [subI]) subTy
+  (Ident baseName _, ExVarId baseI, _ ∷ Maybe TermT) ← ask
+  -- TODO: check that such ignore doesn't destroy anything.
+  pure $ ExVar (Ident (baseName <> "/" <> subName) False) (ExVarId $ baseI <> [subI]) subTy
 
 data LookupRes a
   = LookupFound !a
@@ -679,9 +676,9 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
                           else -- \*screams*
 
                             let t =
-                                  Quantification Forall (Ident "u") (Builtin U32)
+                                  Quantification Forall (Ident "u" False) (Builtin U32)
                                     $ Lambda
-                                    $ Quantification Forall (Ident "a") (typOf $ Var 0)
+                                    $ Quantification Forall (Ident "a" False) (typOf $ Var 0)
                                     $ Lambda
                                     $ rowOf
                                     $ typOf

@@ -18,7 +18,13 @@ Record = fadeno.Record
 /: forall (u : U32) (a : Type+ u). a -> a
 id = \x. x
 
-// Union = Record (meta : { .tag = Tag } /\ { .val = U32 })
-Union = \cases. Record (meta : { .tag = Tag } /\ fadeno.record-get meta.tag cases)
+a = 4
+/: forall (u1 : U32) (k : Type+ u1) (u2 : U32) (v : Type+ u2). k -> v -> Record { .k = k | .v = v }
+_=>_ = \k v. { .k = k | .v = v }
+b = 5
 
-in fadeno.record-get
+// Union = Record (meta : { .tag = Tag } /\ { .val = U32 })
+// Union = \cases.
+//   Record (meta : { .tag = Tag } /\ fadeno.record-get meta.tag cases)
+
+in 3 => 4 => 5 // fadeno.record-get
