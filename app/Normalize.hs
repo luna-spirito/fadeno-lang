@@ -7,21 +7,6 @@ import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (BlockT (..), BuiltinT (..), Lambda (..), OpT (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
 import RIO hiding (Reader, Vector, ask, drop, link, local, replicate, runReader, to, toList)
 
--- class HasTerm m a where
---   extractTerm ∷ a → m TermT
---   mkFromTerm ∷ Proxy m → TermT → a
-
--- instance (Applicative m) ⇒ HasTerm m TermT where
---   extractTerm t = pure t
---   mkFromTerm _ = id
-
--- instance (Applicative m) ⇒ HasTerm m (Maybe TermT, TermT) where
---   extractTerm t = pure $ fst t
---   mkFromTerm _ = (,undefined) . Just
-
--- TODO: implement REWRITES, and implement ExVar substitution via REWRITES
--- NOTE: normalize shouldn't process both normalizations and rewrites at the same time.
-
 -- | Intensional equality.
 data EqRes
   = EqYes -- provably eq
@@ -209,14 +194,6 @@ rewrite onLet onNest rewriter = go
     Field name val → Field <$> go via name <*> go via val
     Unit → pure Unit
     ListLit (Vector' vec) → ListLit . Vector' <$> traverse (go via) vec
-    -- FieldsLit fields →
-    --   let withFields f = case fields of
-    --         Left row → Left . Lambda <$> f (onNest via) (unLambda row)
-    --         Right record → Right <$> f via record
-    --    in FieldsLit <$> withFields \via' (Fields knownFields rest) →
-    --         Fields
-    --           <$> traverse (bitraverse (go via') (go via')) knownFields
-    --           <*> traverse (go via') rest
     Sorry n x → Sorry n <$> go via x
     Var i → pure $ Var i
     Quantification q x a b → Quantification q x <$> go via a <*> (Lambda <$> go (onNest via) (unLambda b))
@@ -286,8 +263,6 @@ rewriteTerm what0 with0 =
 
 applyLambda ∷ Lambda TermT → TermT → TermT
 applyLambda bod val = normalize [Just val] $ unLambda bod
-
---  extractVar var = maybe (pure Nothing) extractTerm $ HM.lookup var binds
 
 normalizeBuiltin ∷ TermT → TermT
 normalizeBuiltin = normalize (Just . Builtin <$> fromList builtinsList)

@@ -42,25 +42,6 @@ import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, encloseS
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
 import RIO hiding (Reader, Vector, ask, local, toList)
 
--- newtype RevList a = UnsafeRevList {unUnsafeRevList ∷ [a]} deriving (Functor, Show)
-
--- instance Semigroup (RevList a) where
---   UnsafeRevList a <> UnsafeRevList b = UnsafeRevList $ b <> a
-
--- instance Monoid (RevList a) where
---   mempty = []
-
--- revSnoc ∷ RevList a → a → RevList a
--- revSnoc (UnsafeRevList ls) x = UnsafeRevList $ x : ls
-
--- revUnsnoc ∷ RevList a → Maybe (RevList a, a)
--- revUnsnoc (UnsafeRevList x) = (\(v, l) → (UnsafeRevList l, v)) <$> uncons x
-
--- instance IsList (RevList a) where
---   type Item (RevList a) = a
---   fromList ls = UnsafeRevList $ reverse ls
---   toList (UnsafeRevList ls) = reverse ls
-
 data OpT
   = Add
   | Sub
@@ -149,8 +130,6 @@ To the above constructs, Cedille adds the following, discussed more below:
   { t ≃ t’ } – untyped equality between terms t and t’.
   ∀ x : T . T’ – the dependent type for functions taking in an erased argument x of type T (aka implicit product)
 -}
-
--- TODO: Unpack
 
 data BuiltinT
   = U32
@@ -434,16 +413,6 @@ parseMath0 =
         _ → empty
     )
 
--- someNonEmpty ∷ (Alternative f) ⇒ f a → f (NonEmpty a)
--- someNonEmpty f = (:|) <$> f <*> many f
-
--- parseNode :: Parser' TermT
--- parseNode = do
--- captures ← some $ $(char '-') *> ident
--- pos ← isJust <$> optional $(char '+')
--- \$(char '>')
--- Node captures pos <$> parseTop
-
 -- 1
 parseBlock ∷ Parser' TermT
 parseBlock = do
@@ -559,9 +528,6 @@ isSimple =
         Builtin _ → ping
         BuiltinsVar → ping
         ExVar{} → ping
-        -- case unsafePerformIO (readIORef x) of
-        -- Left y → complexityPortable y
-        -- Right _ → ping
         UniVar _ _ _ → ping
    in runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
 
