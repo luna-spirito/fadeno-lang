@@ -1,7 +1,7 @@
 module Normalize where
 
 import Data.Foldable1 (foldl1')
-import Data.RRBVector (Vector, drop, viewl, (|>))
+import Data.RRBVector (Vector, drop, findIndexL, viewl, (!?), (|>))
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (BlockT (..), BuiltinT (..), Lambda (..), OpT (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
@@ -49,8 +49,6 @@ isEq = curry \case
   (TagLit a, TagLit b)
     | a == b → EqYes
   (TagLit _, _) → EqNot
-  (Unit, Unit) → EqYes
-  (Unit, _) → EqNot
   (Quantification q1 _n1 k1 t1, Quantification q2 _n2 k2 t2)
     | q1 == q2 → forceEq k1 k2 $ isEq (unLambda t1) (unLambda t2)
   (Quantification{}, _) → EqUnknown
@@ -68,8 +66,6 @@ isEq = curry \case
   (Pi inT1 (Right outT1), Pi inT2 (Right outT2)) →
     forceEq inT1 inT2 $ isEq outT1 outT2
   (Pi{}, _) → EqNot
-  (Field a1 b1, Field a2 b2) → forceEq a1 a2 $ isEq b1 b2
-  (Field{}, _) → EqNot
   (Union _ _, _) → error "TODO isEq Union"
   (ListLit (Vector' (viewl → Just (x, xs))), ListLit (Vector' (viewl → Just (y, ys)))) →
     forceEq x y $ isEq (ListLit $ Vector' xs) (ListLit $ Vector' ys)
@@ -86,22 +82,29 @@ isEq = curry \case
       _ → EqUnknown
 
 builtinsVar ∷ TermT
-builtinsVar = case builtinsList of
-  [] → Unit
-  (x : xs) → foldl1' (\a → Union a . Right) $ (\b → Field (TagLit $ identOfBuiltin b) (Builtin b)) <$> (x :| xs)
-
+builtinsVar = RecordLit $ fromList $ (\b → (TagLit $ identOfBuiltin b, Builtin b)) <$> builtinsList
 data NormCtx
   = NormBinds !(Vector (Maybe TermT))
   | NormRewrite !TermT !TermT -- on normalized
 
-data TagsetDropRes = TDFound !TermT | TDMissing | TDUnknown
+data ListDropRes = TDFound !TermT | TDMissing | TDUnknown
 
 -- | Produces a non-dependent union.
 union ∷ TermT → TermT → TermT
 union = curry \case
-  (Unit, r) → r
-  (l, Unit) → l
+  (RecordLit l, RecordLit r) → RecordLit $ l <> r
   (l, r) → Union l $ Right r
+
+unconsField ∷ TermT → Maybe ((TermT, TermT), TermT)
+unconsField = \case
+  Union l (Right (Union m (Right r))) → unconsField $ union l $ union m r
+  Union (RecordLit (Vector' fi)) (Right r) → case viewl fi of
+    Just (x, xs) → Just (x, union (RecordLit $ Vector' xs) r)
+    Nothing → unconsField r
+  RecordLit (Vector' fi) → case viewl fi of
+    Just (x, xs) → Just (x, RecordLit $ Vector' xs)
+    Nothing → Nothing
+  _ → Nothing
 
 -- | Processes application of `f` onto `a`.
 postApp ∷ TermT → TermT → TermT
@@ -109,54 +112,45 @@ postApp f a = case f of
   Lam _ bod → applyLambda bod a
   App (Builtin RecordGet) name1 →
     let
-      search = \case
-        Field name2 val
-          | name1 == name2 → val
-          | otherwise → search Unit
-        Union (Union l (Right m)) (Right r) → search $ Union l $ Right $ Union m $ Right r
-        Union (Field name2 val) (Right r)
-          | name1 == name2 → val
-          | TagLit _ ← name1, TagLit _ ← name2 → search r
-        x → recordGet name1 x
+      search a' = case unconsField a' of
+        Nothing → recordGet name1 a'
+        Just ((name2, v), rest) → case isEq name1 name2 of
+          EqYes → v
+          EqNot → search rest
+          EqUnknown → recordGet name1 a'
      in
       search a
   App (Builtin RecordKeepFields) tags → recordSelectFields True tags a
   App (Builtin RecordDropFields) tags → recordSelectFields False tags a
   _ → App f a
  where
-  tagsetDrop ∷ TermT → TermT → TagsetDropRes
-  tagsetDrop x = \case
-    Union l (Right r) → case tagsetDrop x l of
-      TDFound l' → TDFound $ union l' r
-      TDUnknown → TDUnknown
-      TDMissing → tagsetDrop x r
-    Unit → TDMissing
-    Field n _ → case isEq x n of
-      EqYes → TDFound Unit
-      EqNot → TDMissing
-      EqUnknown → TDUnknown
+  -- Drop `x` from ListLit.
+  listLitDrop ∷ TermT → TermT → ListDropRes
+  listLitDrop x = \case
+    ListLit (Vector' fi) → case viewl fi of
+      Nothing → TDMissing
+      Just (name, xs) → case isEq x name of
+        EqYes → TDFound $ ListLit $ Vector' xs
+        EqNot → TDMissing
+        EqUnknown → TDUnknown
     _ → TDUnknown
 
-  recordSelectFields keep tags fields = case tags of
-    Unit → if keep then fields else Unit
+  recordSelectFields keep tags fields0 = case tags of
+    ListLit (Vector' (null → True)) → if keep then fields0 else RecordLit []
     _ →
       let
         stuck =
           let fun = if keep then RecordKeepFields else RecordDropFields
-           in App (App (Builtin fun) tags) fields
-        p n v right = case tagsetDrop n tags of
-          TDFound tags' →
-            (if keep then union (Field n v) else id) $ recordSelectFields keep tags' right
-          TDMissing →
-            (if keep then id else union (Field n v)) $ recordSelectFields keep tags right
-          TDUnknown → stuck
+           in App (App (Builtin fun) tags) fields0
        in
-        case fields of
-          Unit → Unit
-          Union (Union l (Right m)) (Right r) → recordSelectFields keep tags $ Union l $ Right $ Union m $ Right r
-          Union (Field n v) (Right r) → p n v r
-          Field n v → p n v Unit
-          _ → stuck
+        case unconsField fields0 of
+          Nothing → stuck
+          Just ((n, v), fields) → case listLitDrop n tags of
+            TDFound tags' →
+              (if keep then union (RecordLit [(n, v)]) else id) $ recordSelectFields keep tags' fields
+            TDMissing →
+              (if keep then id else union (RecordLit [(n, v)])) $ recordSelectFields keep tags fields
+            TDUnknown → stuck
 
 -- Rewrites & simplifies. In that order. Doesn't rewrite the simplified result.
 rewrite ∷ ∀ f via. (Monad f) ⇒ (TermT → via → via) → (via → via) → (TermT → via → f (Maybe TermT)) → via → TermT → f TermT
@@ -191,9 +185,8 @@ rewrite onLet onNest rewriter = go
       pure $ postApp f' a'
     NatLit x → pure $ NatLit x
     TagLit x → pure $ TagLit x
-    Field name val → Field <$> go via name <*> go via val
-    Unit → pure Unit
     ListLit (Vector' vec) → ListLit . Vector' <$> traverse (go via) vec
+    RecordLit (Vector' vec) → RecordLit . Vector' <$> traverse (bitraverse (go via) (go via)) vec
     Sorry n x → Sorry n <$> go via x
     Var i → pure $ Var i
     Quantification q x a b → Quantification q x <$> go via a <*> (Lambda <$> go (onNest via) (unLambda b))
@@ -209,9 +202,7 @@ rewrite onLet onNest rewriter = go
       a' ← go via a
       b' ← either (\(n, b') → Left . (n,) . Lambda <$> go (onNest via) (unLambda b')) (fmap Right . go via) b
       pure $ case (a', b') of
-        (Unit, _) → either (\(_, b'') → normalize [Just Unit] $ unLambda b'') id b'
-        (_, Right Unit) → a'
-        (_, Left (_, Lambda Unit)) → a'
+        (RecordLit a'', Right (RecordLit b'')) → RecordLit $ a'' <> b''
         _ → Union a' b'
     ExVar n i t → ExVar n i <$> traverse (go via) t
     UniVar n i t → UniVar n i <$> go via t

@@ -29,7 +29,6 @@ import Control.Carrier.State.Church (evalState, get, modify)
 import Control.Effect.Empty qualified as E
 import Data.ByteString.Char8 (pack)
 import Data.ByteString.Char8 qualified as BS
-import Data.Foldable1 (foldl1')
 import Data.Hashable (Hashable (..))
 import Data.Kind (Type)
 import Data.RRBVector (Vector, findIndexR, (!?), (|>))
@@ -136,6 +135,7 @@ data BuiltinT
   | Tag
   | Row
   | Record
+  | List
   | TypePlus -- Type+ 0, Type+ 1, ..., Type+ Aleph
   | Eq
   | RecordGet -- Second-class!
@@ -144,7 +144,7 @@ data BuiltinT
   -- If -- TODO: Make Choice counterpart for Record
   deriving (Show, Eq, Lift)
 builtinsList ∷ [BuiltinT]
-builtinsList = [U32, Tag, Row, Record, TypePlus, RecordGet, RecordKeepFields, RecordDropFields]
+builtinsList = [U32, Tag, Row, Record, List, TypePlus, RecordGet, RecordKeepFields, RecordDropFields]
 
 data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
 
@@ -165,7 +165,7 @@ instance Lift ExVarId where
 
 -- Vector + Lift
 newtype Vector' a = Vector' (Vector a)
-  deriving (Show, Eq, Functor, Foldable, Traversable)
+  deriving (Show, Eq, Functor, Foldable, Traversable, Semigroup)
 
 instance IsList (Vector' a) where
   type Item (Vector' a) = a
@@ -188,11 +188,10 @@ data TermT
   | App !TermT !TermT
   | NatLit !Word32
   | TagLit !Ident
-  | Field !TermT !TermT
-  | Unit
   | Sorry !Ident !TermT
   | Var !Int
   | ListLit !(Vector' TermT)
+  | RecordLit !(Vector' (TermT, TermT))
   | -- Type-level
     Quantification !Quantifier !Ident !TermT !(Lambda TermT)
   | -- | Cedille: Π x : T | T’ / Fadeno: x : T -> T'
@@ -226,6 +225,7 @@ identOfBuiltin =
     Tag → "Tag"
     Row → "Row"
     Record → "Record"
+    List → "List"
     TypePlus → "Type+"
     Eq → "Eq"
     RecordGet → "record-get"
@@ -286,11 +286,9 @@ parsePrim = token do
                     parseEq
                     v ← parseTop
                     pure (n, v)
-              knownFields ← sepBy (token $(char '|')) parseField
+              knownFields ← fromList <$> sepBy (token $(char '|')) parseField
               token $(char '}')
-              case knownFields of
-                x : xs → pure $ foldl1' (\a → Union a . Right) $ fmap (uncurry Field) (x :| xs)
-                [] → pure Unit
+              pure (RecordLit knownFields) -- Use RecordLit for parsed fields
           )
       <|> ( do
               token $(char '[')
@@ -517,11 +515,10 @@ isSimple =
         App f a → complexity f *> complexity a
         NatLit _ → ping
         TagLit _ → ping
-        Unit → pure ()
-        Field a b → complexity a *> complexity b
         Sorry _ _ → ping
         Var _ → ping
         ListLit vs → ping *> traverse_ complexity vs
+        RecordLit fields → ping *> traverse_ (\(k, v) → complexity k *> complexity v) fields
         Quantification _ _ b (Lambda c) → ping *> complexity b *> complexity c
         Pi b c → ping *> complexity b *> either (complexity . unLambda . snd) complexity c
         Union a b → complexity a *> either (complexity . unLambda . snd) complexity b
@@ -643,38 +640,20 @@ pTerm (oldPrec, vars) =
     BuiltinsVar → (7, "fadeno")
     NatLit x → (7, pretty x)
     TagLit x → (7, "." <> pIdent x)
-    Field name val → (7, "{" <+> pTerm (7, vars) name <+> "=" <+> pTerm (7, vars) val <+> "}")
-    -- Field name val →
-    --   ( 6
-    --   , let
-    --       -- (vars', Fields knownFields rest) = case fields of
-    --       --   Left (Lambda a) → (vars |> Ident "self", a)
-    --       --   Right a → (vars, a)
-    --       field (n, v) = pTerm (6, vars) n <+> "=" <+> pTerm (0, vars) v
-    --       -- TODO: separator other than " " if not isSimple.
-    --       renderRest = case rest of
-    --         Nothing → mempty
-    --         Just rest' → "|| " <> pTerm (2, vars') rest' <> " "
-    --       renderFields = \case
-    --         [] → mempty
-    --         [x] → " " <> field x <> " "
-    --         x : xs → " " <> field x <> " |" <> renderFields xs
-    --       (braceS, braceE) = case fields of
-    --         Left _ → ("(", ")")
-    --         Right _ → (mempty, mempty)
-    --      in
-    --       "{" <> braceS <> renderFields knownFields <> renderRest <> braceE <> "}"
-    --   )
-    Unit → (7, "{}")
-    ListLit vec → (7, encloseSep "[" "]" "| " $ fmap (\x → pTerm (0, vars) x <> " ") (toList vec))
+    RecordLit fields →
+      ( 7
+      , encloseSep
+          (annotate (color White) "{")
+          (annotate (color White) "}")
+          (annotate (color White) " | ")
+          (fmap (\(n, v) → pTerm (7, vars) n <+> annotate (color Cyan) "=" <+> pTerm (0, vars) v) (toList fields))
+      )
+    ListLit vec → (7, encloseSep "[" "]" " | " $ fmap (\x → pTerm (0, vars) x) (toList vec))
     Var x → (7, maybe ("@" <> pretty x) pIdent $ vars !? (length vars - x - 1))
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
     ExVar n l t → (7, "(exi@" <> pretty (show l) <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) t') t <> ")")
-    -- case unsafePerformIO (readIORef x) of
-    -- Left t → (oldPrec, pTerm (oldPrec, vars) $ unport t $ length vars)
-    -- Right (n, l, t) → (6, "(exi@" <> pretty l <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) (unport t' $ length vars)) t <> ")")
     UniVar x' l t → (7, "(uni@" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
 
 pTerm' ∷ TermT → Doc AnsiStyle
