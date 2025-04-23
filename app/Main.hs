@@ -16,7 +16,7 @@ import Control.Effect.State (get, put)
 import Control.Effect.Writer (Writer, censor, listen, tell)
 import Data.ByteString.Char8 (pack)
 import Data.List (sortBy)
-import Data.RRBVector (Vector, viewl, (!?), (<|), (|>))
+import Data.RRBVector (Vector, deleteAt, ifoldr, ifoldrM, viewl, (!?), (<|), (|>))
 import GHC.Exts (IsList (..))
 import Normalize (EqRes (..), isEq, nested, nestedBy, normalize, parseBQQ, rewrite, unconsField, union)
 import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf, typOf)
@@ -376,6 +376,9 @@ resolveMode exs = \case
 insertBinds ∷ (Maybe TermT, TermT) → Vector (Maybe TermT, TermT) → Vector (Maybe TermT, TermT)
 insertBinds new old = (bimap (nested <$>) nested <$> old) |> new
 
+bottom ∷ TermT
+bottom = [parseBQQ| forall (u : U32) (a : Type+ u). a |]
+
 -- | Either infers a normalized type for the value and context, or checks a value against the normalized type.
 infer ∷ ∀ sig m a. (Has Solve sig m) ⇒ Vector (Maybe TermT, TermT) → TermT → InferMode a → m a
 infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode mode) $ infer' t mode
@@ -470,18 +473,44 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
                 _ → stackError "Not a record"
             )
             (resolve exs recordT)
+    (App f a, Infer) → runSeqResolve do
+      fTy ← withResolved \_ → infer binds f Infer
+      withResolved \exs →
+        withMono
+          id
+          (Pi <$> subExVar "in" Nothing <*> (Right <$> subExVar "out" Nothing))
+          ( \exs2 → \case
+              Pi inT outTE → runSeqResolve do
+                withResolved \_ → infer (resolveBinds (exs <> exs2) binds) a $ Check $ inT
+                withResolved \exs3 → pure $ case outTE of
+                  Left (_, outT) → resolve exs3 $ normalize [Just a] $ unLambda outT
+                  Right outT → resolve exs3 outT
+              t → stackError $ "inferApp " <> pTerm' t
+          )
+          fTy
     (RecordLit flds, Infer) → runSeqResolve do
       rowFields ← for flds \(n, v) → do
         withResolved \exs → infer (resolveBinds exs binds) n $ Check $ Builtin Tag
         vTy ← withResolved \exs → infer (resolveBinds exs binds) v Infer
         pure (n, vTy)
       pure $ recordOf $ RecordLit rowFields
+    (ListLit values, Infer) →
+      App (Builtin List) . fromMaybe bottom . fst <$> execState (Nothing, binds) do
+        for_ values \v → do
+          (unifiedTy0M, binds0) ← get
+          runSeqResolve do
+            unifiedTy ← withResolved \_ → case unifiedTy0M of
+              Nothing → infer binds v Infer
+              Just unifiedTy0 → runSeqResolve do
+                withResolved \_ → infer binds v (Check unifiedTy0)
+                withResolved \exs → pure (resolve exs unifiedTy0)
+            withResolved \exs → put (Just unifiedTy, resolveBinds exs binds0)
     (Union l rE, Infer) →
       let
         -- TODO: what should be here?
         withKnown t f = withMono id (stackError "TODO Union infer") (\_exs → f) t
         withKnownFields' = withKnownFields id
-        bottomRow = Quantification Forall (Ident "u" False) (Builtin U32) $ Lambda $ Quantification Forall (Ident "row" False) (rowOf $ Var 0) $ Lambda $ Var 0
+        bottomRow = [parseBQQ| forall (u : U32) (row : Row (Type+ u)). row |]
         unionT lT rT = case (lT, rT, rE) of
           (App (Builtin Record) lR, App (Builtin Record) rR, Right _) → pure $ recordOf $ union lR rR
           (App (Builtin Record) lR, App (Builtin Record) rR, Left (_, Lambda _)) →
@@ -510,21 +539,6 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
                   rE
           withResolved \exs →
             withKnown (resolve exs lT) \lT' → withKnown rT \rT' → unionT lT' rT'
-    (App f a, Infer) → runSeqResolve do
-      fTy ← withResolved \_ → infer binds f Infer
-      withResolved \exs →
-        withMono
-          id
-          (Pi <$> subExVar "in" Nothing <*> (Right <$> subExVar "out" Nothing))
-          ( \exs2 → \case
-              Pi inT outTE → do
-                infer (resolveBinds (exs <> exs2) binds) a $ Check $ inT
-                pure $ case outTE of
-                  Left (_, outT) → normalize [Just a] $ unLambda outT
-                  Right outT → outT
-              t → stackError $ "inferApp " <> pTerm' t
-          )
-          fTy
     (NatLit _, Infer) → pure $ Builtin U32
     (TagLit _, Infer) → pure $ Builtin Tag
     (Var i, Infer) → case binds !? (length binds - i - 1) of
@@ -707,6 +721,24 @@ subtype = \a b →
     (App (Builtin Record) fieldsVal, App (Builtin Row) fieldsTy) →
       withKnownFields (const pure) fieldsVal \fi →
         runState (\_ _ → pure ()) (Just fieldsTy) $ unifyFields fi
+    (RecordLit (Vector' fields1), RecordLit fields2) →
+      let
+        fields1Drop fields1' name ty =
+          ifoldr
+            ( \i (name1, ty1) rec → case isEq name name1 of
+                EqYes → runSeqResolve do
+                  withResolved \_ → subtype ty1 ty
+                  withResolved \exs → pure $ bimap (resolve exs) (resolve exs) <$> deleteAt i fields1'
+                EqUnknown → stackError "Unable to check field equality when subtyping"
+                EqNot → rec
+            )
+            (stackError "Missing field from left side when subtyping")
+            fields1'
+       in
+        foldM_
+          (\fields1' (name, ty) → fields1Drop fields1' name ty)
+          fields1
+          fields2
     -- Application (App f1 a1 <: App f2 a2) - Very restricted for now
     (App f1 a1, App f2 a2) → case isEq f1 f2 of
       EqYes → case isEq a1 a2 of

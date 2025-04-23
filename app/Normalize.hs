@@ -1,7 +1,10 @@
 module Normalize where
 
+import Control.Carrier.Error.Church (runError)
+import Control.Effect.Error (throwError)
+import Data.Foldable (foldrM)
 import Data.Foldable1 (foldl1')
-import Data.RRBVector (Vector, drop, findIndexL, viewl, (!?), (|>))
+import Data.RRBVector (Vector, deleteAt, drop, findIndexL, ifoldr, ifor_, viewl, (!?), (|>))
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (BlockT (..), BuiltinT (..), Lambda (..), OpT (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
@@ -127,12 +130,15 @@ postApp f a = case f of
   -- Drop `x` from ListLit.
   listLitDrop ∷ TermT → TermT → ListDropRes
   listLitDrop x = \case
-    ListLit (Vector' fi) → case viewl fi of
-      Nothing → TDMissing
-      Just (name, xs) → case isEq x name of
-        EqYes → TDFound $ ListLit $ Vector' xs
-        EqNot → TDMissing
-        EqUnknown → TDUnknown
+    ListLit (Vector' fi) →
+      ifoldr
+        ( \i n rec → case isEq x n of
+            EqYes → TDFound $ ListLit $ Vector' $ deleteAt i fi
+            EqNot → rec
+            EqUnknown → TDUnknown
+        )
+        TDMissing
+        fi
     _ → TDUnknown
 
   recordSelectFields keep tags fields0 = case tags of
