@@ -580,6 +580,7 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
       pure
         $ App (Builtin Record)
         $ RecordLit (fromList $ (\b → (TagLit $ identOfBuiltin b, typOfBuiltin b)) <$> builtinsList)
+    (UniVar _n _i ty, Infer) → pure ty
     (k, Infer) → error $ show k
     (term, Check c) → stackScope ("check via infer" <+> pTerm' term <+> ":" <+> pTerm' c) $ runSeqResolve do
       ty ← withResolved \_ → infer binds term Infer
@@ -733,6 +734,7 @@ subtype = \a b →
         -- If one level is existential, unify it with the other level constraint.
         (ExVar nA exA tyA, lvl2) → subtypeMeta nA exA tyA lvl2
         (lvl1, ExVar nB exB tyB) → subtypeMeta nB exB tyB lvl1
+        (_, _) | EqYes ← isEq a b → pure ()
         -- TODO: Handle Op for level arithmetic?
         _ → stackError $ "Cannot subtype universes with levels:" <+> pTerm' a <+> "<=" <+> pTerm' b
 

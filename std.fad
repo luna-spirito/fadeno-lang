@@ -8,8 +8,8 @@ Type = Type+ 0
 U32 = fadeno.U32
 /: Type
 Tag = fadeno.Tag
-// /: forall (u : U32). Type+ u -> Type+ u
-// List = fadeno.List
+/: forall (u : U32). Type+ u -> Type+ u
+List = fadeno.List
 
 // TODO: Type
 Row = fadeno.Row
