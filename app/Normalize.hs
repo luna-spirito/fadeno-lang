@@ -1,10 +1,6 @@
 module Normalize where
 
-import Control.Carrier.Error.Church (runError)
-import Control.Effect.Error (throwError)
-import Data.Foldable (foldrM)
-import Data.Foldable1 (foldl1')
-import Data.RRBVector (Vector, deleteAt, drop, findIndexL, ifoldr, ifor_, viewl, (!?), (|>))
+import Data.RRBVector (Vector, deleteAt, drop, ifoldr, viewl, (|>))
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (BlockT (..), BuiltinT (..), Lambda (..), OpT (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
@@ -52,6 +48,9 @@ isEq = curry \case
   (TagLit a, TagLit b)
     | a == b → EqYes
   (TagLit _, _) → EqNot
+  (BoolLit a, BoolLit b)
+    | a == b → EqYes
+  (BoolLit _, _) → EqNot
   (Quantification q1 _n1 k1 t1, Quantification q2 _n2 k2 t2)
     | q1 == q2 → forceEq k1 k2 $ isEq (unLambda t1) (unLambda t2)
   (Quantification{}, _) → EqUnknown
@@ -191,6 +190,7 @@ rewrite onLet onNest rewriter = go
       pure $ postApp f' a'
     NatLit x → pure $ NatLit x
     TagLit x → pure $ TagLit x
+    BoolLit x → pure $ BoolLit x
     ListLit (Vector' vec) → ListLit . Vector' <$> traverse (go via) vec
     RecordLit (Vector' vec) → RecordLit . Vector' <$> traverse (bitraverse (go via) (go via)) vec
     Sorry n x → Sorry n <$> go via x

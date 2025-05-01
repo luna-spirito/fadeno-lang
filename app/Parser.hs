@@ -108,7 +108,7 @@ ident = token do
           | Just (rest', '_') ← BS.unsnoc rest → (rest', True)
         _ → (rawResult, False)
   guard $ not $ BS.null result
-  guard $ not $ result `elem` (["=", "in", "+", "-", "/", "*", "->", "/\\", "forall", "unpack", "fadeno", "rewrite"] ∷ [ByteString])
+  guard $ not $ result `elem` (["=", "in", "+", "-", "/", "*", "->", "/\\", "forall", "unpack", "fadeno", "rewrite", "true", "false"] ∷ [ByteString])
   pure (Ident result isOp)
 
 {-
@@ -136,6 +136,7 @@ data BuiltinT
   | Row
   | Record
   | List
+  | Bool
   | TypePlus -- Type+ 0, Type+ 1, ..., Type+ Aleph
   | Eq
   | RecordGet -- Second-class!
@@ -144,7 +145,7 @@ data BuiltinT
   -- If -- TODO: Make Choice counterpart for Record
   deriving (Show, Eq, Lift)
 builtinsList ∷ [BuiltinT]
-builtinsList = [U32, Tag, Row, Record, List, TypePlus, RecordGet, RecordKeepFields, RecordDropFields]
+builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, RecordGet, RecordKeepFields, RecordDropFields]
 
 data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
 
@@ -188,6 +189,7 @@ data TermT
   | App !TermT !TermT
   | NatLit !Word32
   | TagLit !Ident
+  | BoolLit !Bool
   | Sorry !Ident !TermT
   | Var !Int
   | ListLit !(Vector' TermT)
@@ -223,6 +225,7 @@ identOfBuiltin =
   (`Ident` False) . \case
     U32 → "U32"
     Tag → "Tag"
+    Bool → "Bool"
     Row → "Row"
     Record → "Record"
     List → "List"
@@ -278,6 +281,7 @@ parsePrim = token do
   prim ←
     (NatLit <$> number)
       <|> (TagLit <$> ($(char '.') *> ident))
+      <|> (BoolLit <$> notFollowedBy ((True <$ $(string "true")) <|> (False <$ $(string "false"))) identSym)
       <|> ( do
               -- Record parsing
               token $(char '{')
@@ -515,6 +519,7 @@ isSimple =
         App f a → complexity f *> complexity a
         NatLit _ → ping
         TagLit _ → ping
+        BoolLit _ → ping
         Sorry _ _ → ping
         Var _ → ping
         ListLit vs → ping *> traverse_ complexity vs
@@ -639,6 +644,7 @@ pTerm (oldPrec, vars) =
     Builtin x → (7, "fadeno." <> pIdent (identOfBuiltin x))
     BuiltinsVar → (7, "fadeno")
     NatLit x → (7, pretty x)
+    BoolLit x → (7, if x then "true" else "false")
     TagLit x → (7, "." <> pIdent x)
     RecordLit fields →
       ( 7

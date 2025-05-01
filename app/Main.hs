@@ -16,10 +16,10 @@ import Control.Effect.State (get, put)
 import Control.Effect.Writer (Writer, censor, listen, tell)
 import Data.ByteString.Char8 (pack)
 import Data.List (sortBy)
-import Data.RRBVector (Vector, deleteAt, ifoldr, ifoldrM, viewl, (!?), (<|), (|>))
+import Data.RRBVector (Vector, deleteAt, ifoldr, viewl, (!?), (<|), (|>))
 import GHC.Exts (IsList (..))
-import Normalize (EqRes (..), isEq, nested, nestedBy, normalize, parseBQQ, rewrite, unconsField, union)
-import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf, typOf)
+import Normalize (EqRes (..), isEq, nested, nestedBy, normalize, parseBQQ, rewrite, union)
+import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf)
 import Prettyprinter (Doc, annotate, group, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, filter, link, local, runReader, toList)
@@ -547,6 +547,7 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
             withKnown (resolve exs lT) \lT' → withKnown rT \rT' → unionT lT' rT'
     (NatLit _, Infer) → pure $ Builtin U32
     (TagLit _, Infer) → pure $ Builtin Tag
+    (BoolLit _, Infer) → pure $ Builtin Bool
     (Var i, Infer) → case binds !? (length binds - i - 1) of
       Nothing → stackError $ "Unknown var @" <> pretty i
       Just (_, ty) → pure ty
@@ -589,6 +590,7 @@ typOfBuiltin =
   \case
     U32 → [parseBQQ| Type+ 0 |]
     Tag → [parseBQQ| Type+ 0 |]
+    Bool → [parseBQQ| Type+ 0 |]
     Row → [parseBQQ| forall (u : U32). Type+ u -> Type+ u |]
     Record → [parseBQQ| forall (u : U32). Row (Type+ u) -> Type+ u |]
     List → [parseBQQ| forall (u : U32). Type+ u -> Type+ u |]

@@ -8,8 +8,8 @@ Type = Type+ 0
 U32 = fadeno.U32
 /: Type
 Tag = fadeno.Tag
-/: forall (u : U32). Type+ u -> Type+ u
-List = fadeno.List
+// /: forall (u : U32). Type+ u -> Type+ u
+// List = fadeno.List
 
 // TODO: Type
 Row = fadeno.Row
@@ -23,7 +23,9 @@ id = \x. x
 /: forall (u : U32) (k : Type+ u) (v : Type+ u). k -> v -> Record { .k = k | .v = v }
 _=>_ = \k v. { .k = k | .v = v }
 
-Ref = \Ty predicate. Record { .Ty = Ty | .prf = Eq predicate true }
+/: fadeno.Bool
+x = true
+// Ref = \Ty predicate. Record { .Ty = Ty | .prf = Eq predicate true }
 
 // /: = List a -> U32
 // list-length = ...
