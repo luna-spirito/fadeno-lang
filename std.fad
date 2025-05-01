@@ -8,6 +8,8 @@ Type = Type+ 0
 U32 = fadeno.U32
 /: Type
 Tag = fadeno.Tag
+/: forall (u : U32). Type+ u -> Type+ u
+List = fadeno.List
 
 // TODO: Type
 Row = fadeno.Row
@@ -18,13 +20,26 @@ Record = fadeno.Record
 /: forall (u : U32) (a : Type+ u). a -> a
 id = \x. x
 
-a = 4
-// /: forall (u1 : U32) (k : Type+ u1) (u2 : U32) (v : Type+ u2). k -> v -> Record { .k = k | .v = v }
+/: forall (u : U32) (k : Type+ u) (v : Type+ u). k -> v -> Record { .k = k | .v = v }
 _=>_ = \k v. { .k = k | .v = v }
-b = 5
 
-// Union = Record (meta : { .tag = Tag } /\ { .val = U32 })
+Ref = \Ty predicate. Record { .Ty = Ty | .prf = Eq predicate true }
+
+// /: = List a -> U32
+// list-length = ...
+
+// /: (l : List a) ->
+
+
+// Mendler f =
+// test =
+//   forall (u : U32) (a : Type+ u) (acc : Type+ u).
+//   List a ->
+//   ((List a -> acc) -> Record { .step = Record { .left = a | .rest = List a } | .base = acc }) ->
+//   acc
+
+// // Union = Record (meta : { .tag = Tag } /\ { .val = U32 })
 // Union = \cases.
 //   Record (meta : { .tag = Tag } /\ fadeno.record-get meta.tag cases)
 
-in [ 4 => 5 | 6 => 7 ]
+in {}

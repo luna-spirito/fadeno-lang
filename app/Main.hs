@@ -534,7 +534,13 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
           rT ← withResolved \exs →
             let binds' = resolveBinds exs binds
              in either
-                  (\(_, r) → scopedVar id $ infer (insertBinds (Nothing, recordOf lT) binds') (unLambda r) Infer)
+                  ( \(_, r) →
+                      scopedVar id
+                        $ infer
+                          (insertBinds (Nothing, recordOf $ normalize (fst <$> binds) l) binds')
+                          (unLambda r)
+                          Infer
+                  )
                   (\r → infer binds' r Infer)
                   rE
           withResolved \exs →
@@ -668,20 +674,33 @@ subtype = \a b →
     (t1, ExVar n2 ex2 ty2) → subtypeMeta n2 ex2 ty2 t1
     -- Universal Variables (u1 <: u2) - Must be identical.
     (UniVar _ id1 _, UniVar _ id2 _) | id1 == id2 → pure ()
-    -- Quantification (∀x:k1.T1 <: ∀y:k2.T2)
-    (Quantification Forall n1 k1 lbd1, Quantification Forall _ k2 lbd2) → runSeqResolve do
-      -- Kinds must be equivalent (check bidirectionally)
-      withResolved \_ → subtype k1 k2
-      withResolved \exs → subtype (resolve exs k2) (resolve exs k1)
-      -- Introduce a fresh universal variable for the bound variable
+    -- T <: Forall x:K. Body  => Introduce UniVar for x
+    (t, Quantification Forall n k body) → do
       uniId ← fresh
-      scopedUniVar (const pure) uniId do
-        let var = UniVar n1 uniId k1 -- Use kind k1 (they are equivalent)
-        -- Normalize bodies with the fresh variable substituted
-        let body1 = normalize [Just var] $ unLambda lbd1
-        let body2 = normalize [Just var] $ unLambda lbd2
-        -- Check subtyping relationship between the bodies under the new scope
-        withResolved \exs → subtype (resolve exs body1) (resolve exs body2)
+      scopedUniVar (const pure) uniId
+        $ subtype t
+        $ normalize [Just $ UniVar n uniId k]
+        $ unLambda body
+
+    -- Exists x:K. Body <: T => Introduce UniVar for x
+    (Quantification Exists n k body, t) → do
+      uniId ← fresh
+      scopedUniVar (const pure) uniId
+        $ subtype (normalize [Just $ UniVar n uniId k] $ unLambda body) t
+
+    -- Forall x:K. Body <: T => Introduce ExVar for x
+    (Quantification Forall n k body, t) → do
+      exId ← fresh
+      scopedExVar (const pure) exId
+        $ subtype (normalize [Just $ ExVar n (ExVarId [exId]) $ Just k] $ unLambda body) t
+
+    -- T <: Exists x:K. Body => Introduce ExVar for x
+    (t, Quantification Exists n k body) → do
+      exId ← fresh
+      scopedExVar (const pure) exId
+        $ subtype t
+        $ normalize [Just $ ExVar n (ExVarId [exId]) $ Just k]
+        $ unLambda body
 
     -- Function Types (Πx:T1.U1 <: Πy:T2.U2)
     (Pi inT1 outT1E, Pi inT2 outT2E) → runSeqResolve do
