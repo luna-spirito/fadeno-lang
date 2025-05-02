@@ -139,13 +139,14 @@ data BuiltinT
   | Bool
   | TypePlus -- Type+ 0, Type+ 1, ..., Type+ Aleph
   | Eq
+  | Refl
   | RecordGet -- Second-class!
   | RecordKeepFields
   | RecordDropFields
   -- If -- TODO: Make Choice counterpart for Record
   deriving (Show, Eq, Lift)
 builtinsList ∷ [BuiltinT]
-builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, RecordGet, RecordKeepFields, RecordDropFields]
+builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields]
 
 data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
 
@@ -231,6 +232,7 @@ identOfBuiltin =
     List → "List"
     TypePlus → "Type+"
     Eq → "Eq"
+    Refl → "refl"
     RecordGet → "record-get"
     RecordKeepFields → "record-keep-fields"
     RecordDropFields → "record-drop-fields"

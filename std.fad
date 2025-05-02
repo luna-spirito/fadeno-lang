@@ -10,6 +10,10 @@ U32 = fadeno.U32
 Tag = fadeno.Tag
 /: forall (u : U32). Type+ u -> Type+ u
 List = fadeno.List
+/: forall (u : U32) (a : Type+ u). a -> a -> Type+ u
+Eq = fadeno.Eq
+/: forall (u : U32) (a : Type+ u) (x : a). Eq x x
+refl = fadeno.refl
 
 // TODO: Type
 Row = fadeno.Row

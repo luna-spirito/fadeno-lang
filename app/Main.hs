@@ -18,7 +18,7 @@ import Data.ByteString.Char8 (pack)
 import Data.List (sortBy)
 import Data.RRBVector (Vector, deleteAt, ifoldr, viewl, (!?), (<|), (|>))
 import GHC.Exts (IsList (..))
-import Normalize (EqRes (..), isEq, nested, nestedBy, normalize, parseBQQ, rewrite, union)
+import Normalize (EqRes (..), Resolved, isEq', nested, nestedBy, normalize, parseBQQ, resolve, resolve', rewrite, runSeqResolve, union, withResolved)
 import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf)
 import Prettyprinter (Doc, annotate, group, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
@@ -103,8 +103,6 @@ runStackPrintC = runReader 0 . unStackPrintC
 
 -- Check
 
-type Resolved = HashMap ExVarId TermT
-
 type Solve = Writer Resolved :+: Fresh :+: Error (Doc AnsiStyle) :+: StackLog
 
 writeMeta ∷ (Has Solve sig m) ⇒ Ident → ExVarId → Maybe TermT → TermT → m ()
@@ -112,31 +110,6 @@ writeMeta n var tyM val = do
   stackLog $ pIdent n <+> ":=" <+> pTerm' val
   for_ tyM $ infer [] val . Check
   tell $ HM.singleton var val
-
-runSeqResolve ∷ (Has Solve sig m) ⇒ StateC Resolved m a → m a
-runSeqResolve = runState (\resolved a → tell resolved $> a) mempty
-
-withResolved ∷ ((Has (Writer Resolved)) sig m) ⇒ (Resolved → m a) → StateC Resolved m a
-withResolved f = do
-  old ← get
-  (exs, result) ← lift $ listen $ f old
-  put $ old <> exs
-  pure result
-
-resolve ∷ Resolved → TermT → TermT
-resolve (HM.null → True) = id
-resolve exs =
-  runIdentity
-    . rewrite
-      (const (+ 1))
-      (+ 1)
-      ( \term locs → pure $ case term of
-          ExVar _ ex2 _
-            | Just val ← ex2 `HM.lookup` exs →
-                Just $ nestedBy locs val
-          _ → Nothing
-      )
-      0
 
 scopedVar ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → m a → m a
 scopedVar mapTerm act = do
@@ -274,6 +247,9 @@ subExVar subName subTy = do
   -- TODO: check that such ignore doesn't destroy anything.
   pure $ ExVar (Ident (baseName <> "/" <> subName) False) (ExVarId $ baseI <> [subI]) subTy
 
+isEqUnify ∷ (Has Solve sig m) ⇒ TermT → TermT → m EqRes
+isEqUnify = isEq' instMeta
+
 data LookupRes a
   = LookupFound !a
   | LookupMissing !(Vector' TermT) -- Non-visited keys
@@ -309,14 +285,17 @@ rowGet mapTerm tag cont = go
       ( \_ → \case
           RecordLit (Vector' l) → case viewl l of
             Nothing → pure $ LookupMissing []
-            Just ((n, v), rest) → case isEq n tag of
-              EqYes → LookupFound <$> cont v
-              EqNot →
-                go (RecordLit (Vector' rest)) record >>= \case
-                  LookupFound res → pure $ LookupFound res
-                  LookupMissing (Vector' fi) → pure $ LookupMissing $ Vector' $ n <| fi
-                  LookupUnknown → pure LookupUnknown
-              EqUnknown → pure LookupUnknown
+            Just ((n, v), rest) → runSeqResolve do
+              eqTag ← withResolved \_ → isEqUnify n tag
+              case eqTag of
+                EqYes → LookupFound <$> withResolved \exs → cont (resolve exs v)
+                EqNot → do
+                  inRest ← withResolved \exs → go (RecordLit (Vector' $ bimap (resolve exs) (resolve exs) <$> rest)) record
+                  case inRest of
+                    LookupFound res → pure $ LookupFound res
+                    LookupMissing (Vector' fi) → withResolved \exs → pure $ LookupMissing $ Vector' $ resolve exs n <| fi
+                    LookupUnknown → pure LookupUnknown
+                EqUnknown → pure LookupUnknown
           x → notARow x
       )
       row
@@ -596,7 +575,8 @@ typOfBuiltin =
     Record → [parseBQQ| forall (u : U32). Row (Type+ u) -> Type+ u |]
     List → [parseBQQ| forall (u : U32). Type+ u -> Type+ u |]
     TypePlus → [parseBQQ| u : U32 -> Type+ (u + 1) |]
-    Eq → [parseBQQ| forall (u : U32) (a : Type+ u). a -> Type+ u |]
+    Eq → [parseBQQ| forall (u : U32) (a : Type+ u). a -> a -> Type+ u |]
+    Refl → [parseBQQ| forall (u : U32) (a : Type+ u) (x : a). Eq x x |]
     RecordGet →
       [parseBQQ|
         forall (u : U32) (row : Row (Type+ u)) (t : Type+ u).
@@ -633,7 +613,7 @@ instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1)
           a' ← withResolved \_ → instMeta' a
           b' ← withResolved \exs →
             either
-              (\(n, b'') → fmap (Left . (n,) . Lambda) $ scopedVar id $ instMeta' $ resolve exs $ unLambda b'')
+              (\(n, b'') → fmap (Left . (n,) . Lambda) $ scopedVar id $ instMeta' $ resolve' 1 exs $ unLambda b'')
               (fmap Right . instMeta' . resolve exs)
               b
           pure $ Union a' b'
@@ -644,7 +624,7 @@ instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1)
           runSeqResolve
             $ Pi
             <$> (withResolved \_ → instMeta' inT)
-            <*> withResolved (\exs → either (\(n, v) → Left . (n,) . Lambda <$> instMeta' (resolve exs $ unLambda v)) (fmap Right . instMeta' . resolve exs) outT)
+            <*> withResolved (\exs → either (\(n, v) → Left . (n,) . Lambda <$> instMeta' (resolve' 1 exs $ unLambda v)) (fmap Right . instMeta' . resolve exs) outT)
         Op a op b → do
           a' ← instMeta' a
           b' ← instMeta' b
@@ -719,8 +699,8 @@ subtype = \a b →
           -- Introduce UniVar with the *supertype's* input type (inT2)
           scopedUniVar (const pure) uniId do
             let var = UniVar n1 uniId inT2 -- Use common name/type for substitution
-            let body1 = normalize [Just var] $ resolve exs $ unLambda lbd1
-            let body2 = normalize [Just var] $ resolve exs $ unLambda lbd2
+            let body1 = resolve exs $ normalize [Just var] $ unLambda lbd1
+            let body2 = resolve exs $ normalize [Just var] $ unLambda lbd2
             subtype body1 body2
         -- Mixed cases are not subtypes of each other
         _ → stackError "Cannot subtype mixed dependent/non-dependent Pi types"
@@ -734,9 +714,11 @@ subtype = \a b →
         -- If one level is existential, unify it with the other level constraint.
         (ExVar nA exA tyA, lvl2) → subtypeMeta nA exA tyA lvl2
         (lvl1, ExVar nB exB tyB) → subtypeMeta nB exB tyB lvl1
-        (_, _) | EqYes ← isEq a b → pure ()
-        -- TODO: Handle Op for level arithmetic?
-        _ → stackError $ "Cannot subtype universes with levels:" <+> pTerm' a <+> "<=" <+> pTerm' b
+        _ → runSeqResolve do
+          r ← withResolved \_ → isEqUnify a b
+          case r of
+            EqYes → pure ()
+            _ → withResolved \exs → stackError $ "Cannot subtype universes with levels:" <+> pTerm' (resolve exs a) <+> "<=" <+> pTerm' (resolve exs b)
 
     -- Record/Row types (requires structural subtyping logic)
     (App (Builtin Record) row1, App (Builtin Record) row2) → subtype row1 row2 -- Delegate to row subtyping
@@ -747,28 +729,36 @@ subtype = \a b →
     (RecordLit (Vector' fields1), RecordLit fields2) →
       let
         fields1Drop fields1' name ty =
-          ifoldr
-            ( \i (name1, ty1) rec → case isEq name name1 of
-                EqYes → runSeqResolve do
-                  withResolved \_ → subtype ty1 ty
-                  withResolved \exs → pure $ bimap (resolve exs) (resolve exs) <$> deleteAt i fields1'
-                EqUnknown → stackError "Unable to check field equality when subtyping"
-                EqNot → rec
-            )
-            (stackError "Missing field from left side when subtyping")
-            fields1'
+          runSeqResolve
+            $ ifoldr
+              ( \i (name1, ty1) rec → do
+                  eqName ← withResolved \exs → isEqUnify (resolve exs name) (resolve exs name1)
+                  case eqName of
+                    EqYes → do
+                      withResolved \exs → subtype (resolve exs ty1) (resolve exs ty)
+                      withResolved \exs → pure $ bimap (resolve exs) (resolve exs) <$> deleteAt i fields1'
+                    EqUnknown → stackError "Unable to check field equality when subtyping"
+                    EqNot → rec
+              )
+              (stackError "Missing field from left side when subtyping")
+              fields1'
        in
-        foldM_
-          (\fields1' (name, ty) → fields1Drop fields1' name ty)
-          fields1
-          fields2
+        runSeqResolve
+          $ foldM_
+            (\fields1' (name, ty) → withResolved \exs → fields1Drop fields1' (resolve exs name) (resolve exs ty))
+            fields1
+            fields2
     -- Application (App f1 a1 <: App f2 a2) - Very restricted for now
-    (App f1 a1, App f2 a2) → case isEq f1 f2 of
-      EqYes → case isEq a1 a2 of
-        EqYes → pure ()
+    (App f1 a1, App f2 a2) → runSeqResolve do
+      eqF ← withResolved \_ → isEqUnify f1 f2
+      case eqF of
+        EqYes → do
+          eqA ← withResolved \exs → isEqUnify (resolve exs a1) (resolve exs a2)
+          case eqA of
+            EqYes → pure ()
+            _ → stackError $ "Cannot subtype applications with different arguments:" <+> pTerm' a1 <+> "vs" <+> pTerm' a2 -- Corrected var name
         _ → stackError $ "Cannot subtype applications with different arguments:" <+> pTerm' a1 <+> "vs" <+> pTerm' a2 -- Corrected var name
-      _ → stackError $ "Cannot subtype applications with different functions:" <+> pTerm' f1 <+> "vs" <+> pTerm' f2
-    -- Catch-all: if no rule matches, they are not subtypes
+        -- Catch-all: if no rule matches, they are not subtypes
     (t1, t2) → stackError $ "Subtype check failed, no rule applies for:" <+> pTerm' t1 <+> "<:" <+> pTerm' t2
 
 runSolveM ∷ (Applicative m) ⇒ WriterC Resolved (FreshC (ErrorC (Doc AnsiStyle) m)) a → m (Either (Doc AnsiStyle) a)

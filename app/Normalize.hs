@@ -1,10 +1,18 @@
 module Normalize where
 
+import Control.Algebra
+import Control.Carrier.Empty.Church (runEmpty)
+import Control.Carrier.State.Church (StateC, runState)
+import Control.Carrier.Writer.Church (runWriter)
+import Control.Effect.Empty (empty)
+import Control.Effect.State (get, put)
+import Control.Effect.Writer (Writer, listen, tell)
 import Data.RRBVector (Vector, deleteAt, drop, ifoldr, viewl, (|>))
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (BlockT (..), BuiltinT (..), Lambda (..), OpT (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
-import RIO hiding (Reader, Vector, ask, drop, link, local, replicate, runReader, to, toList)
+import Parser (BlockT (..), BuiltinT (..), ExVarId, Ident, Lambda (..), OpT (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
+import RIO hiding (Reader, Vector, ask, drop, force, link, local, replicate, runReader, to, toList, try)
+import RIO.HashMap qualified as HM
 
 -- | Intensional equality.
 data EqRes
@@ -12,76 +20,126 @@ data EqRes
   | EqNot -- provably uneq
   | EqUnknown
 
+type Resolved = HashMap ExVarId TermT
+
+runSeqResolve ∷ (Has (Writer Resolved) sig m) ⇒ StateC Resolved m a → m a
+runSeqResolve = runState (\resolved a → tell resolved $> a) mempty
+
+withResolved ∷ ((Has (Writer Resolved)) sig m) ⇒ (Resolved → m a) → StateC Resolved m a
+withResolved f = do
+  old ← get
+  (exs, result) ← lift $ listen $ f old
+  put $ old <> exs
+  pure result
+
+resolve' ∷ Int → Resolved → TermT → TermT
+resolve' _ (HM.null → True) = id
+resolve' nest exs =
+  runIdentity
+    . rewrite
+      (const (+ 1))
+      (+ 1)
+      ( \term locs → pure $ case term of
+          ExVar _ ex2 _
+            | Just val ← ex2 `HM.lookup` exs →
+                Just $ nestedBy locs val
+          _ → Nothing
+      )
+      nest
+
+resolve ∷ Resolved → TermT → TermT
+resolve = resolve' 0
+
 {- | Checks if two normalized terms are intensionally equivalent.
 TODO: η-conversion
 -}
-isEq ∷ TermT → TermT → EqRes
-isEq = curry \case
+isEq' ∷ (Has (Writer Resolved) sig m) ⇒ (Ident → ExVarId → Maybe TermT → TermT → m ()) → TermT → TermT → m EqRes
+isEq' f = curry \case
   (Block{}, _) → undefined
   (_, Block{}) → undefined
   (Var a, Var b)
-    | a == b → EqYes
-  (Var _, _) → EqUnknown
-  (_, Var _) → EqUnknown
+    | a == b → pure EqYes
+  (Var _, _) → pure EqUnknown
+  (_, Var _) → pure EqUnknown
+  (ExVar a b c, t) → f a b c t $> EqYes
+  (t, ExVar a b c) → f a b c t $> EqYes
   (UniVar _ b1 _, UniVar _ b2 _)
-    | b1 == b2 → EqYes
-  (UniVar{}, _) → EqUnknown
-  (_, UniVar{}) → EqUnknown
+    | b1 == b2 → pure EqYes
+  (UniVar{}, _) → pure EqUnknown
+  (_, UniVar{}) → pure EqUnknown
   -- TODO: ExVar? I don't know!
-  (ExVar{}, _) → error "TODO"
-  (_, ExVar{}) → error "TODO"
-  (App f1 a1, App f2 a2) → tryEq f1 f2 $ tryEq a1 a2 $ EqYes
-  (App{}, _) → EqUnknown
-  (_, App{}) → EqUnknown
+  (App f1 a1, App f2 a2) →
+    runSeqResolve
+      $ try (withResolved \_ → isEq' f f1 f2)
+      $ try (withResolved \exs → isEq' f (resolve exs a1) (resolve exs a2))
+      $ pure EqYes
+  (App{}, _) → pure EqUnknown
+  (_, App{}) → pure EqUnknown
   (Op a1 op1 b1, Op a2 op2 b2)
-    | op1 == op2 → tryEq a1 a2 $ tryEq b1 b2 $ EqYes
-  (Op{}, _) → EqUnknown
-  (_, Op{}) → EqUnknown
-  (Sorry _ a, b) → isEq a b
-  (a, Sorry _ b) → isEq a b
+    | op1 == op2 → runSeqResolve
+        $ try (withResolved \_ → isEq' f a1 a2)
+        $ withResolved \exs → isEq' f (resolve exs b1) (resolve exs b2)
+  (Op{}, _) → pure EqUnknown
+  (_, Op{}) → pure EqUnknown
+  (Sorry _ a, b) → isEq' f a b
+  (a, Sorry _ b) → isEq' f a b
   -- Literals
-  (Lam _ bod1, Lam _ bod2) → isEq (unLambda bod1) (unLambda bod2)
-  (Lam _ _, _) → EqNot
+  (Lam _ bod1, Lam _ bod2) → isEq' f (unLambda bod1) (unLambda bod2)
+  (Lam _ _, _) → pure EqNot
   (NatLit a, NatLit b)
-    | a == b → EqYes
-  (NatLit _, _) → EqNot
+    | a == b → pure EqYes
+  (NatLit _, _) → pure EqNot
   (TagLit a, TagLit b)
-    | a == b → EqYes
-  (TagLit _, _) → EqNot
+    | a == b → pure EqYes
+  (TagLit _, _) → pure EqNot
   (BoolLit a, BoolLit b)
-    | a == b → EqYes
-  (BoolLit _, _) → EqNot
+    | a == b → pure EqYes
+  (BoolLit _, _) → pure EqNot
   (Quantification q1 _n1 k1 t1, Quantification q2 _n2 k2 t2)
-    | q1 == q2 → forceEq k1 k2 $ isEq (unLambda t1) (unLambda t2)
-  (Quantification{}, _) → EqUnknown
+    | q1 == q2 → runSeqResolve
+        $ force (withResolved \_ → isEq' f k1 k2)
+        $ withResolved \exs → isEq' f (resolve' 1 exs $ unLambda t1) (resolve' 1 exs $ unLambda t2)
+  (Quantification{}, _) → pure EqUnknown
   (Builtin a, Builtin b)
-    | a == b → EqYes
-  (Builtin _, _) → EqNot
-  (_, Builtin _) → EqNot
-  (BuiltinsVar, BuiltinsVar) → EqYes
-  (BuiltinsVar, _) → EqNot
-  (_, BuiltinsVar) → EqNot
+    | a == b → pure EqYes
+  (Builtin _, _) → pure EqNot
+  (_, Builtin _) → pure EqNot
+  (BuiltinsVar, BuiltinsVar) → pure EqYes
+  (BuiltinsVar, _) → pure EqNot
+  (_, BuiltinsVar) → pure EqNot
   -- TODO: Handle mixed?
   -- Shame.
   (Pi inT1 (Left (_, outT1)), Pi inT2 (Left (_, outT2))) →
-    forceEq inT1 inT2 $ isEq (unLambda outT1) (unLambda outT2)
+    runSeqResolve
+      $ force (withResolved \_ → isEq' f inT1 inT2)
+      $ withResolved \exs → isEq' f (resolve' 1 exs $ unLambda outT1) (resolve' 1 exs $ unLambda outT2)
   (Pi inT1 (Right outT1), Pi inT2 (Right outT2)) →
-    forceEq inT1 inT2 $ isEq outT1 outT2
-  (Pi{}, _) → EqNot
+    runSeqResolve
+      $ force (withResolved \_ → isEq' f inT1 inT2)
+      $ withResolved \exs → isEq' f (resolve exs outT1) (resolve exs outT2)
+  (Pi{}, _) → pure EqNot
   (Union _ _, _) → error "TODO isEq Union"
   (ListLit (Vector' (viewl → Just (x, xs))), ListLit (Vector' (viewl → Just (y, ys)))) →
-    forceEq x y $ isEq (ListLit $ Vector' xs) (ListLit $ Vector' ys)
-  (ListLit _, _) → EqNot
+    runSeqResolve
+      $ force (withResolved \_ → isEq' f x y)
+      $ withResolved \exs → isEq' f (ListLit $ Vector' $ resolve exs <$> xs) (ListLit $ Vector' $ resolve exs <$> ys)
+  (ListLit _, _) → pure EqNot
  where
   -- TODO: FRow???
-  forceEq a b cont =
-    case isEq a b of
+  try act cont =
+    act >>= \case
       EqYes → cont
-      x → x
-  tryEq a b cont =
-    case isEq a b of
+      _ → pure EqUnknown
+  force act cont =
+    act >>= \case
       EqYes → cont
-      _ → EqUnknown
+      x → pure x
+
+isEq ∷ TermT → TermT → EqRes
+isEq a b =
+  case runIdentity $ runEmpty (pure Nothing) (pure . Just) $ runWriter @Resolved (curry pure) $ isEq' (\_ _ _ _ → empty) a b of
+    Just (resolved, res) → if HM.null resolved then res else EqUnknown
+    Nothing → EqNot
 
 builtinsVar ∷ TermT
 builtinsVar = RecordLit $ fromList $ (\b → (TagLit $ identOfBuiltin b, Builtin b)) <$> builtinsList
