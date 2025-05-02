@@ -114,31 +114,33 @@ writeMeta n var tyM val = do
 scopedVar ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → m a → m a
 scopedVar mapTerm act = do
   (resolved, res) ← intercept @Resolved act
-  let unnest =
+  let unnest original =
         rewrite
           (const (+ 1))
           (+ 1)
           ( \term locs → case term of
-              Var i | i == locs → stackError "Var leaked"
+              Var i | i == locs → stackError $ "Var leaked in " <> pTerm' original
               Var i | i > locs → pure $ Just $ Var $ i - 1
               _ → pure Nothing
           )
           0
+          original
   tell =<< for resolved unnest
   mapTerm unnest res
 
 scopedUniVar ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → Int → m a → m a
 scopedUniVar mapTerm uni1 act = do
   (resolved, res) ← listen @Resolved act
-  let ensureNotOcc =
+  let ensureNotOcc original =
         rewrite
           (const id)
           id
           ( \term () → case term of
-              UniVar _ uni2 _ | uni1 == uni2 → stackError "UniVar leaked"
+              UniVar _ uni2 _ | uni1 == uni2 → stackError $ "UniVar leaked in " <> pTerm' original
               _ → pure Nothing
           )
           ()
+          original
   for_ resolved ensureNotOcc
   mapTerm ensureNotOcc res
 
@@ -150,17 +152,18 @@ scopedExVar mapTerm ex1 act = do
   (resolved, res) ← intercept @Resolved act
   let isOfEx1 (ExVarId x) = (== ex1) $ fst $ fromMaybe (error "impossible") $ viewl x
       resolved' = HM.filterWithKey (\k _ → not $ isOfEx1 k) resolved
-  for_ resolved'
-    $ rewrite
+  for_ resolved' \original →
+    rewrite
       (const id)
       id
       ( \term () → case term of
           ExVar _ ex2 _
             | isOfEx1 ex2 →
-                stackError "ExVar leaked"
+                stackError $ "ExVar leaked in " <> pTerm' original
           _ → pure Nothing
       )
       ()
+      original
   tell resolved'
   mapTerm
     ( \outT → do
@@ -560,7 +563,8 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
         $ App (Builtin Record)
         $ RecordLit (fromList $ (\b → (TagLit $ identOfBuiltin b, typOfBuiltin b)) <$> builtinsList)
     (UniVar _n _i ty, Infer) → pure ty
-    (k, Infer) → error $ show k
+    (ExVar _n _i (Just ty), Infer) → pure ty
+    (k, Infer) → stackError $ pretty $ show k
     (term, Check c) → stackScope ("check via infer" <+> pTerm' term <+> ":" <+> pTerm' c) $ runSeqResolve do
       ty ← withResolved \_ → infer binds term Infer
       withResolved \exs → subtype (resolve exs ty) $ resolve exs c

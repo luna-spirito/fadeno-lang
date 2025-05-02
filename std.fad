@@ -27,9 +27,8 @@ id = \x. x
 /: forall (u : U32) (k : Type+ u) (v : Type+ u). k -> v -> Record { .k = k | .v = v }
 _=>_ = \k v. { .k = k | .v = v }
 
-/: fadeno.Bool
-x = true
-// Ref = \Ty predicate. Record { .Ty = Ty | .prf = Eq predicate true }
+/: forall (u : U32). A : Type+ u -> (A -> Type+ u) -> Type+ u
+Ref = \Ty predicate. Record (s : { .val = Ty } /\ { .prf = predicate s.val })
 
 // /: = List a -> U32
 // list-length = ...
