@@ -30,6 +30,9 @@ _=>_ = \k v. { .k = k | .v = v }
 /: forall (u : U32). A : Type+ u -> (A -> Type+ u) -> Type+ u
 Ref = \Ty predicate. Record (s : { .val = Ty } /\ { .prf = predicate s.val })
 
+/: U32
+test = fadeno.list-length [1 | 2 | 3]
+
 // /: = List a -> U32
 // list-length = ...
 

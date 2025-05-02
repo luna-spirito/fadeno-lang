@@ -182,6 +182,9 @@ postApp f a = case f of
       search a
   App (Builtin RecordKeepFields) tags → recordSelectFields True tags a
   App (Builtin RecordDropFields) tags → recordSelectFields False tags a
+  Builtin ListLength → case a of
+    ListLit (Vector' fi) → NatLit $ fromIntegral $ length fi
+    _ → NatLit 0
   _ → App f a
  where
   -- Drop `x` from ListLit.
