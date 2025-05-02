@@ -1,25 +1,8 @@
-Type+ = fadeno.Type+
-Kind = Type+ 1
+unpack fadeno. Type+ U32 Tag List Eq refl Row Record
 
+Kind = Type+ 1
 /: Kind
 Type = Type+ 0
-
-/: Type
-U32 = fadeno.U32
-/: Type
-Tag = fadeno.Tag
-/: forall (u : U32). Type+ u -> Type+ u
-List = fadeno.List
-/: forall (u : U32) (a : Type+ u). a -> a -> Type+ u
-Eq = fadeno.Eq
-/: forall (u : U32) (a : Type+ u) (x : a). Eq x x
-refl = fadeno.refl
-
-// TODO: Type
-Row = fadeno.Row
-
-// TODO: Type
-Record = fadeno.Record
 
 /: forall (u : U32) (a : Type+ u). a -> a
 id = \x. x

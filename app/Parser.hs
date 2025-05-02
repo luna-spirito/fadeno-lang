@@ -100,8 +100,9 @@ identSym ∷ Parser' Char
 identSym = satisfy \x → not $ x `elem` ("\\ \n(){}[].:|" ∷ String)
 
 -- Returns the identifier and whether it's an operator
-ident ∷ Parser' Ident
-ident = token do
+-- Expect the ident to start RIGHT NOW.
+identRightNow ∷ Parser' Ident
+identRightNow = do
   rawResult ← byteStringOf (skipSome identSym)
   let (result, isOp) = case BS.uncons rawResult of
         Just ('_', rest)
@@ -110,6 +111,9 @@ ident = token do
   guard $ not $ BS.null result
   guard $ not $ result `elem` (["=", "in", "+", "-", "/", "*", "->", "/\\", "forall", "unpack", "fadeno", "rewrite", "true", "false"] ∷ [ByteString])
   pure (Ident result isOp)
+
+ident ∷ Parser' Ident
+ident = token identRightNow
 
 {-
 Type Constructs of Cedille:
@@ -322,7 +326,7 @@ parsePrim = token do
               <* $(char ')')
           )
   -- any number of accesses after the prim
-  accesses ← many $ $(char '.') *> (TagLit <$> ident)
+  accesses ← many $ $(char '.') *> (TagLit <$> identRightNow)
   pure
     $ foldl'
       (flip recordGet)
@@ -437,6 +441,17 @@ parseBlock = do
           rest ← Lambda <$> (local (|> name) manyEntries)
           pure $ Block (BlockLet name ty expr rest)
       )
+        <|> ( do
+                -- TODO: prettyprinting
+                token $ $(string "unpack")
+                record ← parsePrim
+                token $ $(char '.')
+                fieldNames ← some (token $ notFollowedBy ident parseEq)
+                foldr
+                  (\name cont → Block . BlockLet name Nothing (recordGet (TagLit name) record) . Lambda <$> local (|> name) cont)
+                  manyEntries
+                  fieldNames
+            )
         <|> ( do
                 token $ $(string "rewrite")
                 rewrite ← parseTop
