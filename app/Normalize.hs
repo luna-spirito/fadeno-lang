@@ -7,7 +7,7 @@ import Control.Carrier.Writer.Church (runWriter)
 import Control.Effect.Empty (empty)
 import Control.Effect.State (get, put)
 import Control.Effect.Writer (Writer, listen, tell)
-import Data.RRBVector (Vector, deleteAt, drop, ifoldr, viewl, (|>))
+import Data.RRBVector (Vector, deleteAt, drop, ifoldr, splitAt, viewl, (!?), (<|), (|>))
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (BlockT (..), BuiltinT (..), ExVarId, Ident, Lambda (..), OpT (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
@@ -184,7 +184,10 @@ postApp f a = case f of
   App (Builtin RecordDropFields) tags → recordSelectFields False tags a
   Builtin ListLength → case a of
     ListLit (Vector' fi) → NatLit $ fromIntegral $ length fi
-    _ → NatLit 0
+    _ → App f a
+  App (App (Builtin ListIndexL) (NatLit i)) (ListLit (Vector' vals)) → case vals !? fromIntegral i of
+    Just v → v
+    Nothing → App f a
   _ → App f a
  where
   -- Drop `x` from ListLit.
@@ -293,16 +296,16 @@ normalize ∷ Vector (Maybe TermT) → TermT → TermT
 normalize origBinds =
   runIdentity
     . rewrite
-      (\new old → (fmap nested <$> old) |> Just new)
-      (\old → (fmap nested <$> old) |> Nothing)
+      (\new old → Just new <| (fmap nested <$> old))
+      (\old → Nothing <| (fmap nested <$> old))
       ( \term binds → case term of
           Var i →
             pure
               $ Just
-              $ let after = drop (length binds - i - 1) binds
+              $ let (before, after) = splitAt i binds
                  in case after of
                       (viewl → Just (Just val, _)) → val
-                      _ → Var $ i - foldl' (\acc x → if isJust x then acc + 1 else acc) 0 after
+                      _ → Var $ i - foldl' (\acc x → if isJust x then acc + 1 else acc) 0 before
           _ → pure Nothing
       )
       origBinds
@@ -323,7 +326,7 @@ applyLambda ∷ Lambda TermT → TermT → TermT
 applyLambda bod val = normalize [Just val] $ unLambda bod
 
 normalizeBuiltin ∷ TermT → TermT
-normalizeBuiltin = normalize (Just . Builtin <$> fromList builtinsList)
+normalizeBuiltin = normalize (Just . Builtin <$> fromList (reverse builtinsList))
 
 {- | Parse builtin
 Just a variation of parseQQ that has all the builtins in scope from the start.

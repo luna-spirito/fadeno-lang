@@ -148,10 +148,30 @@ data BuiltinT
   | RecordKeepFields
   | RecordDropFields
   | ListLength
+  | ListIndexL
   -- If -- TODO: Make Choice counterpart for Record
   deriving (Show, Eq, Lift)
+
 builtinsList ∷ [BuiltinT]
-builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength]
+builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL]
+
+identOfBuiltin ∷ BuiltinT → Ident
+identOfBuiltin =
+  (`Ident` False) . \case
+    U32 → "U32"
+    Tag → "Tag"
+    Bool → "Bool"
+    Row → "Row"
+    Record → "Record"
+    List → "List"
+    TypePlus → "Type+"
+    Eq → "Eq"
+    Refl → "refl"
+    RecordGet → "record-get"
+    RecordKeepFields → "record-keep-fields"
+    RecordDropFields → "record-drop-fields"
+    ListLength → "list-length"
+    ListIndexL → "list-indexl"
 
 data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
 
@@ -225,23 +245,6 @@ recordGet tag record = (Builtin RecordGet `App` tag) `App` record
 
 typ ∷ TermT
 typ = typOf $ NatLit 0
-
-identOfBuiltin ∷ BuiltinT → Ident
-identOfBuiltin =
-  (`Ident` False) . \case
-    U32 → "U32"
-    Tag → "Tag"
-    Bool → "Bool"
-    Row → "Row"
-    Record → "Record"
-    List → "List"
-    TypePlus → "Type+"
-    Eq → "Eq"
-    Refl → "refl"
-    RecordGet → "record-get"
-    RecordKeepFields → "record-keep-fields"
-    RecordDropFields → "record-drop-fields"
-    ListLength → "list-length"
 
 -- If → "if"
 

@@ -1,4 +1,4 @@
-unpack fadeno. Type+ U32 Tag List Eq refl Row Record
+unpack fadeno. Type+ U32 Tag List Eq refl Row Record list-length
 
 Kind = Type+ 1
 /: Kind
@@ -13,22 +13,25 @@ _=>_ = \k v. { .k = k | .v = v }
 /: forall (u : U32). A : Type+ u -> (A -> Type+ u) -> Type+ u
 Ref = \Ty predicate. Record (s : { .val = Ty } \/ { .prf = predicate s.val })
 
-/: U32
-test = fadeno.list-length [1 | 2 | 3]
-
 /: Type
 Never = exists a. a
 
 /: forall (u : U32). Type+ u -> Type+ u
 Not = \a. a -> Never
 
-// TODO: Concat, not Union!
+// // /: forall (u : U32) (a : Type+ u). List a -> Type+ u
+// // IsEmpty = \l. Eq (list-length l) 0
 
-// /: = List a -> U32
-// list-length = ...
+/: U32 -> U32 -> Type
+_~<=_ = \a b. exists (extra : U32). Eq (extra + a) b
 
-// /: (l : List a) ->
+/: U32 -> U32 -> Type
+_~<_ = \a b. (a + 1) ~<= b
 
+/: forall (u : U32) (a : Type+ u). ind : U32 -> l : List a -> (ind ~< (list-length l)) -> a
+list-indexl = fadeno.list-indexl
+
+// unfold : forall (u : U32) (acc : Type+ u). u : U32 -> (Ref U32 (\i. i ~<= u) -> acc -> acc) -> acc -> acc
 
 // Mendler f =
 // test =

@@ -16,7 +16,7 @@ import Control.Effect.State (get, put)
 import Control.Effect.Writer (Writer, censor, listen, tell)
 import Data.ByteString.Char8 (pack)
 import Data.List (sortBy)
-import Data.RRBVector (Vector, deleteAt, ifoldr, viewl, (!?), (<|), (|>))
+import Data.RRBVector (Vector, deleteAt, ifoldr, viewl, (!?), (<|))
 import GHC.Exts (IsList (..))
 import Normalize (EqRes (..), Resolved, concat, isEq', nested, nestedBy, normalize, parseBQQ, resolve, resolve', rewrite, runSeqResolve, withResolved)
 import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf)
@@ -379,7 +379,7 @@ resolveMode exs = \case
   Check a → Check $ resolve exs a
 
 insertBinds ∷ (Maybe TermT, TermT) → Vector (Maybe TermT, TermT) → Vector (Maybe TermT, TermT)
-insertBinds new old = (bimap (nested <$>) nested <$> old) |> new
+insertBinds new old = new <| (bimap (nested <$>) nested <$> old)
 
 -- | Either infers a normalized type for the value and context, or checks a value against the normalized type.
 infer ∷ ∀ sig m a. (Has Solve sig m) ⇒ Vector (Maybe TermT, TermT) → TermT → InferMode a → m a
@@ -549,12 +549,12 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
     (NatLit _, Infer) → pure $ Builtin U32
     (TagLit _, Infer) → pure $ Builtin Tag
     (BoolLit _, Infer) → pure $ Builtin Bool
-    (Var i, Infer) → case binds !? (length binds - i - 1) of
+    (Var i, Infer) → case binds !? i of
       Nothing → stackError $ "Unknown var @" <> pretty i
       Just (_, ty) → pure ty
     -- TODO: Support checks...
     (Quantification _ _name kind ty, Infer) → do
-      res ← scopedVar id $ infer (insertBinds (Nothing, kind) binds) (unLambda ty) Infer
+      res ← scopedVar id $ infer (insertBinds (Nothing, normalize (fst <$> binds) kind) binds) (unLambda ty) Infer
       ensureIsType res
     -- (Pi inNameM x y, Check (App (Builtin Type) u)) → do
     --   infer x $ Check $ typOf u
@@ -563,8 +563,10 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
     --     $ Check
     --     $ typOf u
     (Pi inTy (Right outTy), Infer) → runSeqResolve do
-      inTyTy ← withResolved \_ → ensureIsType =<< infer binds inTy Infer
-      withResolved \exs → infer (resolveBinds exs binds) outTy $ Check inTyTy
+      inTyTy ← withResolved \_ → ensureIsType =<< infer binds (normalize (fst <$> binds) inTy) Infer
+      withResolved \exs →
+        let binds' = resolveBinds exs binds
+         in infer binds' (normalize (fst <$> binds') outTy) $ Check inTyTy
       withResolved \exs → pure (resolve exs inTyTy)
     (Builtin x, Infer) → pure $ typOfBuiltin x
     (BuiltinsVar, Infer) →
@@ -601,6 +603,7 @@ typOfBuiltin =
     RecordKeepFields → [parseBQQ| forall (u : U32) (row : Row (Type+ u)). exists (new-row : Row (Type+ u)). List Tag -> Record row -> Record new-row |]
     RecordDropFields → [parseBQQ| forall (u : U32) (row : Row (Type+ u)). exists (new-row : Row (Type+ u)). List Tag -> Record row -> Record new-row |]
     ListLength → [parseBQQ| forall (u : U32) (a : Type+ u). List a -> U32 |]
+    ListIndexL → [parseBQQ| forall (u : U32) (a : Type+ u). ind : U32 -> l : List a -> (exists (extra : U32). Eq (extra + ind + 1) (list-length l)) -> a |]
 
 instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ Ident → ExVarId → Maybe TermT → TermT → m ()
 instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1) t1 →
@@ -772,7 +775,7 @@ subtype = \a b →
           case eqA of
             EqYes → pure ()
             _ → stackError $ "Cannot subtype applications with different arguments:" <+> pTerm' a1 <+> "vs" <+> pTerm' a2 -- Corrected var name
-        _ → stackError $ "Cannot subtype applications with different arguments:" <+> pTerm' a1 <+> "vs" <+> pTerm' a2 -- Corrected var name
+        _ → stackError $ "Cannot subtype applications with different functions:" <+> pTerm' f1 <+> "vs" <+> pTerm' f2 -- Corrected var name
         -- Catch-all: if no rule matches, they are not subtypes
     (t1, t2) → stackError $ "Subtype check failed, no rule applies for:" <+> pTerm' t1 <+> "<:" <+> pTerm' t2
 
