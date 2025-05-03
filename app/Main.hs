@@ -324,6 +324,29 @@ withKnownFields tmap t f =
     )
     t
 
+bottom ∷ TermT
+bottom = [parseBQQ| forall (u : U32) (a : Type+ u). a |]
+
+bottomRow ∷ TermT
+bottomRow = [parseBQQ| forall (u : U32) (row : Row (Type+ u)). row |]
+
+ensureIsType ∷ (Has Solve sig m) ⇒ TermT → m TermT
+ensureIsType t = do
+  withMono
+    id
+    (lift fails)
+    ( \_ → \ty → case ty of
+        App (Builtin TypePlus) _ → pure ty
+        App (Builtin Row) _ → pure ty
+        App (Builtin Record) r →
+          rowOf <$> withKnownFields id r \fields →
+            fromMaybe bottomRow <$> execState Nothing (unifyFields fields)
+        _ → fails
+    )
+    t
+ where
+  fails = stackError $ pTerm' t <> " is not a type?"
+
 data InferMode a where
   Infer ∷ InferMode TermT
   Check ∷ TermT → InferMode ()
@@ -357,9 +380,6 @@ resolveMode exs = \case
 
 insertBinds ∷ (Maybe TermT, TermT) → Vector (Maybe TermT, TermT) → Vector (Maybe TermT, TermT)
 insertBinds new old = (bimap (nested <$>) nested <$> old) |> new
-
-bottom ∷ TermT
-bottom = [parseBQQ| forall (u : U32) (a : Type+ u). a |]
 
 -- | Either infers a normalized type for the value and context, or checks a value against the normalized type.
 infer ∷ ∀ sig m a. (Has Solve sig m) ⇒ Vector (Maybe TermT, TermT) → TermT → InferMode a → m a
@@ -492,7 +512,6 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
         -- TODO: what should be here?
         withKnown t f = withMono id (stackError "TODO Union infer") (\_exs → f) t
         withKnownFields' = withKnownFields id
-        bottomRow = [parseBQQ| forall (u : U32) (row : Row (Type+ u)). row |]
         unionT lT rT = case (lT, rT, rE) of
           (App (Builtin Record) lR, App (Builtin Record) rR, Right _) → pure $ recordOf $ union lR rR
           (App (Builtin Record) lR, App (Builtin Record) rR, Left (_, Lambda _)) →
@@ -533,30 +552,20 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
     (Var i, Infer) → case binds !? (length binds - i - 1) of
       Nothing → stackError $ "Unknown var @" <> pretty i
       Just (_, ty) → pure ty
-    -- -- {-
-    -- --     (Quantification _ name kind ty, mode) → scoped_ do
-    -- --       u ← pushExVar $ Just $ Builtin U32
-    -- --       pure do
-    -- --         infer ctx kind $ Check $ typOf u
-    -- --         kind' ← normalize (HM.mapMaybe fst ctx) kind
-    -- --         -- TODO: investigate correctness. This allows things like:
-    -- --         -- `forall x. Type -> x` : Kind
-    -- --         -- TODO: ... this allows things like:
-    -- --         -- /: fadeno.U32 -> fadeno.U32
-    -- --         -- forall (x : fadeno.U32). (\y. x + y)
-    -- --         -- ... so this is absolutely wrong, need to think about this.
-    -- --         infer (HM.insert name (Nothing, kind') ctx) ty mode -}
+    -- TODO: Support checks...
+    (Quantification _ _name kind ty, Infer) → do
+      res ← scopedVar id $ infer (insertBinds (Nothing, kind) binds) (unLambda ty) Infer
+      ensureIsType res
     -- (Pi inNameM x y, Check (App (Builtin Type) u)) → do
     --   infer x $ Check $ typOf u
     --   (if isJust inNameM then local @BindsT (|> (Nothing, PortableTerm valNesting0 x)) else id)
     --     $ infer y
     --     $ Check
     --     $ typOf u
-    -- (Pi inNameM x y, Infer) → scoped do
-    --   u ← pushExVar $ Just $ PortableTerm tyNesting0 $ Builtin U32
-    --   pure do
-    --     infer (Pi inNameM x y) $ Check $ typOf u
-    --     pure $ typOf u
+    (Pi inTy (Right outTy), Infer) → runSeqResolve do
+      inTyTy ← withResolved \_ → ensureIsType =<< infer binds inTy Infer
+      withResolved \exs → infer (resolveBinds exs binds) outTy $ Check inTyTy
+      withResolved \exs → pure (resolve exs inTyTy)
     (Builtin x, Infer) → pure $ typOfBuiltin x
     (BuiltinsVar, Infer) →
       pure
@@ -699,11 +708,11 @@ subtype = \a b →
         -- Both non-dependent
         (Right outT1, Right outT2) → subtype (resolve exs outT1) (resolve exs outT2)
         -- Both dependent
-        (Left (n1, lbd1), Left (n2, lbd2)) → do
+        (Left (_n1, lbd1), Left (n2, lbd2)) → do
           uniId ← fresh
           -- Introduce UniVar with the *supertype's* input type (inT2)
           scopedUniVar (const pure) uniId do
-            let var = UniVar n1 uniId inT2 -- Use common name/type for substitution
+            let var = UniVar n2 uniId inT2 -- Use common name/type for substitution
             let body1 = resolve exs $ normalize [Just var] $ unLambda lbd1
             let body2 = resolve exs $ normalize [Just var] $ unLambda lbd2
             subtype body1 body2
@@ -716,6 +725,7 @@ subtype = \a b →
     (App (Builtin TypePlus) a, App (Builtin TypePlus) b) → do
       case (a, b) of
         (NatLit x, NatLit y) | x <= y → pure ()
+        (NatLit 0, _) → pure ()
         -- If one level is existential, unify it with the other level constraint.
         (ExVar nA exA tyA, lvl2) → subtypeMeta nA exA tyA lvl2
         (lvl1, ExVar nB exB tyB) → subtypeMeta nB exB tyB lvl1

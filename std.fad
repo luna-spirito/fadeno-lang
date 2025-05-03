@@ -16,6 +16,14 @@ Ref = \Ty predicate. Record (s : { .val = Ty } /\ { .prf = predicate s.val })
 /: U32
 test = fadeno.list-length [1 | 2 | 3]
 
+/: Type
+Never = exists a. a
+
+/: forall (u : U32). Type+ u -> Type+ u
+Not = \a. a -> Never
+
+// TODO: Concat, not Union!
+
 // /: = List a -> U32
 // list-length = ...
 
