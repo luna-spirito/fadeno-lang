@@ -18,11 +18,11 @@ import Data.ByteString.Char8 (pack)
 import Data.List (sortBy)
 import Data.RRBVector (Vector, deleteAt, ifoldr, viewl, (!?), (<|), (|>))
 import GHC.Exts (IsList (..))
-import Normalize (EqRes (..), Resolved, isEq', nested, nestedBy, normalize, parseBQQ, resolve, resolve', rewrite, runSeqResolve, union, withResolved)
+import Normalize (EqRes (..), Resolved, concat, isEq', nested, nestedBy, normalize, parseBQQ, resolve, resolve', rewrite, runSeqResolve, withResolved)
 import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf)
 import Prettyprinter (Doc, annotate, group, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
-import RIO hiding (Reader, Vector, ask, filter, link, local, runReader, toList)
+import RIO hiding (Reader, Vector, ask, concat, filter, link, local, runReader, toList)
 import RIO.HashMap qualified as HM
 
 -- TODO: You currently don't perform `resolve` in terms processed...
@@ -280,7 +280,7 @@ rowGet mapTerm tag cont = go
             Just (App (Builtin Row) mT) → do
               h ← subExVar "head" (Just mT)
               t ← subExVar "tail" (Just $ rowOf mT)
-              pure $ Union h (Right t)
+              pure $ Concat h (Right t)
             _ → do
               (n, var, _ ∷ Maybe TermT) ← ask
               notARow $ ExVar n var ty
@@ -507,13 +507,13 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
                 withResolved \_ → infer binds v (Check unifiedTy0)
                 withResolved \exs → pure (resolve exs unifiedTy0)
             withResolved \exs → put (Just unifiedTy, resolveBinds exs binds0)
-    (Union l rE, Infer) →
+    (Concat l rE, Infer) →
       let
         -- TODO: what should be here?
-        withKnown t f = withMono id (stackError "TODO Union infer") (\_exs → f) t
+        withKnown t f = withMono id (stackError "TODO Concat infer") (\_exs → f) t
         withKnownFields' = withKnownFields id
-        unionT lT rT = case (lT, rT, rE) of
-          (App (Builtin Record) lR, App (Builtin Record) rR, Right _) → pure $ recordOf $ union lR rR
+        concatT lT rT = case (lT, rT, rE) of
+          (App (Builtin Record) lR, App (Builtin Record) rR, Right _) → pure $ recordOf $ concat lR rR
           (App (Builtin Record) lR, App (Builtin Record) rR, Left (_, Lambda _)) →
             rowOf <$> withKnownFields' lR \lR' → withKnownFields' rR \rR' →
               fromMaybe bottomRow
@@ -528,7 +528,7 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
           (App (Builtin Row) lRT, App (Builtin Row) rRT, _) → runSeqResolve do
             withResolved \_ → subtype rRT lRT
             withResolved \exs → pure $ resolve exs lRT
-          _ → stackError "Union of non-records"
+          _ → stackError "Concat of non-records"
        in
         runSeqResolve do
           lT ← withResolved \_ → infer binds l Infer
@@ -545,7 +545,7 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
                   (\r → infer binds' r Infer)
                   rE
           withResolved \exs →
-            withKnown (resolve exs lT) \lT' → withKnown rT \rT' → unionT lT' rT'
+            withKnown (resolve exs lT) \lT' → withKnown rT \rT' → concatT lT' rT'
     (NatLit _, Infer) → pure $ Builtin U32
     (TagLit _, Infer) → pure $ Builtin Tag
     (BoolLit _, Infer) → pure $ Builtin Bool
@@ -594,7 +594,7 @@ typOfBuiltin =
       [parseBQQ|
         forall (u : U32) (row : Row (Type+ u)) (t : Type+ u).
           tag : Tag ->
-          record : Record ({(tag) = t} /\ row) ->
+          record : Record ({(tag) = t} \/ row) ->
           t
       |]
     -- TODO: Better type
@@ -623,14 +623,14 @@ instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1)
           a' ← withResolved \exs → instMeta' $ resolve exs a
           pure $ App f' a'
         RecordLit flds → RecordLit <$> traverse (bitraverse instMeta' instMeta') flds
-        Union a b → runSeqResolve do
+        Concat a b → runSeqResolve do
           a' ← withResolved \_ → instMeta' a
           b' ← withResolved \exs →
             either
               (\(n, b'') → fmap (Left . (n,) . Lambda) $ scopedVar id $ instMeta' $ resolve' 1 exs $ unLambda b'')
               (fmap Right . instMeta' . resolve exs)
               b
-          pure $ Union a' b'
+          pure $ Concat a' b'
         Var x → pure $ Var x -- TODO: I hope this is correct, but needs to be rechecked.
         Builtin x → pure $ Builtin x
         NatLit x → pure $ NatLit x

@@ -11,7 +11,7 @@ id = \x. x
 _=>_ = \k v. { .k = k | .v = v }
 
 /: forall (u : U32). A : Type+ u -> (A -> Type+ u) -> Type+ u
-Ref = \Ty predicate. Record (s : { .val = Ty } /\ { .prf = predicate s.val })
+Ref = \Ty predicate. Record (s : { .val = Ty } \/ { .prf = predicate s.val })
 
 /: U32
 test = fadeno.list-length [1 | 2 | 3]
@@ -37,8 +37,8 @@ Not = \a. a -> Never
 //   ((List a -> acc) -> Record { .step = Record { .left = a | .rest = List a } | .base = acc }) ->
 //   acc
 
-// // Union = Record (meta : { .tag = Tag } /\ { .val = U32 })
+// // Union = Record (meta : { .tag = Tag } \/ { .val = U32 })
 // Union = \cases.
-//   Record (meta : { .tag = Tag } /\ fadeno.record-get meta.tag cases)
+//   Record (meta : { .tag = Tag } \/ fadeno.record-get meta.tag cases)
 
 in {}

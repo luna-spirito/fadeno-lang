@@ -109,7 +109,7 @@ identRightNow = do
           | Just (rest', '_') ← BS.unsnoc rest → (rest', True)
         _ → (rawResult, False)
   guard $ not $ BS.null result
-  guard $ not $ result `elem` (["=", "in", "+", "-", "/", "*", "->", "/\\", "forall", "unpack", "fadeno", "rewrite", "true", "false"] ∷ [ByteString])
+  guard $ not $ result `elem` (["=", "in", "+", "-", "/", "*", "->", "\\/", "forall", "unpack", "fadeno", "rewrite", "true", "false"] ∷ [ByteString])
   pure (Ident result isOp)
 
 ident ∷ Parser' Ident
@@ -204,7 +204,7 @@ data TermT
     Quantification !Quantifier !Ident !TermT !(Lambda TermT)
   | -- | Cedille: Π x : T | T’ / Fadeno: x : T -> T'
     Pi !TermT !(Either (Ident, Lambda TermT) TermT)
-  | Union !TermT !(Either (Ident, Lambda TermT) TermT)
+  | Concat !TermT !(Either (Ident, Lambda TermT) TermT)
   | Builtin !BuiltinT
   | BuiltinsVar
   | ExVar !Ident !ExVarId !(Maybe TermT)
@@ -374,9 +374,9 @@ parseTy =
             pure $ Pi inTy outTy
         )
           <|> ( do
-                  token $ $(string "/\\")
+                  token $ $(string "\\/")
                   rightTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local (|> name)) inNameM parseTy
-                  pure $ Union inTy rightTy
+                  pure $ Concat inTy rightTy
               )
           <|> ( do
                   guard $ isNothing inNameM
@@ -545,7 +545,7 @@ isSimple =
         RecordLit fields → ping *> traverse_ (\(k, v) → complexity k *> complexity v) fields
         Quantification _ _ b (Lambda c) → ping *> complexity b *> complexity c
         Pi b c → ping *> complexity b *> either (complexity . unLambda . snd) complexity c
-        Union a b → complexity a *> either (complexity . unLambda . snd) complexity b
+        Concat a b → complexity a *> either (complexity . unLambda . snd) complexity b
         Builtin _ → ping
         BuiltinsVar → ping
         ExVar{} → ping
@@ -644,11 +644,11 @@ pTerm (oldPrec, vars) =
             Left (name, outTy') → pTerm (5, vars |> name) $ unLambda outTy' -- Pi binder not op, use new prec 5
             Right outTy' → pTerm (5, vars) outTy' -- Use new prec 5
       )
-    Union a b →
+    Concat a b →
       ( 5
       , case b of
-          Left (n, b') → pIdent n <+> ":" <+> pTerm (6, vars) a <+> "/\\" <+> pTerm (5, vars |> n) (unLambda b')
-          Right b' → pTerm (6, vars) a <+> "/\\" <+> pTerm (5, vars) b'
+          Left (n, b') → pIdent n <+> ":" <+> pTerm (6, vars) a <+> "\\/" <+> pTerm (5, vars |> n) (unLambda b')
+          Right b' → pTerm (6, vars) a <+> "\\/" <+> pTerm (5, vars) b'
       )
     Sorry x _ → (7, "sorry/" <> pIdent x)
     App (App (Builtin RecordGet) (TagLit tag)) rec →

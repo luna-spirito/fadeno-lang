@@ -11,7 +11,7 @@ import Data.RRBVector (Vector, deleteAt, drop, ifoldr, viewl, (|>))
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (BlockT (..), BuiltinT (..), ExVarId, Ident, Lambda (..), OpT (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
-import RIO hiding (Reader, Vector, ask, drop, force, link, local, replicate, runReader, to, toList, try)
+import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try)
 import RIO.HashMap qualified as HM
 
 -- | Intensional equality.
@@ -118,7 +118,7 @@ isEq' f = curry \case
       $ force (withResolved \_ → isEq' f inT1 inT2)
       $ withResolved \exs → isEq' f (resolve exs outT1) (resolve exs outT2)
   (Pi{}, _) → pure EqNot
-  (Union _ _, _) → error "TODO isEq Union"
+  (Concat _ _, _) → error "TODO isEq Concat"
   (ListLit (Vector' (viewl → Just (x, xs))), ListLit (Vector' (viewl → Just (y, ys)))) →
     runSeqResolve
       $ force (withResolved \_ → isEq' f x y)
@@ -149,17 +149,17 @@ data NormCtx
 
 data ListDropRes = TDFound !TermT | TDMissing | TDUnknown
 
--- | Produces a non-dependent union.
-union ∷ TermT → TermT → TermT
-union = curry \case
+-- | Produces a non-dependent concat.
+concat ∷ TermT → TermT → TermT
+concat = curry \case
   (RecordLit l, RecordLit r) → RecordLit $ l <> r
-  (l, r) → Union l $ Right r
+  (l, r) → Concat l $ Right r
 
 unconsField ∷ TermT → Maybe ((TermT, TermT), TermT)
 unconsField = \case
-  Union l (Right (Union m (Right r))) → unconsField $ union l $ union m r
-  Union (RecordLit (Vector' fi)) (Right r) → case viewl fi of
-    Just (x, xs) → Just (x, union (RecordLit $ Vector' xs) r)
+  Concat l (Right (Concat m (Right r))) → unconsField $ concat l $ concat m r
+  Concat (RecordLit (Vector' fi)) (Right r) → case viewl fi of
+    Just (x, xs) → Just (x, concat (RecordLit $ Vector' xs) r)
     Nothing → unconsField r
   RecordLit (Vector' fi) → case viewl fi of
     Just (x, xs) → Just (x, RecordLit $ Vector' xs)
@@ -213,9 +213,9 @@ postApp f a = case f of
           Nothing → stuck
           Just ((n, v), fields) → case listLitDrop n tags of
             TDFound tags' →
-              (if keep then union (RecordLit [(n, v)]) else id) $ recordSelectFields keep tags' fields
+              (if keep then concat (RecordLit [(n, v)]) else id) $ recordSelectFields keep tags' fields
             TDMissing →
-              (if keep then id else union (RecordLit [(n, v)])) $ recordSelectFields keep tags fields
+              (if keep then id else concat (RecordLit [(n, v)])) $ recordSelectFields keep tags fields
             TDUnknown → stuck
 
 -- Rewrites & simplifies. In that order. Doesn't rewrite the simplified result.
@@ -265,12 +265,12 @@ rewrite onLet onNest rewriter = go
         Left (n, x) → Left . (n,) . Lambda <$> go (onNest via) (unLambda x)
         Right x → Right <$> go via x
       pure $ Pi inT' outT'
-    Union a b → do
+    Concat a b → do
       a' ← go via a
       b' ← either (\(n, b') → Left . (n,) . Lambda <$> go (onNest via) (unLambda b')) (fmap Right . go via) b
       pure $ case (a', b') of
         (RecordLit a'', Right (RecordLit b'')) → RecordLit $ a'' <> b''
-        _ → Union a' b'
+        _ → Concat a' b'
     ExVar n i t → ExVar n i <$> traverse (go via) t
     UniVar n i t → UniVar n i <$> go via t
 
