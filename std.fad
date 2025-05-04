@@ -10,14 +10,14 @@ id = \x. x
 /: forall (u : U32) (k : Type+ u) (v : Type+ u). k -> v -> Record { .k = k | .v = v }
 _=>_ = \k v. { .k = k | .v = v }
 
-/: forall (u : U32). A : Type+ u -> (A -> Type+ u) -> Type+ u
-Ref = \Ty predicate. Record (s : { .val = Ty } \/ { .prf = predicate s.val })
-
 /: Type
 Never = exists a. a
 
 /: forall (u : U32). Type+ u -> Type+ u
 Not = \a. a -> Never
+
+/: forall (u : U32). A : Type+ u -> (A -> Type+ u) -> Type+ u
+Ref = \Ty predicate. Record (s : { .val = Ty } \/ { .prf = predicate s.val })
 
 // // /: forall (u : U32) (a : Type+ u). List a -> Type+ u
 // // IsEmpty = \l. Eq (list-length l) 0
@@ -28,8 +28,11 @@ _~<=_ = \a b. exists (extra : U32). Eq (extra + a) b
 /: U32 -> U32 -> Type
 _~<_ = \a b. (a + 1) ~<= b
 
-/: forall (u : U32) (a : Type+ u). ind : U32 -> l : List a -> (ind ~< (list-length l)) -> a
-list-indexl = fadeno.list-indexl
+/: U32 -> Type
+Fin = \n. Ref U32 (\i. i ~< n)
+
+/: forall (u : U32) (a : Type+ u). l : List a -> Fin (list-length l) -> a
+list-indexl = \l i. fadeno.list-indexl l i.val i.prf
 
 // unfold : forall (u : U32) (acc : Type+ u). u : U32 -> (Ref U32 (\i. i ~<= u) -> acc -> acc) -> acc -> acc
 
@@ -44,4 +47,4 @@ list-indexl = fadeno.list-indexl
 // Union = \cases.
 //   Record (meta : { .tag = Tag } \/ fadeno.record-get meta.tag cases)
 
-in {}
+in Fin

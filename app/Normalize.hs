@@ -147,7 +147,7 @@ data NormCtx
   = NormBinds !(Vector (Maybe TermT))
   | NormRewrite !TermT !TermT -- on normalized
 
-data ListDropRes = TDFound !TermT | TDMissing | TDUnknown
+data ListDropRes = TDFound !(Vector' TermT) | TDMissing | TDUnknown
 
 -- | Produces a non-dependent concat.
 concat ∷ TermT → TermT → TermT
@@ -180,45 +180,41 @@ postApp f a = case f of
           EqUnknown → recordGet name1 a'
      in
       search a
-  App (Builtin RecordKeepFields) tags → recordSelectFields True tags a
-  App (Builtin RecordDropFields) tags → recordSelectFields False tags a
+  App (Builtin RecordKeepFields) (ListLit tags) → RecordLit $ (\tag → (tag, recordGet tag a)) <$> tags
+  App (Builtin RecordDropFields) (ListLit tags) → recordDropFields tags a
   Builtin ListLength → case a of
     ListLit (Vector' fi) → NatLit $ fromIntegral $ length fi
     _ → App f a
-  App (App (Builtin ListIndexL) (NatLit i)) (ListLit (Vector' vals)) → case vals !? fromIntegral i of
+  App (App (Builtin ListIndexL) (ListLit (Vector' vals))) (NatLit i) → case vals !? fromIntegral i of
     Just v → v
     Nothing → App f a
   _ → App f a
  where
   -- Drop `x` from ListLit.
-  listLitDrop ∷ TermT → TermT → ListDropRes
-  listLitDrop x = \case
-    ListLit (Vector' fi) →
-      ifoldr
-        ( \i n rec → case isEq x n of
-            EqYes → TDFound $ ListLit $ Vector' $ deleteAt i fi
-            EqNot → rec
-            EqUnknown → TDUnknown
-        )
-        TDMissing
-        fi
-    _ → TDUnknown
+  listLitDrop ∷ TermT → Vector' TermT → ListDropRes
+  listLitDrop x (Vector' fi) =
+    ifoldr
+      ( \i n rec → case isEq x n of
+          EqYes → TDFound $ Vector' $ deleteAt i fi
+          EqNot → rec
+          EqUnknown → TDUnknown
+      )
+      TDMissing
+      fi
 
-  recordSelectFields keep tags fields0 = case tags of
-    ListLit (Vector' (null → True)) → if keep then fields0 else RecordLit []
+  recordDropFields ∷ Vector' TermT → TermT → TermT
+  recordDropFields tags fields0 = case tags of
+    Vector' (null → True) → RecordLit []
     _ →
       let
-        stuck =
-          let fun = if keep then RecordKeepFields else RecordDropFields
-           in App (App (Builtin fun) tags) fields0
+        stuck = App (App (Builtin RecordDropFields) $ ListLit tags) fields0
        in
         case unconsField fields0 of
           Nothing → stuck
           Just ((n, v), fields) → case listLitDrop n tags of
-            TDFound tags' →
-              (if keep then concat (RecordLit [(n, v)]) else id) $ recordSelectFields keep tags' fields
+            TDFound tags' → recordDropFields tags' fields
             TDMissing →
-              (if keep then id else concat (RecordLit [(n, v)])) $ recordSelectFields keep tags fields
+              concat (RecordLit [(n, v)]) $ recordDropFields tags fields
             TDUnknown → stuck
 
 -- Rewrites & simplifies. In that order. Doesn't rewrite the simplified result.

@@ -255,7 +255,7 @@ isEqUnify = isEq' instMeta
 
 data LookupRes a
   = LookupFound !a
-  | LookupMissing !(Vector' TermT) -- Non-visited keys
+  | LookupMissing !(Vector' TermT) -- Visited keys
   | LookupUnknown
   deriving (Show)
 
@@ -299,6 +299,21 @@ rowGet mapTerm tag cont = go
                     LookupMissing (Vector' fi) → withResolved \exs → pure $ LookupMissing $ Vector' $ resolve exs n <| fi
                     LookupUnknown → pure LookupUnknown
                 EqUnknown → pure LookupUnknown
+          Concat l rE → runSeqResolve do
+            inL ← withResolved \exs → go (resolve exs l) record
+            case inL of
+              LookupMissing visited1 → do
+                let
+                  select f = normalize [] $ App (App (Builtin f) $ ListLit $ visited1) record
+                  recordL = select RecordKeepFields
+                  recordR = select RecordDropFields
+                r' ← withResolved \exs → case rE of
+                  Left (_, r) → go (normalize [Just recordL] $ resolve exs $ unLambda r) recordR
+                  Right r → go (resolve exs r) $ recordR
+                case r' of
+                  LookupMissing visited2 → pure $ LookupMissing $ visited1 <> visited2
+                  o → pure o
+              o → pure o
           x → notARow x
       )
       row
@@ -371,7 +386,7 @@ mapTermFor = \case
 
 resolveBinds ∷ HashMap ExVarId TermT → Vector (Maybe TermT, TermT) → Vector (Maybe TermT, TermT)
 resolveBinds (HM.null → True) = id
-resolveBinds exs = fmap $ bimap (fmap $ resolve exs) $ resolve exs
+resolveBinds exs = fmap $ bimap id $ resolve exs
 
 resolveMode ∷ HashMap ExVarId TermT → InferMode a → InferMode a
 resolveMode exs = \case
@@ -485,7 +500,7 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
               Pi inT outTE → runSeqResolve do
                 withResolved \_ → infer (resolveBinds (exs <> exs2) binds) a $ Check $ inT
                 withResolved \exs3 → pure $ case outTE of
-                  Left (_, outT) → resolve exs3 $ normalize [Just a] $ unLambda outT
+                  Left (_, outT) → resolve exs3 $ normalize [Just $ normalize (fst <$> binds) a] $ unLambda outT
                   Right outT → resolve exs3 outT
               t → stackError $ "inferApp " <> pTerm' t
           )
@@ -603,7 +618,7 @@ typOfBuiltin =
     RecordKeepFields → [parseBQQ| forall (u : U32) (row : Row (Type+ u)). exists (new-row : Row (Type+ u)). List Tag -> Record row -> Record new-row |]
     RecordDropFields → [parseBQQ| forall (u : U32) (row : Row (Type+ u)). exists (new-row : Row (Type+ u)). List Tag -> Record row -> Record new-row |]
     ListLength → [parseBQQ| forall (u : U32) (a : Type+ u). List a -> U32 |]
-    ListIndexL → [parseBQQ| forall (u : U32) (a : Type+ u). ind : U32 -> l : List a -> (exists (extra : U32). Eq (extra + ind + 1) (list-length l)) -> a |]
+    ListIndexL → [parseBQQ| forall (u : U32) (a : Type+ u). l : List a -> ind : U32 -> (exists (extra : U32). Eq (extra + ind + 1) (list-length l)) -> a |]
 
 instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ Ident → ExVarId → Maybe TermT → TermT → m ()
 instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1) t1 →
