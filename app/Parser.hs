@@ -31,7 +31,7 @@ import Data.ByteString.Char8 (pack)
 import Data.ByteString.Char8 qualified as BS
 import Data.Hashable (Hashable (..))
 import Data.Kind (Type)
-import Data.RRBVector (Vector, findIndexR, (!?), (|>))
+import Data.RRBVector (Vector, findIndexL, (!?), (<|))
 import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string)
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
@@ -152,7 +152,7 @@ data BuiltinT
   -- If -- TODO: Make Choice counterpart for Record
   deriving (Show, Eq, Lift)
 
-builtinsList ∷ [BuiltinT]
+builtinsList ∷ Vector BuiltinT
 builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL]
 
 identOfBuiltin ∷ BuiltinT → Ident
@@ -280,7 +280,7 @@ parseEq = token $ notFollowedBy $(char '=') identSym
 findVar ∷ ByteString → Parser' (Maybe (Int, Bool))
 findVar name = do
   vars ← ask
-  case findIndexR (\(Ident eName _) → eName == name) vars of
+  case findIndexL (\(Ident eName _) → eName == name) vars of
     Just n →
       let (Ident _ eOp) = fromMaybe (error "impossible") $ vars !? n
        in pure $ Just (n, eOp)
@@ -316,12 +316,11 @@ parsePrim = token do
               -- Variable parsing
               -- TODO: { x = 4 }
               Ident iName iOp ← notFollowedBy ident parseEq
-              vars ← ask
               findVar iName >>= \case
                 Just (n, eOp) → case (eOp, iOp) of
                   (True, False) → empty -- TODO: this is a crutch to stop user-defined operators from crashing the parser.
                   (False, True) → err =<< getPos
-                  _ → pure $ length vars - n - 1
+                  _ → pure n
                 Nothing → err =<< getPos -- TODO: better errors, overall
           )
       <|> ( $(char '(') -- Parentheses parsing
@@ -355,7 +354,7 @@ parseTy =
             token
               $ ((,App (Builtin TypePlus) $ NatLit 0) <$> ident)
               <|> ($(char '(') *> ((,) <$> ident <*> kind) <* $(char ')'))
-          Quantification q ty ki . Lambda <$> local (|> ty) manyEntries
+          Quantification q ty ki . Lambda <$> local (ty <|) manyEntries
         manyEntries =
           someEntries <|> (token $(char '.') *> parseTy)
       someEntries
@@ -373,12 +372,12 @@ parseTy =
       inTy ← parseApp
       ( ( do
             token $ $(string "->")
-            outTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local (|> name)) inNameM parseTy
+            outTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local (name <|)) inNameM parseTy
             pure $ Pi inTy outTy
         )
           <|> ( do
                   token $ $(string "\\/")
-                  rightTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local (|> name)) inNameM parseTy
+                  rightTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local (name <|)) inNameM parseTy
                   pure $ Concat inTy rightTy
               )
           <|> ( do
@@ -399,7 +398,7 @@ parseInfixOps = infxr parseTy parseOperator'
       Ident opName False →
         findVar opName >>= \case
           Just (idx, True) → do
-            let varIdx = length vars - idx - 1 -- De Bruijn index
+            let varIdx = idx -- length vars - idx - 1 -- De Bruijn index
             pure \a b → App (App (Var varIdx) a) b
           _ → empty -- Not a known operator in this scope
       _ → empty
@@ -441,7 +440,7 @@ parseBlock = do
     someEntries =
       ( do
           (name, ty, expr) ← binding
-          rest ← Lambda <$> (local (|> name) manyEntries)
+          rest ← Lambda <$> (local (name <|) manyEntries)
           pure $ Block (BlockLet name ty expr rest)
       )
         <|> ( do
@@ -451,7 +450,7 @@ parseBlock = do
                 token $ $(char '.')
                 fieldNames ← some (token $ notFollowedBy ident parseEq)
                 foldr
-                  (\name cont → Block . BlockLet name Nothing (recordGet (TagLit name) record) . Lambda <$> local (|> name) cont)
+                  (\name cont → Block . BlockLet name Nothing (recordGet (TagLit name) record) . Lambda <$> local (name <|) cont)
                   manyEntries
                   fieldNames
             )
@@ -478,7 +477,7 @@ parseLam = token do
   let
     parseBod = \case
       [] → parseTop
-      (x : xs) → local (|> x) $ parseBod xs
+      (x : xs) → local (x <|) $ parseBod xs
   bod ← parseBod idents
   pure $ foldr (\n → Lam n . Lambda) bod idents
 
@@ -570,7 +569,7 @@ pTerm (oldPrec, vars) =
               <> pIdent arg
               <> annotate (color Magenta) "."
               <> sep'
-              <> pTerm (0, vars |> arg) (unLambda x)
+              <> pTerm (0, arg <| vars) (unLambda x)
       )
     block@(Block{}) →
       ( 1
@@ -584,7 +583,7 @@ pTerm (oldPrec, vars) =
                           <> pIdent name
                           <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTerm (0, vars') val)
                       )
-                    (entries, rest, vars'') = go (vars' |> name) $ unLambda in_
+                    (entries, rest, vars'') = go (name <| vars') $ unLambda in_
                  in (entry : entries, rest, vars'')
               BlockRewrite x in_ →
                 let
@@ -595,29 +594,7 @@ pTerm (oldPrec, vars) =
             r → ([], r, vars')
          in
           let (entries, rest, vars'') = go vars block
-           in -- collect term = case term of
-              --   Block entry →
-              --     let (tEntries, tIn_) = collect next
-              --      in (entry : tEntries, tIn_)
-              --   _ → pure term
-              -- (entries, in_) = collect block
-              -- (renderedEntries, vars'') =
-              --   foldl'
-              --     ( \(acc, vars') → \case
-              --         BlockLet name tyM val →
-              --           ( ( maybe mempty (\ty → "/:" <+> pTerm (2, vars') ty <> line) tyM -- TODO: split if complicated type
-              --                 <> pIdent name
-              --                 <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTerm (0, vars') val)
-              --             )
-              --               : acc
-              --           , vars' |> name
-              --           )
-              --         BlockRewrite x → (("rewrite" <+> pTerm (0, vars') x) : acc, vars')
-              --     )
-              --     (mempty, vars)
-              --     entries
-
-              vsep entries
+           in vsep entries
                 <> line
                 <> annotate (color Cyan) "in"
                 <+> nest 2 (pTerm (1, vars'') rest)
@@ -637,20 +614,20 @@ pTerm (oldPrec, vars) =
             q' = case q of
               Forall → "forall"
               Exists → "exists"
-         in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm (5, vars |> name) (unLambda ty) -- Quantifier binder not op
+         in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm (5, name <| vars) (unLambda ty)
       )
     Pi inTy outTy →
       ( 5
       , either (\(name, _) → pIdent name <+> ": ") mempty outTy <> pTerm (6, vars) inTy
           <+> "->"
           <+> case outTy of
-            Left (name, outTy') → pTerm (5, vars |> name) $ unLambda outTy' -- Pi binder not op, use new prec 5
-            Right outTy' → pTerm (5, vars) outTy' -- Use new prec 5
+            Left (name, outTy') → pTerm (5, name <| vars) $ unLambda outTy'
+            Right outTy' → pTerm (5, vars) outTy'
       )
     Concat a b →
       ( 5
       , case b of
-          Left (n, b') → pIdent n <+> ":" <+> pTerm (6, vars) a <+> "\\/" <+> pTerm (5, vars |> n) (unLambda b')
+          Left (n, b') → pIdent n <+> ":" <+> pTerm (6, vars) a <+> "\\/" <+> pTerm (5, n <| vars) (unLambda b')
           Right b' → pTerm (6, vars) a <+> "\\/" <+> pTerm (5, vars) b'
       )
     Sorry x _ → (7, "sorry/" <> pIdent x)
@@ -658,10 +635,9 @@ pTerm (oldPrec, vars) =
       (7, pTerm (7, vars) rec <> "." <> pIdent tag)
     App lam arg2 → case lam of
       App (Var opIdx) arg1
-        | Just (Ident opName True) ← vars !? (length vars - opIdx - 1) → -- An operator
+        | Just (Ident opName True) ← vars !? opIdx →
             (4, pTerm (5, vars) arg1 <+> pBS opName <+> pTerm (4, vars) arg2)
       _ →
-        -- Not an operator or out of bounds
         (6, pTerm (6, vars) lam <+> pTerm (7, vars) arg2)
     Builtin x → (7, "fadeno." <> pIdent (identOfBuiltin x))
     BuiltinsVar → (7, "fadeno")
@@ -677,7 +653,7 @@ pTerm (oldPrec, vars) =
           (fmap (\(n, v) → pTerm (7, vars) n <+> annotate (color Cyan) "=" <+> pTerm (0, vars) v) (toList fields))
       )
     ListLit vec → (7, encloseSep "[" "]" " | " $ fmap (\x → pTerm (0, vars) x) (toList vec))
-    Var x → (7, maybe ("@" <> pretty x) pIdent $ vars !? (length vars - x - 1))
+    Var x → (7, maybe ("@" <> pretty x) pIdent $ vars !? x)
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)

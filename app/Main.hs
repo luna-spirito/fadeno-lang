@@ -587,7 +587,10 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
     (BuiltinsVar, Infer) →
       pure
         $ App (Builtin Record)
-        $ RecordLit (fromList $ (\b → (TagLit $ identOfBuiltin b, typOfBuiltin b)) <$> builtinsList)
+        $ RecordLit
+        $ Vector'
+        $ (\b → (TagLit $ identOfBuiltin b, typOfBuiltin b))
+        <$> builtinsList
     (UniVar _n _i ty, Infer) → pure ty
     (ExVar _n _i (Just ty), Infer) → pure ty
     (k, Infer) → stackError $ pretty $ show k

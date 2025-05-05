@@ -7,8 +7,7 @@ import Control.Carrier.Writer.Church (runWriter)
 import Control.Effect.Empty (empty)
 import Control.Effect.State (get, put)
 import Control.Effect.Writer (Writer, listen, tell)
-import Data.RRBVector (Vector, deleteAt, drop, ifoldr, splitAt, viewl, (!?), (<|), (|>))
-import GHC.Exts (IsList (..))
+import Data.RRBVector (Vector, deleteAt, ifoldr, splitAt, viewl, (!?), (<|))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (BlockT (..), BuiltinT (..), ExVarId, Ident, Lambda (..), OpT (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try)
@@ -142,7 +141,7 @@ isEq a b =
     Nothing → EqNot
 
 builtinsVar ∷ TermT
-builtinsVar = RecordLit $ fromList $ (\b → (TagLit $ identOfBuiltin b, Builtin b)) <$> builtinsList
+builtinsVar = RecordLit $ Vector' $ (\b → (TagLit $ identOfBuiltin b, Builtin b)) <$> builtinsList
 data NormCtx
   = NormBinds !(Vector (Maybe TermT))
   | NormRewrite !TermT !TermT -- on normalized
@@ -322,7 +321,7 @@ applyLambda ∷ Lambda TermT → TermT → TermT
 applyLambda bod val = normalize [Just val] $ unLambda bod
 
 normalizeBuiltin ∷ TermT → TermT
-normalizeBuiltin = normalize (Just . Builtin <$> fromList (reverse builtinsList))
+normalizeBuiltin = normalize (Just . Builtin <$> builtinsList)
 
 {- | Parse builtin
 Just a variation of parseQQ that has all the builtins in scope from the start.
@@ -330,7 +329,7 @@ Just a variation of parseQQ that has all the builtins in scope from the start.
 parseBQQ ∷ QuasiQuoter
 parseBQQ =
   QuasiQuoter
-    { quoteExp = \s → ⟦normalizeBuiltin $(quoteExp (parseQQ $ identOfBuiltin <$> fromList builtinsList) s)⟧
+    { quoteExp = \s → ⟦normalizeBuiltin $(quoteExp (parseQQ $ identOfBuiltin <$> builtinsList) s)⟧
     , quotePat = error "No pattern support"
     , quoteType = error "No type support"
     , quoteDec = error "No declaration support"
