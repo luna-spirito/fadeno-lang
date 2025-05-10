@@ -32,7 +32,10 @@ _~<_ = \a b. (a + 1) ~<= b
 Fin = \n. Ref U32 (\i. i ~< n)
 
 /: forall (u : U32) (A : Type+ u). l : List A -> Fin (list-length l) -> A
-list-indexl = \l i. fadeno.list-indexl l i.val i.prf
+list-indexl = fadeno.list-indexl
+
+// /: forall (u : U32). P : (U32 -> Type+ u) -> n : U32 -> P 0 -> (i : Fin n -> P i.val -> P (i.val + 1)) -> P n
+// fold = fadeno.nat~fold
 
 // unfold : forall (u : U32) (acc : Type+ u). u : U32 -> (Ref U32 (\i. i ~<= u) -> acc -> acc) -> acc -> acc
 
@@ -47,4 +50,4 @@ list-indexl = \l i. fadeno.list-indexl l i.val i.prf
 // Union = \cases.
 //   Record (meta : { .tag = Tag } \/ fadeno.record-get meta.tag cases)
 
-in Fin
+in fadeno.list-indexl

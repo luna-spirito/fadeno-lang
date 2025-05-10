@@ -18,7 +18,7 @@ import Data.ByteString.Char8 (pack)
 import Data.List (sortBy)
 import Data.RRBVector (Vector, deleteAt, ifoldr, viewl, (!?), (<|))
 import GHC.Exts (IsList (..))
-import Normalize (EqRes (..), Resolved, concat, isEq', nested, nestedBy, normalize, parseBQQ, resolve, resolve', rewrite, runSeqResolve, withResolved)
+import Normalize (EqRes (..), Resolved, concat, isEq', nested, nestedBy, normalize, resolve, resolve', rewrite, runSeqResolve, termQQ, withResolved)
 import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf)
 import Prettyprinter (Doc, annotate, group, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
@@ -340,10 +340,10 @@ withKnownFields tmap t f =
     t
 
 bottom ∷ TermT
-bottom = [parseBQQ| forall (u : U32) (a : Type+ u). a |]
+bottom = [termQQ| forall (u : U32) (a : Type+ u). a |]
 
 bottomRow ∷ TermT
-bottomRow = [parseBQQ| forall (u : U32) (row : Row (Type+ u)). row |]
+bottomRow = [termQQ| forall (u : U32) (row : Row (Type+ u)). row |]
 
 ensureIsType ∷ (Has Solve sig m) ⇒ TermT → m TermT
 ensureIsType t = do
@@ -601,27 +601,27 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
 typOfBuiltin ∷ BuiltinT → TermT
 typOfBuiltin =
   \case
-    U32 → [parseBQQ| Type+ 0 |]
-    Tag → [parseBQQ| Type+ 0 |]
-    Bool → [parseBQQ| Type+ 0 |]
-    Row → [parseBQQ| forall (u : U32). Type+ u -> Type+ u |]
-    Record → [parseBQQ| forall (u : U32). Row (Type+ u) -> Type+ u |]
-    List → [parseBQQ| forall (u : U32). Type+ u -> Type+ u |]
-    TypePlus → [parseBQQ| u : U32 -> Type+ (u + 1) |]
-    Eq → [parseBQQ| forall (u : U32) (a : Type+ u). a -> a -> Type+ u |]
-    Refl → [parseBQQ| forall (u : U32) (a : Type+ u) (x : a). Eq x x |]
+    U32 → [termQQ| Type+ 0 |]
+    Tag → [termQQ| Type+ 0 |]
+    Bool → [termQQ| Type+ 0 |]
+    Row → [termQQ| forall (u : U32). Type+ u -> Type+ u |]
+    Record → [termQQ| forall (u : U32). Row (Type+ u) -> Type+ u |]
+    List → [termQQ| forall (u : U32). Type+ u -> Type+ u |]
+    TypePlus → [termQQ| u : U32 -> Type+ (u + 1) |]
+    Eq → [termQQ| forall (u : U32) (a : Type+ u). a -> a -> Type+ u |]
+    Refl → [termQQ| forall (u : U32) (a : Type+ u) (x : a). Eq x x |]
     RecordGet →
-      [parseBQQ|
+      [termQQ|
         forall (u : U32) (row : Row (Type+ u)) (t : Type+ u).
           tag : Tag ->
           record : Record ({(tag) = t} \/ row) ->
           t
       |]
     -- TODO: Better type
-    RecordKeepFields → [parseBQQ| forall (u : U32) (row : Row (Type+ u)). exists (new-row : Row (Type+ u)). List Tag -> Record row -> Record new-row |]
-    RecordDropFields → [parseBQQ| forall (u : U32) (row : Row (Type+ u)). exists (new-row : Row (Type+ u)). List Tag -> Record row -> Record new-row |]
-    ListLength → [parseBQQ| forall (u : U32) (a : Type+ u). List a -> U32 |]
-    ListIndexL → [parseBQQ| forall (u : U32) (a : Type+ u). l : List a -> ind : U32 -> (exists (extra : U32). Eq (extra + ind + 1) (list-length l)) -> a |]
+    RecordKeepFields → [termQQ| forall (u : U32) (row : Row (Type+ u)). exists (new-row : Row (Type+ u)). List Tag -> Record row -> Record new-row |]
+    RecordDropFields → [termQQ| forall (u : U32) (row : Row (Type+ u)). exists (new-row : Row (Type+ u)). List Tag -> Record row -> Record new-row |]
+    ListLength → [termQQ| forall (u : U32) (a : Type+ u). List a -> U32 |]
+    ListIndexL → [termQQ| forall (u : U32) (a : Type+ u). l : List a -> Fin (list-length l) -> a |]
 
 instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ Ident → ExVarId → Maybe TermT → TermT → m ()
 instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1) t1 →
@@ -784,7 +784,17 @@ subtype = \a b →
             (\fields1' (name, ty) → withResolved \exs → fields1Drop fields1' (resolve exs name) (resolve exs ty))
             fields1
             fields2
-    -- Application (App f1 a1 <: App f2 a2) - Very restricted for now
+    -- n : l1 \/ r1  <:  n : l2 \/ r2
+    (Concat l1 (Left (n, lr1)), Concat l2 (Left (_, lr2))) → runSeqResolve do
+      withResolved \_ → subtype l1 l2
+      uniId ← fresh
+      withResolved \exs → scopedUniVar (const pure) uniId do
+        let var = UniVar n uniId l1
+        let body1 = resolve exs $ normalize [Just var] $ unLambda lr1
+        let body2 = resolve exs $ normalize [Just var] $ unLambda lr2
+        subtype body1 body2
+
+    -- App f1 a1 <: App f2 a2
     (App f1 a1, App f2 a2) → runSeqResolve do
       eqF ← withResolved \_ → isEqUnify f1 f2
       case eqF of
@@ -792,9 +802,9 @@ subtype = \a b →
           eqA ← withResolved \exs → isEqUnify (resolve exs a1) (resolve exs a2)
           case eqA of
             EqYes → pure ()
-            _ → stackError $ "Cannot subtype applications with different arguments:" <+> pTerm' a1 <+> "vs" <+> pTerm' a2 -- Corrected var name
-        _ → stackError $ "Cannot subtype applications with different functions:" <+> pTerm' f1 <+> "vs" <+> pTerm' f2 -- Corrected var name
-        -- Catch-all: if no rule matches, they are not subtypes
+            _ → stackError $ "Cannot subtype applications with different arguments:" <+> pTerm' a1 <+> "vs" <+> pTerm' a2
+        _ → stackError $ "Cannot subtype applications with different functions:" <+> pTerm' f1 <+> "vs" <+> pTerm' f2
+    -- Catch-all: if no rule matches, they are not subtypes
     (t1, t2) → stackError $ "Subtype check failed, no rule applies for:" <+> pTerm' t1 <+> "<:" <+> pTerm' t2
 
 runSolveM ∷ (Applicative m) ⇒ WriterC Resolved (FreshC (ErrorC (Doc AnsiStyle) m)) a → m (Either (Doc AnsiStyle) a)

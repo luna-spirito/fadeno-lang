@@ -7,9 +7,10 @@ import Control.Carrier.Writer.Church (runWriter)
 import Control.Effect.Empty (empty)
 import Control.Effect.State (get, put)
 import Control.Effect.Writer (Writer, listen, tell)
+import Data.ByteString.Char8 (pack)
 import Data.RRBVector (Vector, deleteAt, ifoldr, splitAt, viewl, (!?), (<|))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (BlockT (..), BuiltinT (..), ExVarId, Ident, Lambda (..), OpT (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parseFile, parseQQ, recordGet, render)
+import Parser (BlockT (..), BuiltinT (..), ExVarId, Ident (..), Lambda (..), OpT (..), Quantifier (..), TermT (..), Vector' (..), builtinsList, eqOf, identOfBuiltin, pTerm', parse, parseFile, recordGet, recordOf, render)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try)
 import RIO.HashMap qualified as HM
 
@@ -320,20 +321,50 @@ rewriteTerm what0 with0 =
 applyLambda ∷ Lambda TermT → TermT → TermT
 applyLambda bod val = normalize [Just val] $ unLambda bod
 
-normalizeBuiltin ∷ TermT → TermT
-normalizeBuiltin = normalize (Just . Builtin <$> builtinsList)
-
 {- | Parse builtin
 Just a variation of parseQQ that has all the builtins in scope from the start.
 -}
-parseBQQ ∷ QuasiQuoter
-parseBQQ =
-  QuasiQuoter
-    { quoteExp = \s → ⟦normalizeBuiltin $(quoteExp (parseQQ $ identOfBuiltin <$> builtinsList) s)⟧
-    , quotePat = error "No pattern support"
-    , quoteType = error "No type support"
-    , quoteDec = error "No declaration support"
-    }
+termQQ ∷ QuasiQuoter
+termQQ =
+  let
+    finT =
+      Lam (Ident "n" False)
+        $ Lambda
+        $ recordOf
+        $ Concat
+          (RecordLit [(TagLit (Ident "val" False), Builtin U32)])
+        $ Left
+          ( Ident "s" False
+          , Lambda
+              $ RecordLit
+                [
+                  ( TagLit (Ident "prf" False)
+                  , Quantification Exists (Ident "extra" False) (Builtin U32)
+                      $ Lambda
+                      $ eqOf
+                        ( Op (Var 0) Add
+                            $ Op
+                              (recordGet (TagLit (Ident "val" False)) (Var 1))
+                              Add
+                              (NatLit 1)
+                        )
+                        (Var 2)
+                  )
+                ]
+          )
+    scope = ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList) <> [(Ident "Fin" False, finT)]
+   in
+    QuasiQuoter
+      { quoteExp = \s → do
+          term ← case parse (fst <$> scope) (pack s) of
+            Left e → fail $ "termQQ: Parse error: " ++ show e
+            Right t → pure t
+          let normed = normalize (Just . snd <$> scope) term
+          ⟦normed⟧
+      , quotePat = error "termQQ: No pattern support"
+      , quoteType = error "termQQ: No type support"
+      , quoteDec = error "termQQ: No declaration support"
+      }
 
 normalizeFile ∷ FilePath → IO ()
 normalizeFile x = do

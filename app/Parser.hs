@@ -18,10 +18,10 @@ module Parser (
   pIdent,
   pTerm',
   parse,
-  parseQQ,
   parseFile,
   render,
   formatFile,
+  eqOf,
 ) where
 
 import Control.Carrier.Empty.Church (runEmpty)
@@ -246,6 +246,9 @@ recordGet tag record = (Builtin RecordGet `App` tag) `App` record
 typ ∷ TermT
 typ = typOf $ NatLit 0
 
+eqOf ∷ TermT → TermT → TermT
+eqOf a b = (Builtin Eq) `App` a `App` b
+
 -- If → "if"
 
 infxr ∷ Parser' a → Parser' (a → a → a) → Parser' a
@@ -393,12 +396,11 @@ parseInfixOps = infxr parseTy parseOperator'
   parseOperator' ∷ Parser' (TermT → TermT → TermT)
   parseOperator' = do
     i ← ident
-    vars ← ask
     case i of
       Ident opName False →
         findVar opName >>= \case
           Just (idx, True) → do
-            let varIdx = idx -- length vars - idx - 1 -- De Bruijn index
+            let varIdx = idx
             pure \a b → App (App (Var varIdx) a) b
           _ → empty -- Not a known operator in this scope
       _ → empty
@@ -668,17 +670,6 @@ parse vars inp = case runParser (parseTop <* eof) vars 0 inp of
   OK x _ "" → Right x
   Err e → Left $ "Unable to parse at " <> tshow (posLineCols inp [e])
   _ → Left "Internal error: uncaught failure"
-
-parseQQ ∷ Vector Ident → QuasiQuoter
-parseQQ vars =
-  QuasiQuoter
-    { quoteExp = \s → case parse vars (pack s) of
-        Right t → ⟦t⟧
-        Left e → fail $ "Failed to parse: " ++ show e
-    , quotePat = error "No pattern support"
-    , quoteType = error "No type support"
-    , quoteDec = error "No declaration support"
-    }
 
 parseFile ∷ FilePath → IO TermT
 parseFile x = either (error . show) id . parse [] <$> readFileBinary x
