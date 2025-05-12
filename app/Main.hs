@@ -623,6 +623,7 @@ typOfBuiltin =
     ListLength → [termQQ| forall (u : U32) (a : Type+ u). List a -> U32 |]
     ListIndexL → [termQQ| forall (u : U32) (a : Type+ u). l : List a -> Fin (list-length l) -> a |]
     NatFold → [termQQ| forall (u : U32). Acc : (U32 -> Type+ u) -> n : U32 -> Acc 0 -> (i : Fin n -> Acc i -> Acc (i + 1)) -> Acc n |]
+    If → [termQQ| forall (u : U32) (a : Type+ u). cond : Bool -> (Eq cond true -> a) -> (Eq cond false -> a) -> a |]
 
 instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ Ident → ExVarId → Maybe TermT → TermT → m ()
 instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1) t1 →

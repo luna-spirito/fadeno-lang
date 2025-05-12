@@ -210,6 +210,10 @@ postApp f a = case f of
         $ case nTM of
           Nothing → start
           Just nT → Builtin NatFold `App` accf `App` nT `App` start `App` step
+  Builtin If `App` (BoolLit cond) `App` thenBranch `App` elseBranch →
+    if cond
+      then normalize [Just $ RecordLit []] thenBranch
+      else normalize [Just $ RecordLit []] elseBranch
   _ → App f a
  where
   -- Drop `x` from ListLit.

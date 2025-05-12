@@ -151,11 +151,11 @@ data BuiltinT
   | ListLength
   | ListIndexL
   | NatFold
-  -- If -- TODO: Make Choice counterpart for Record
+  | If -- TODO: Make Choice counterpart for Record
   deriving (Show, Eq, Lift)
 
 builtinsList ∷ Vector BuiltinT
-builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold]
+builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If]
 
 identOfBuiltin ∷ BuiltinT → Ident
 identOfBuiltin =
@@ -175,6 +175,7 @@ identOfBuiltin =
     ListLength → "list-length"
     ListIndexL → "list-indexl"
     NatFold → "nat~fold"
+    If → "if"
 
 data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
 

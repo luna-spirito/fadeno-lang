@@ -1,4 +1,4 @@
-unpack fadeno. Type+ U32 Tag List Eq refl Row Record list-length
+unpack fadeno. Type+ U32 Tag List Bool Eq refl Row Record list-length if
 
 Kind = Type+ 1
 /: Kind
@@ -9,6 +9,11 @@ id = \x. x
 
 /: forall (u : U32) (K : Type+ u) (V : Type+ u). K -> V -> Record { .k = K | .v = V }
 _=>_ = \k v. { .k = k | .v = v }
+
+/: forall (u : U32). Type+ u
+Unit = Record {}
+/: Unit
+unit = {}
 
 /: Type
 Never = exists A. A
@@ -37,15 +42,23 @@ list-indexl = fadeno.list-indexl
 /: forall (u : U32). Acc : (U32 -> Type+ u) -> n : U32 -> Acc 0 -> (i : Fin n -> Acc i -> Acc (i + 1)) -> Acc n
 nat~fold = fadeno.nat~fold
 
-// Mendler f =
-// test =
-//   forall (u : U32) (a : Type+ u) (acc : Type+ u).
-//   List a ->
-//   ((List a -> acc) -> Record { .step = Record { .left = a | .rest = List a } | .base = acc }) ->
-//   acc
+// /: forall (u : U32). Tag -> Row (Type+ u) -> Row (Type+ u)
+// Optional = \tag row. s : { (tag) = Bool } \/ row
+
+// Trash signature. It's way too overcomplicated by itself.
+// /: forall (u : U32) (a : Type+ u) (b : Type+ u). l : List a -> (a -> Record (Optional .found {.val = b})) -> Record (Optional .found {.val = b})
+// list-findl =
+
+// /: u : U32 -> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
+// find-case = \u tag cases. nat~fold
+//  (\i. Unit -> Row (Type+ u))
+//  (list-length cases)
+//  {} //(forall (row : Row (Type+ u)). row)
+//  (\i rec. {})
+//  {}
 
 // // Union = Record (meta : { .tag = Tag } \/ { .val = U32 })
 // Union = \cases.
 //   Record (meta : { .tag = Tag } \/ fadeno.record-get meta.tag cases)
 
-in {}
+in {} //Unit -> Row (Type+ 0) //nat~fold (\i. Unit -> Row (Type+ 0)) //Row (Type+ 4)
