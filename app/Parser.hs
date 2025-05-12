@@ -27,19 +27,20 @@ module Parser (
 import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.State.Church (evalState, get, modify)
 import Control.Effect.Empty qualified as E
-import Data.ByteString.Char8 (pack)
 import Data.ByteString.Char8 qualified as BS
 import Data.Hashable (Hashable (..))
 import Data.Kind (Type)
 import Data.RRBVector (Vector, findIndexL, (!?), (<|))
 import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string)
 import GHC.Exts (IsList (..))
-import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (Lift (..))
 import Language.Haskell.TH.Syntax qualified as TH
 import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, encloseSep, layoutSmart, line, nest, softline, vsep, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
 import RIO hiding (Reader, Vector, ask, local, toList)
+
+-- TODO ASAP: assocativity for operators. YeAh, TuRns oUT wE NeEd iT, wHo coUlD hAvE GuESseD?
+-- (6 - 4 - 2 ≠ 6 - (4 - 2))
 
 data OpT
   = Add
@@ -149,11 +150,12 @@ data BuiltinT
   | RecordDropFields
   | ListLength
   | ListIndexL
+  | NatFold
   -- If -- TODO: Make Choice counterpart for Record
   deriving (Show, Eq, Lift)
 
 builtinsList ∷ Vector BuiltinT
-builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL]
+builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold]
 
 identOfBuiltin ∷ BuiltinT → Ident
 identOfBuiltin =
@@ -172,6 +174,7 @@ identOfBuiltin =
     RecordDropFields → "record-drop-fields"
     ListLength → "list-length"
     ListIndexL → "list-indexl"
+    NatFold → "nat~fold"
 
 data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
 
@@ -408,7 +411,7 @@ parseInfixOps = infxr parseTy parseOperator'
 -- 3
 parseMath1 ∷ Parser' TermT
 parseMath1 =
-  infxr
+  infxl
     parseInfixOps
     ( operator >>= \case
         Mul → pure \x → Op x Mul
@@ -419,7 +422,7 @@ parseMath1 =
 -- 2
 parseMath0 ∷ Parser' TermT
 parseMath0 =
-  infxr
+  infxl
     parseMath1
     ( operator >>= \case
         Add → pure \x → Op x Add

@@ -166,6 +166,17 @@ unconsField = \case
     Nothing → Nothing
   _ → Nothing
 
+repeat ∷ Word32 → (a → a) → a → a
+repeat n f = case n of
+  0 → id
+  _ → f . repeat (n - 1) f
+
+-- TODO: Really simple, expand upon.
+unplus ∷ TermT → (Maybe TermT, Word32)
+unplus (NatLit n) = (Nothing, n)
+unplus (Op a Add (NatLit n)) = (Just a, n)
+unplus x = (Just x, 0)
+
 -- | Processes application of `f` onto `a`.
 postApp ∷ TermT → TermT → TermT
 postApp f a = case f of
@@ -180,14 +191,25 @@ postApp f a = case f of
           EqUnknown → recordGet name1 a'
      in
       search a
-  App (Builtin RecordKeepFields) (ListLit tags) → RecordLit $ (\tag → (tag, recordGet tag a)) <$> tags
-  App (Builtin RecordDropFields) (ListLit tags) → recordDropFields tags a
+  Builtin RecordKeepFields `App` ListLit tags → RecordLit $ (\tag → (tag, recordGet tag a)) <$> tags
+  Builtin RecordDropFields `App` ListLit tags → recordDropFields tags a
   Builtin ListLength → case a of
     ListLit (Vector' fi) → NatLit $ fromIntegral $ length fi
     _ → App f a
-  App (App (Builtin ListIndexL) (ListLit (Vector' vals))) (NatLit i) → case vals !? fromIntegral i of
+  Builtin ListIndexL `App` ListLit (Vector' vals) `App` NatLit i → case vals !? fromIntegral i of
     Just v → v
     Nothing → App f a
+  Builtin NatFold `App` accf `App` n `App` start →
+    let
+      step = a
+      (nTM, nV) = unplus n
+     in
+      -- TODO: causes constant re-normalization of `nat~fold` args.
+      (if nV > 0 then normalize [] else id)
+        $ repeat nV (App step)
+        $ case nTM of
+          Nothing → start
+          Just nT → Builtin NatFold `App` accf `App` nT `App` start `App` step
   _ → App f a
  where
   -- Drop `x` from ListLit.
@@ -342,11 +364,10 @@ termQQ =
                   , Quantification Exists (Ident "extra" False) (Builtin U32)
                       $ Lambda
                       $ eqOf
-                        ( Op (Var 0) Add
-                            $ Op
-                              (recordGet (TagLit (Ident "val" False)) (Var 1))
-                              Add
-                              (NatLit 1)
+                        ( Op
+                            (Op (recordGet (TagLit (Ident "val" False)) (Var 1)) Add (NatLit 1))
+                            Add
+                            (Var 0)
                         )
                         (Var 2)
                   )

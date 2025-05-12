@@ -23,7 +23,7 @@ Ref = \Ty predicate. Record (s : { .val = Ty } \/ { .prf = predicate s.val })
 // // IsEmpty = \l. Eq (list-length l) 0
 
 /: U32 -> U32 -> Type
-_~<=_ = \a b. exists (extra : U32). Eq (extra + a) b
+_~<=_ = \a b. exists (extra : U32). Eq (a + extra) b
 
 /: U32 -> U32 -> Type
 _~<_ = \a b. (a + 1) ~<= b
@@ -34,10 +34,8 @@ Fin = \n. Ref U32 (\i. i ~< n)
 /: forall (u : U32) (A : Type+ u). l : List A -> Fin (list-length l) -> A
 list-indexl = fadeno.list-indexl
 
-// /: forall (u : U32). P : (U32 -> Type+ u) -> n : U32 -> P 0 -> (i : Fin n -> P i.val -> P (i.val + 1)) -> P n
-// fold = fadeno.nat~fold
-
-// unfold : forall (u : U32) (acc : Type+ u). u : U32 -> (Ref U32 (\i. i ~<= u) -> acc -> acc) -> acc -> acc
+/: forall (u : U32). Acc : (U32 -> Type+ u) -> n : U32 -> Acc 0 -> (i : Fin n -> Acc i -> Acc (i + 1)) -> Acc n
+nat~fold = fadeno.nat~fold
 
 // Mendler f =
 // test =
@@ -50,4 +48,4 @@ list-indexl = fadeno.list-indexl
 // Union = \cases.
 //   Record (meta : { .tag = Tag } \/ fadeno.record-get meta.tag cases)
 
-in fadeno.list-indexl
+in {}
