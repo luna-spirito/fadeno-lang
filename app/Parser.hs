@@ -31,13 +31,13 @@ import Data.ByteString.Char8 qualified as BS
 import Data.Hashable (Hashable (..))
 import Data.Kind (Type)
 import Data.RRBVector (Vector, findIndexL, (!?), (<|))
-import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string)
+import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string, try)
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Syntax (Lift (..))
 import Language.Haskell.TH.Syntax qualified as TH
 import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, encloseSep, layoutSmart, line, nest, softline, vsep, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
-import RIO hiding (Reader, Vector, ask, local, toList)
+import RIO hiding (Reader, Vector, ask, local, toList, try)
 
 -- TODO ASAP: assocativity for operators. YeAh, TuRns oUT wE NeEd iT, wHo coUlD hAvE GuESseD?
 -- (6 - 4 - 2 ≠ 6 - (4 - 2))
@@ -314,7 +314,7 @@ parsePrim = token do
           )
       <|> ( do
               token $(char '[')
-              elems ← fromList <$> sepBy (token $(char '|')) parseTop
+              elems ← fromList <$> sepBy (token $(char '|')) (try parseTop)
               token $(char ']')
               pure (ListLit elems)
           )
@@ -496,7 +496,6 @@ parseTop =
     {-<|>-} parseBlock
     <|> parseLam
     <|> parseMath0
-    <|> (err =<< getPos)
 
 --
 

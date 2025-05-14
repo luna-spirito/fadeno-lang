@@ -760,7 +760,7 @@ subtype = \a b →
           case r of
             EqYes → pure ()
             _ → withResolved \exs → stackError $ "Cannot subtype universes with levels:" <+> pTerm' (resolve exs a) <+> "<=" <+> pTerm' (resolve exs b)
-
+    (App (Builtin List) a, App (Builtin List) b) → subtype a b
     -- Record/Row types (requires structural subtyping logic)
     (App (Builtin Record) row1, App (Builtin Record) row2) → subtype row1 row2 -- Delegate to row subtyping
     (App (Builtin Row) fields1, App (Builtin Row) fields2) → subtype fields1 fields2
