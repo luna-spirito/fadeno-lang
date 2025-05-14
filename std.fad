@@ -61,4 +61,4 @@ nat~fold = fadeno.nat~fold
 // Union = \cases.
 //   Record (meta : { .tag = Tag } \/ fadeno.record-get meta.tag cases)
 
-in {} //Unit -> Row (Type+ 0) //nat~fold (\i. Unit -> Row (Type+ 0)) //Row (Type+ 4)
+in Type+ 0 -> Type+ 1 //nat~fold (\i. Unit -> Row (Type+ 0)) //Row (Type+ 4)

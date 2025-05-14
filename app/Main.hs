@@ -580,9 +580,16 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
     (Pi inTy (Right outTy), Infer) → runSeqResolve do
       inTyTy ← withResolved \_ → ensureIsType =<< infer binds (normalize (fst <$> binds) inTy) Infer
       withResolved \exs →
-        let binds' = resolveBinds exs binds
-         in infer binds' (normalize (fst <$> binds') outTy) $ Check inTyTy
-      withResolved \exs → pure (resolve exs inTyTy)
+        -- TODO: recheck
+        withMono
+          id
+          (stackError "impossible")
+          ( \_ inTyTy' → runSeqResolve do
+              let binds' = resolveBinds exs binds
+              withResolved \_ → infer binds' (normalize (fst <$> binds') outTy) $ Check inTyTy'
+              withResolved \exs2 → pure $ resolve exs2 inTyTy'
+          )
+          inTyTy
     (Builtin x, Infer) → pure $ typOfBuiltin x
     (BuiltinsVar, Infer) →
       pure
@@ -681,17 +688,13 @@ subtype ∷ ∀ sig m. (Has Solve sig m) ⇒ TermT → TermT → m ()
 subtype = \a b →
   stackScope (pTerm' a <+> annotate (color Cyan) "<:" <+> pTerm' b) $ subtype' a b
  where
-  -- Helper to call instMeta for subtyping existentials.
-  subtypeMeta ∷ Ident → ExVarId → Maybe TermT → TermT → m ()
-  subtypeMeta exN exId exTyM otherT = instMeta exN exId exTyM otherT
-
   -- Core subtyping logic based on the structure of the resolved types.
   subtype' ∷ TermT → TermT → m ()
   subtype' = curry \case
     -- Existential Variables (?a <: ?b, ?a <: T, T <: ?a)
     (ExVar _ ex1 _, ExVar _ ex2 _) | ex1 == ex2 → pure ()
-    (ExVar n1 ex1 ty1, t2) → subtypeMeta n1 ex1 ty1 t2
-    (t1, ExVar n2 ex2 ty2) → subtypeMeta n2 ex2 ty2 t1
+    (ExVar n1 ex1 ty1, t2) → instMeta n1 ex1 ty1 t2
+    (t1, ExVar n2 ex2 ty2) → instMeta n2 ex2 ty2 t1
     -- Universal Variables (u1 <: u2) - Must be identical.
     (UniVar _ id1 _, UniVar _ id2 _) | id1 == id2 → pure ()
     -- T <: Forall x:K. Body  => Introduce UniVar for x
@@ -750,8 +753,8 @@ subtype = \a b →
         (NatLit x, NatLit y) | x <= y → pure ()
         (NatLit 0, _) → pure ()
         -- If one level is existential, unify it with the other level constraint.
-        (ExVar nA exA tyA, lvl2) → subtypeMeta nA exA tyA lvl2
-        (lvl1, ExVar nB exB tyB) → subtypeMeta nB exB tyB lvl1
+        (ExVar nA exA tyA, lvl2) → instMeta nA exA tyA lvl2
+        (lvl1, ExVar nB exB tyB) → instMeta nB exB tyB lvl1
         _ → runSeqResolve do
           r ← withResolved \_ → isEqUnify a b
           case r of
