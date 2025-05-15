@@ -179,9 +179,9 @@ unplus x = (Just x, 0)
 
 -- | Processes application of `f` onto `a`.
 postApp ∷ TermT → TermT → TermT
-postApp f a = case f of
-  Lam _ bod → applyLambda bod a
-  App (Builtin RecordGet) name1 →
+postApp = curry \case
+  (Lam _ bod, a) → applyLambda bod a
+  (App (Builtin RecordGet) name1, a) →
     let
       search a' = case unconsField a' of
         Nothing → recordGet name1 a'
@@ -191,17 +191,14 @@ postApp f a = case f of
           EqUnknown → recordGet name1 a'
      in
       search a
-  Builtin RecordKeepFields `App` ListLit tags → RecordLit $ (\tag → (tag, recordGet tag a)) <$> tags
-  Builtin RecordDropFields `App` ListLit tags → recordDropFields tags a
-  Builtin ListLength → case a of
-    ListLit (Vector' fi) → NatLit $ fromIntegral $ length fi
-    _ → App f a
-  Builtin ListIndexL `App` ListLit (Vector' vals) `App` NatLit i → case vals !? fromIntegral i of
+  (Builtin RecordKeepFields `App` ListLit tags, a) → RecordLit $ (\tag → (tag, recordGet tag a)) <$> tags
+  (Builtin RecordDropFields `App` ListLit tags, a) → recordDropFields tags a
+  (Builtin ListLength, ListLit (Vector' fi)) → NatLit $ fromIntegral $ length fi
+  (f@(Builtin ListIndexL `App` ListLit (Vector' vals) `App` NatLit i), a) → case vals !? fromIntegral i of
     Just v → v
     Nothing → App f a
-  Builtin NatFold `App` accf `App` n `App` start →
+  (Builtin NatFold `App` accf `App` n `App` start, step) →
     let
-      step = a
       (nTM, nV) = unplus n
      in
       -- TODO: causes constant re-normalization of `nat~fold` args.
@@ -210,11 +207,15 @@ postApp f a = case f of
         $ case nTM of
           Nothing → start
           Just nT → Builtin NatFold `App` accf `App` nT `App` start `App` step
-  Builtin If `App` (BoolLit cond) `App` thenBranch `App` elseBranch →
+  (Builtin If `App` (BoolLit cond) `App` thenBranch, elseBranch) →
     if cond
       then normalize [Just $ RecordLit []] thenBranch
       else normalize [Just $ RecordLit []] elseBranch
-  _ → App f a
+  (Builtin ULte `App` (NatLit l), NatLit r) → BoolLit $ l <= r
+  (Builtin ULt `App` (NatLit l), NatLit r) → BoolLit $ l < r
+  (Builtin UEq `App` (NatLit l), NatLit r) → BoolLit $ l == r
+  (Builtin UNeq `App` (NatLit l), NatLit r) → BoolLit $ l /= r
+  (f, a) → App f a
  where
   -- Drop `x` from ListLit.
   listLitDrop ∷ TermT → Vector' TermT → ListDropRes
@@ -353,31 +354,28 @@ Just a variation of parseQQ that has all the builtins in scope from the start.
 termQQ ∷ QuasiQuoter
 termQQ =
   let
-    finT =
-      Lam (Ident "n" False)
-        $ Lambda
-        $ recordOf
+    refTy1 ty pred1 =
+      recordOf
         $ Concat
-          (RecordLit [(TagLit (Ident "val" False), Builtin U32)])
-        $ Left
-          ( Ident "s" False
-          , Lambda
-              $ RecordLit
-                [
-                  ( TagLit (Ident "prf" False)
-                  , Quantification Exists (Ident "extra" False) (Builtin U32)
-                      $ Lambda
-                      $ eqOf
-                        ( Op
-                            (Op (recordGet (TagLit (Ident "val" False)) (Var 1)) Add (NatLit 1))
-                            Add
-                            (Var 0)
-                        )
-                        (Var 2)
-                  )
-                ]
-          )
-    scope = ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList) <> [(Ident "Fin" False, finT)]
+          (RecordLit [(TagLit (Ident "val" False), ty)])
+          (Left (Ident "s" False, Lambda $ RecordLit [(TagLit (Ident "prf" False), pred1 $ recordGet (TagLit (Ident "val" False)) (Var 0))]))
+    lt a b = Builtin Eq `App` (Builtin ULt `App` a `App` b) `App` BoolLit True
+    finT n = refTy1 (Builtin U32) \a → lt a $ nested n
+    -- Lam (Ident "n" False)
+    --   $ Lambda
+    --   $ recordOf
+    --   $ Concat
+    --     (RecordLit [(TagLit (Ident "val" False), Builtin U32)])
+    --   $ Left
+    --     ( Ident "s" False
+    --     , Lambda
+    --         $ RecordLit
+    --           [
+    --             ( TagLit (Ident "prf" False)
+    --             , lt (recordGet (TagLit (Ident "val" False)) (Var 1)) (Var 2))
+    --           ]
+    --     )
+    scope = ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList) <> [(Ident "Fin" False, Lam (Ident "n" False) $ Lambda $ finT $ Var 0)]
    in
     QuasiQuoter
       { quoteExp = \s → do

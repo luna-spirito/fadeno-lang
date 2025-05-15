@@ -19,7 +19,7 @@ import Data.List (sortBy)
 import Data.RRBVector (Vector, deleteAt, ifoldr, viewl, (!?), (<|))
 import GHC.Exts (IsList (..))
 import Normalize (EqRes (..), Resolved, concat, isEq', nested, nestedBy, normalize, resolve, resolve', rewrite, runSeqResolve, termQQ, withResolved)
-import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pTerm', parseFile, recordOf, render, rowOf)
+import Parser (BlockT (..), BuiltinT (..), ExVarId (..), Ident (..), Lambda (..), Quantifier (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pTerm', parse, parseFile, recordOf, render, rowOf)
 import Prettyprinter (Doc, annotate, group, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, filter, link, local, runReader, toList)
@@ -631,6 +631,10 @@ typOfBuiltin =
     ListIndexL → [termQQ| forall (u : U32) (a : Type+ u). l : List a -> Fin (list-length l) -> a |]
     NatFold → [termQQ| forall (u : U32). Acc : (U32 -> Type+ u) -> n : U32 -> Acc 0 -> (i : Fin n -> Acc i -> Acc (i + 1)) -> Acc n |]
     If → [termQQ| forall (u : U32) (a : Type+ u). cond : Bool -> (Eq cond true -> a) -> (Eq cond false -> a) -> a |]
+    ULte → [termQQ| U32 -> U32 -> Bool |]
+    ULt → [termQQ| U32 -> U32 -> Bool |]
+    UEq → [termQQ| U32 -> U32 -> Bool |]
+    UNeq → [termQQ| U32 -> U32 -> Bool |]
 
 instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ Ident → ExVarId → Maybe TermT → TermT → m ()
 instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1) t1 →
@@ -818,9 +822,9 @@ runSolveM =
     . evalFresh 0
     . runWriter (const pure) -- TODO: alert on unhandled?
 
-checkFile ∷ FilePath → IO ()
-checkFile file = do
-  term ← parseFile file
+checkSource ∷ ByteString → IO ()
+checkSource source = do
+  term ← either (fail . show) pure $ parse [] source
   (stacks, res) ← runStackAccC $ runSolveM $ infer [] term Infer
   render case res of
     Left e →
@@ -829,6 +833,9 @@ checkFile file = do
         <> annotate (color Red) "error: "
         <> e
     Right r → pTerm' r
+
+checkFile ∷ FilePath → IO ()
+checkFile file = checkSource =<< readFileBinary file
 
 -- TODO: dedup
 checkFileDebug ∷ FilePath → IO ()

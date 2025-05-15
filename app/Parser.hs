@@ -152,30 +152,42 @@ data BuiltinT
   | ListIndexL
   | NatFold
   | If -- TODO: Make Choice counterpart for Record
+  | ULte
+  | ULt
+  | UEq
+  | UNeq
   deriving (Show, Eq, Lift)
 
 builtinsList ∷ Vector BuiltinT
-builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If]
+builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, ULte, ULt, UEq, UNeq]
 
 identOfBuiltin ∷ BuiltinT → Ident
-identOfBuiltin =
-  (`Ident` False) . \case
-    U32 → "U32"
-    Tag → "Tag"
-    Bool → "Bool"
-    Row → "Row"
-    Record → "Record"
-    List → "List"
-    TypePlus → "Type+"
-    Eq → "Eq"
-    Refl → "refl"
-    RecordGet → "record-get"
-    RecordKeepFields → "record-keep-fields"
-    RecordDropFields → "record-drop-fields"
-    ListLength → "list-length"
-    ListIndexL → "list-indexl"
-    NatFold → "nat~fold"
-    If → "if"
+identOfBuiltin = \case
+  U32 → r "U32"
+  Tag → r "Tag"
+  Bool → r "Bool"
+  Row → r "Row"
+  Record → r "Record"
+  List → r "List"
+  TypePlus → r "Type+"
+  Eq → r "Eq"
+  Refl → r "refl"
+  RecordGet → r "record-get"
+  RecordKeepFields → r "record-keep-fields"
+  RecordDropFields → r "record-drop-fields"
+  ListLength → r "list-length"
+  ListIndexL → r "list-indexl"
+  NatFold → r "nat~fold"
+  If → r "if"
+  ULte → o "<="
+  ULt → o "<"
+  UEq → o "=="
+  UNeq → o "!="
+ where
+  -- \| regular
+  r x = x `Ident` False
+  -- \| op
+  o x = x `Ident` True
 
 data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
 
