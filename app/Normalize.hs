@@ -10,7 +10,7 @@ import Control.Effect.Writer (Writer, listen, tell)
 import Data.ByteString.Char8 (pack)
 import Data.RRBVector (Vector, deleteAt, ifoldr, splitAt, viewl, (!?), (<|))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (BlockT (..), BuiltinT (..), ExVarId, Ident (..), Lambda (..), OpT (..), Quantifier (..), TermT (..), Vector' (..), builtinsList, eqOf, identOfBuiltin, pTerm', parse, parseFile, recordGet, recordOf, render)
+import Parser (BlockT (..), BuiltinT (..), ExVarId, Ident (..), Lambda (..), OpT (..), Quant (..), Quantifier (..), TermT (..), Vector' (..), builtinsList, eqOf, identOfBuiltin, pTerm', parse, parseFile, recordGet, recordOf, render)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try)
 import RIO.HashMap qualified as HM
 
@@ -57,6 +57,10 @@ isEq' ∷ (Has (Writer Resolved) sig m) ⇒ (Ident → ExVarId → Maybe TermT �
 isEq' f = curry \case
   (Block{}, _) → undefined
   (_, Block{}) → undefined
+  (AppErased{}, _) → undefined
+  (_, AppErased{}) → undefined
+  (Lam QEra _ _, _) → undefined
+  (_, Lam QEra _ _) → undefined
   (Var a, Var b)
     | a == b → pure EqYes
   (Var _, _) → pure EqUnknown
@@ -84,8 +88,8 @@ isEq' f = curry \case
   (Sorry _ a, b) → isEq' f a b
   (a, Sorry _ b) → isEq' f a b
   -- Literals
-  (Lam _ bod1, Lam _ bod2) → isEq' f (unLambda bod1) (unLambda bod2)
-  (Lam _ _, _) → pure EqNot
+  (Lam QNorm _ bod1, Lam QNorm _ bod2) → isEq' f (unLambda bod1) (unLambda bod2)
+  (Lam QNorm _ _, _) → pure EqNot
   (NatLit a, NatLit b)
     | a == b → pure EqYes
   (NatLit _, _) → pure EqNot
@@ -180,7 +184,7 @@ unplus x = (Just x, 0)
 -- | Processes application of `f` onto `a`.
 postApp ∷ TermT → TermT → TermT
 postApp = curry \case
-  (Lam _ bod, a) → applyLambda bod a
+  (Lam QNorm _ bod, a) → applyLambda bod a
   (App (Builtin RecordGet) name1, a) →
     let
       search a' = case unconsField a' of
@@ -244,7 +248,7 @@ postApp = curry \case
               concat (RecordLit [(n, v)]) $ recordDropFields tags fields
             TDUnknown → stuck
 
--- Rewrites & simplifies. In that order. Doesn't rewrite the simplified result.
+-- Erases, rewrites & simplifies. In that order. Doesn't rewrite the simplified result.
 rewrite ∷ ∀ f via. (Monad f) ⇒ (TermT → via → via) → (via → via) → (TermT → via → f (Maybe TermT)) → via → TermT → f TermT
 rewrite onLet onNest rewriter = go
  where
@@ -256,11 +260,13 @@ rewrite onLet onNest rewriter = go
 
   go' ∷ via → TermT → f TermT
   go' via = \case
-    Block (BlockLet _ _ val into) → do
+    Block (BlockLet QNorm _ _ val into) → do
       val' ← go via val
       go (onLet val' via) $ unLambda into
+    Block (BlockLet QEra _ _ _ into) → go (onLet undefined via) $ unLambda into
     Block (BlockRewrite from to) → error "TODO rewrite BlockRewrite"
-    Lam arg bod → Lam arg . Lambda <$> go (onNest via) (unLambda bod)
+    Lam QNorm arg bod → Lam QNorm arg . Lambda <$> go (onNest via) (unLambda bod)
+    Lam QEra _ bod → go (onLet undefined via) $ unLambda bod
     Op aT op bT → do
       aT' ← go via aT
       bT' ← go via bT
@@ -271,6 +277,7 @@ rewrite onLet onNest rewriter = go
           Mul → a * b
           Div → a `div` b
         _ → Op aT' op bT'
+    AppErased f _ → go via f
     App f a → do
       f' ← go via f
       a' ← go via a
@@ -375,11 +382,11 @@ termQQ =
     --             , lt (recordGet (TagLit (Ident "val" False)) (Var 1)) (Var 2))
     --           ]
     --     )
-    scope = ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList) <> [(Ident "Fin" False, Lam (Ident "n" False) $ Lambda $ finT $ Var 0)]
+    scope = ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList) <> [(Ident "Fin" False, Lam QNorm (Ident "n" False) $ Lambda $ finT $ Var 0)]
    in
     QuasiQuoter
       { quoteExp = \s → do
-          term ← case parse (fst <$> scope) (pack s) of
+          term ← case parse ((QNorm,) . fst <$> scope) (pack s) of
             Left e → fail $ "termQQ: Parse error: " ++ show e
             Right t → pure t
           let normed = normalize (Just . snd <$> scope) term

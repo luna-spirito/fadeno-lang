@@ -3,6 +3,7 @@ module Parser (
   Ident (..),
   BuiltinT (..),
   builtinsList,
+  Quant (..),
   Quantifier (..),
   BlockT (..),
   Lambda (..),
@@ -16,6 +17,7 @@ module Parser (
   typ,
   identOfBuiltin,
   pIdent,
+  pQuant,
   pTerm',
   parse,
   parseFile,
@@ -52,9 +54,12 @@ data OpT
 data Ident = Ident !ByteString !Bool -- raw name, is operator
   deriving (Show, Eq, Ord, Generic, Lift)
 
+data Quant = QEra | QNorm
+  deriving (Show, Eq, Lift)
+
 instance Hashable Ident
 
-type ParserContext = Vector Ident
+type ParserContext = Vector (Quant, Ident)
 type Parser' = Parser ParserContext Pos
 
 space ∷ Parser' ()
@@ -110,7 +115,8 @@ identRightNow = do
           | Just (rest', '_') ← BS.unsnoc rest → (rest', True)
         _ → (rawResult, False)
   guard $ not $ BS.null result
-  guard $ not $ result `elem` (["=", "in", "+", "-", "/", "*", "->", "\\/", "forall", "unpack", "fadeno", "rewrite", "true", "false"] ∷ [ByteString])
+  guard $ not $ "@" `BS.isPrefixOf` result
+  guard $ not $ result `elem` (["=", "in", "+", "-", "/", "\\/", "*", "->", "forall", "unpack", "fadeno", "rewrite", "true", "false"] ∷ [ByteString])
   pure (Ident result isOp)
 
 ident ∷ Parser' Ident
@@ -191,9 +197,6 @@ identOfBuiltin = \case
 
 data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
 
-data BlockT = BlockLet !Ident !(Maybe TermT) !TermT !(Lambda TermT) | BlockRewrite !TermT !TermT
-  deriving (Show, Eq, Lift)
-
 newtype Lambda a = Lambda {unLambda ∷ a}
   deriving (Show, Eq, Lift)
 
@@ -221,14 +224,20 @@ instance (Lift a) ⇒ Lift (Vector' a) where
   liftTyped (Vector' v) =
     [||Vector' (fromList $$(liftTyped (toList v)))||]
 
+data BlockT
+  = BlockLet !Quant !Ident !(Maybe TermT) !TermT !(Lambda TermT)
+  | BlockRewrite !TermT !TermT
+  deriving (Show, Eq, Lift)
+
 data TermT
   = -- Term-level
 
     -- | Annotations only allowed on Block.
     Block !BlockT
-  | Lam !Ident !(Lambda TermT)
+  | Lam !Quant !Ident !(Lambda TermT)
   | Op !TermT !OpT !TermT
   | App !TermT !TermT
+  | AppErased !TermT !TermT
   | NatLit !Word32
   | TagLit !Ident
   | BoolLit !Bool
@@ -296,13 +305,13 @@ sepBy with x = ((:) <$> x <*> many (with *> x)) <|> pure []
 parseEq ∷ Parser' ()
 parseEq = token $ notFollowedBy $(char '=') identSym
 
-findVar ∷ ByteString → Parser' (Maybe (Int, Bool))
+findVar ∷ ByteString → Parser' (Maybe (Int, Quant, Bool))
 findVar name = do
   vars ← ask
-  case findIndexL (\(Ident eName _) → eName == name) vars of
+  case findIndexL (\(_, Ident eName _) → eName == name) vars of
     Just n →
-      let (Ident _ eOp) = fromMaybe (error "impossible") $ vars !? n
-       in pure $ Just (n, eOp)
+      let (q, Ident _ eOp) = fromMaybe (error "impossible") $ vars !? n
+       in pure $ Just (n, q, eOp)
     Nothing → pure Nothing
 
 -- 7
@@ -336,7 +345,8 @@ parsePrim = token do
               -- TODO: { x = 4 }
               Ident iName iOp ← notFollowedBy ident parseEq
               findVar iName >>= \case
-                Just (n, eOp) → case (eOp, iOp) of
+                Just (_, QEra, _) → empty -- TODO: Still a crutch.
+                Just (n, QNorm, eOp) → case (eOp, iOp) of
                   (True, False) → empty -- TODO: this is a crutch to stop user-defined operators from crashing the parser.
                   (False, True) → err =<< getPos
                   _ → pure n
@@ -354,9 +364,27 @@ parsePrim = token do
       prim
       accesses
 
+insideEra ∷ ParserContext → ParserContext
+insideEra = fmap $ first \case
+  QEra → QNorm
+  QNorm → QNorm
+
 -- 6
 parseApp ∷ Parser' TermT
-parseApp = infxl parsePrim (pure App)
+parseApp = parsePrim >>= infxl'
+ where
+  infxl' prev =
+    ( do
+        space *> $(char '@')
+        -- p ← ($(char '_') $> Nothing) <|> (Just <$> local insideEra parsePrim)
+        p ← local insideEra parsePrim
+        infxl' $ prev `AppErased` p
+    )
+      <|> ( do
+              p ← parsePrim
+              infxl' $ prev `App` p
+          )
+      <|> pure prev
 
 -- 5
 parseTy ∷ Parser' TermT
@@ -371,9 +399,9 @@ parseTy =
         someEntries = do
           (ty, ki) ←
             token
-              $ ((,App (Builtin TypePlus) $ NatLit 0) <$> ident)
+              $ ((,Builtin TypePlus `App` NatLit 0) <$> ident)
               <|> ($(char '(') *> ((,) <$> ident <*> kind) <* $(char ')'))
-          Quantification q ty ki . Lambda <$> local (ty <|) manyEntries
+          Quantification q ty ki . Lambda <$> local ((QNorm, ty) <|) manyEntries
         manyEntries =
           someEntries <|> (token $(char '.') *> parseTy)
       someEntries
@@ -391,12 +419,12 @@ parseTy =
       inTy ← parseApp
       ( ( do
             token $ $(string "->")
-            outTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local (name <|)) inNameM parseTy
+            outTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local ((QNorm, name) <|)) inNameM parseTy
             pure $ Pi inTy outTy
         )
           <|> ( do
                   token $ $(string "\\/")
-                  rightTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local (name <|)) inNameM parseTy
+                  rightTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local ((QNorm, name) <|)) inNameM parseTy
                   pure $ Concat inTy rightTy
               )
           <|> ( do
@@ -415,9 +443,7 @@ parseInfixOps = infxr parseTy parseOperator'
     case i of
       Ident opName False →
         findVar opName >>= \case
-          Just (idx, True) → do
-            let varIdx = idx
-            pure \a b → App (App (Var varIdx) a) b
+          Just (idx, QNorm, True) → pure \a b → Var idx `App` a `App` b
           _ → empty -- Not a known operator in this scope
       _ → empty
 
@@ -443,6 +469,11 @@ parseMath0 =
         _ → empty
     )
 
+insideLet ∷ Quant → ParserContext → ParserContext
+insideLet = \case
+  QEra → id
+  QNorm → insideEra
+
 -- 1
 parseBlock ∷ Parser' TermT
 parseBlock = do
@@ -451,15 +482,16 @@ parseBlock = do
       ty ← optional do
         token $(string "/:")
         parseMath0
+      q ← ($(char '@') $> QEra) <|> pure QNorm
       name ← ident
       parseEq
-      expr ← parseTop
-      pure (name, ty, expr)
+      expr ← local (insideLet q) $ parseTop
+      pure (q, name, ty, expr)
     someEntries =
       ( do
-          (name, ty, expr) ← binding
-          rest ← Lambda <$> (local (name <|) manyEntries)
-          pure $ Block (BlockLet name ty expr rest)
+          (q, name, ty, expr) ← binding
+          rest ← Lambda <$> (local ((q, name) <|) manyEntries)
+          pure $ Block $ BlockLet q name ty expr rest
       )
         <|> ( do
                 -- TODO: prettyprinting
@@ -468,7 +500,7 @@ parseBlock = do
                 token $ $(char '.')
                 fieldNames ← some (token $ notFollowedBy ident parseEq)
                 foldr
-                  (\name cont → Block . BlockLet name Nothing (recordGet (TagLit name) record) . Lambda <$> local (name <|) cont)
+                  (\name cont → Block . BlockLet QNorm name Nothing (recordGet (TagLit name) record) . Lambda <$> local ((QNorm, name) <|) cont)
                   manyEntries
                   fieldNames
             )
@@ -490,14 +522,14 @@ parseBlock = do
 parseLam ∷ Parser' TermT
 parseLam = token do
   $(char '\\')
-  idents ← some ident
+  idents ← some ((,) <$> (($(char '@') $> QEra) <|> pure QNorm) <*> ident)
   $(char '.')
   let
     parseBod = \case
       [] → parseTop
       (x : xs) → local (x <|) $ parseBod xs
   bod ← parseBod idents
-  pure $ foldr (\n → Lam n . Lambda) bod idents
+  pure $ foldr (\(q, n) → Lam q n . Lambda) bod idents
 
 -- 0
 parseTop ∷ Parser' TermT
@@ -505,7 +537,7 @@ parseTop =
   token
     $
     -- parseNode
-    {-<|>-} parseBlock
+    parseBlock
     <|> parseLam
     <|> parseMath0
 
@@ -546,15 +578,16 @@ isSimple =
           then E.empty
           else pure ()
       complexity = \case
-        Lam _ (Lambda x) → ping *> complexity x
+        Lam _ _ (Lambda x) → ping *> complexity x
         Block defs →
           ping
             *> ( case defs of
-                  BlockLet _ b c x → for_ b complexity *> complexity c *> complexity (unLambda x)
+                  BlockLet _ _ b c x → for_ b complexity *> complexity c *> complexity (unLambda x)
                   BlockRewrite r x → ping *> complexity r *> complexity x
                )
         Op a _ c → complexity a *> complexity c
         App f a → complexity f *> complexity a
+        AppErased f a → complexity f *> complexity a
         NatLit _ → ping
         TagLit _ → ping
         BoolLit _ → ping
@@ -571,22 +604,28 @@ isSimple =
         UniVar _ _ _ → ping
    in runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
 
+pQuant ∷ Quant → Doc AnsiStyle
+pQuant = \case
+  QEra → "@"
+  QNorm → mempty
+
 -- TODO: Concise syntax for `\` and `forall`
 pTerm ∷ (Int, ParserContext) → TermT → Doc AnsiStyle
 pTerm (oldPrec, vars) =
   withPrec oldPrec . \case
-    Lam arg x →
+    Lam q arg x →
       ( 0
       , let sep' = case unLambda x of
-              Lam _ _ → " "
+              Lam _ _ _ → " "
               _
                 | isSimple (unLambda x) → " "
                 | otherwise → line
          in annotate (color Magenta) "\\"
+              <> pQuant q
               <> pIdent arg
               <> annotate (color Magenta) "."
               <> sep'
-              <> pTerm (0, arg <| vars) (unLambda x)
+              <> pTerm (0, (q, arg) <| vars) (unLambda x)
       )
     block@(Block{}) →
       ( 1
@@ -594,13 +633,14 @@ pTerm (oldPrec, vars) =
           go ∷ ParserContext → TermT → ([Doc AnsiStyle], TermT, ParserContext)
           go vars' = \case
             Block def → case def of
-              BlockLet name tyM val in_ →
+              BlockLet q name tyM val in_ →
                 let entry =
                       ( maybe mempty (\ty → "/:" <+> pTerm (2, vars') ty <> line) tyM -- TODO: split if complicated type
+                          <> pQuant q
                           <> pIdent name
-                          <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTerm (0, vars') val)
+                          <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTerm (0, insideLet q vars') val)
                       )
-                    (entries, rest, vars'') = go (name <| vars') $ unLambda in_
+                    (entries, rest, vars'') = go ((q, name) <| vars') $ unLambda in_
                  in (entry : entries, rest, vars'')
               BlockRewrite x in_ →
                 let
@@ -631,31 +671,32 @@ pTerm (oldPrec, vars) =
             q' = case q of
               Forall → "forall"
               Exists → "exists"
-         in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm (5, name <| vars) (unLambda ty)
+         in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm (5, (QNorm, name) <| vars) (unLambda ty)
       )
     Pi inTy outTy →
       ( 5
       , either (\(name, _) → pIdent name <+> ": ") mempty outTy <> pTerm (6, vars) inTy
           <+> "->"
           <+> case outTy of
-            Left (name, outTy') → pTerm (5, name <| vars) $ unLambda outTy'
+            Left (name, outTy') → pTerm (5, (QNorm, name) <| vars) $ unLambda outTy'
             Right outTy' → pTerm (5, vars) outTy'
       )
     Concat a b →
       ( 5
       , case b of
-          Left (n, b') → pIdent n <+> ":" <+> pTerm (6, vars) a <+> "\\/" <+> pTerm (5, n <| vars) (unLambda b')
+          Left (n, b') → pIdent n <+> ":" <+> pTerm (6, vars) a <+> "\\/" <+> pTerm (5, (QNorm, n) <| vars) (unLambda b')
           Right b' → pTerm (6, vars) a <+> "\\/" <+> pTerm (5, vars) b'
       )
     Sorry x _ → (7, "sorry/" <> pIdent x)
     App (App (Builtin RecordGet) (TagLit tag)) rec →
       (7, pTerm (7, vars) rec <> "." <> pIdent tag)
     App lam arg2 → case lam of
-      App (Var opIdx) arg1
-        | Just (Ident opName True) ← vars !? opIdx →
+      (App (Var opIdx) arg1)
+        | Just (QNorm, Ident opName True) ← vars !? opIdx →
             (4, pTerm (5, vars) arg1 <+> pBS opName <+> pTerm (4, vars) arg2)
       _ →
         (6, pTerm (6, vars) lam <+> pTerm (7, vars) arg2)
+    AppErased lam arg → (6, pTerm (6, vars) lam <+> "@" <> pTerm (7, vars) arg)
     Builtin x → (7, "fadeno." <> pIdent (identOfBuiltin x))
     BuiltinsVar → (7, "fadeno")
     NatLit x → (7, pretty x)
@@ -670,12 +711,12 @@ pTerm (oldPrec, vars) =
           (fmap (\(n, v) → pTerm (7, vars) n <+> annotate (color Cyan) "=" <+> pTerm (0, vars) v) (toList fields))
       )
     ListLit vec → (7, encloseSep "[" "]" " | " $ fmap (\x → pTerm (0, vars) x) (toList vec))
-    Var x → (7, maybe ("@" <> pretty x) pIdent $ vars !? x)
+    Var x → (7, maybe ("#" <> pretty x) (\(q, i) → pQuant q <> pIdent i) $ vars !? x)
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
-    ExVar n l t → (7, "(exi@" <> pretty (show l) <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) t') t <> ")")
-    UniVar x' l t → (7, "(uni@" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
+    ExVar n l t → (7, "(exi#" <> pretty (show l) <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) t') t <> ")")
+    UniVar x' l t → (7, "(uni#" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
 
 pTerm' ∷ TermT → Doc AnsiStyle
 pTerm' = pTerm (0, [])
