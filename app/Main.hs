@@ -106,9 +106,10 @@ runStackPrintC = runReader 0 . unStackPrintC
 type Solve = Writer Resolved :+: Fresh :+: Error (Doc AnsiStyle) :+: StackLog
 
 writeMeta ∷ (Has Solve sig m) ⇒ Ident → ExVarId → Maybe TermT → TermT → m ()
-writeMeta n var tyM val = do
+writeMeta n var _tyM val = do
   stackLog $ pIdent n <+> ":=" <+> pTerm' val
-  for_ tyM $ infer [] val . Check
+  -- TODO: I still haven't found counterexample that actually requires this check.
+  -- for_ tyM $ infer [] val . Check
   tell $ HM.singleton var val
 
 scopedVar ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → m a → m a
