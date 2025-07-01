@@ -74,7 +74,7 @@ pStacks = \case
   (x : xs) → line <> "├ " <> pStack x <> pStacks xs
 
 pStack ∷ StackEntry → Doc AnsiStyle
-pStack = \(StackEntry x xs) → x <> nest 2 (pStacks xs) where
+pStack = \(StackEntry x xs) → group x <> nest 2 (pStacks xs) where
 
 runStackAccC ∷ (Applicative m) ⇒ StackAccC m a → m ([StackEntry], a)
 runStackAccC = runWriter (\w a → pure (toList @(Vector _) w, a)) . unStackAccC
@@ -605,7 +605,7 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
       Just (QNorm, _, ty) → do
         stackLog $ "var" <+> pretty i <+> ":" <+> pTerm' ty
         pure ty
-      _ → stackError $ "Unknown var @" <> pretty i
+      _ → stackError $ "Unknown var #" <> pretty i
     -- TODO: Support checks...
     (Quantification _ _name kind ty, Infer) → do
       res ← scopedVar id $ infer (insertBinds (QNorm, Nothing, normalize (annoBinds binds) kind) binds) (unLambda ty) Infer
@@ -617,7 +617,7 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
     --     $ Check
     --     $ typOf u
     (Pi inTy (Right outTy), Infer) → runSeqResolve do
-      inTyTy ← withResolved \_ → ensureIsType =<< infer binds (normalize (annoBinds binds) inTy) Infer
+      inTyTy ← withResolved \_ → ensureIsType =<< infer binds inTy Infer
       withResolved \exs →
         -- TODO: recheck
         withMono
@@ -625,7 +625,7 @@ infer binds = \t mode → stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode
           (stackError "impossible")
           ( \_ inTyTy' → runSeqResolve do
               let binds' = resolveBinds exs binds
-              withResolved \_ → infer binds' (normalize (annoBinds binds') outTy) $ Check inTyTy'
+              withResolved \_ → infer binds' outTy $ Check inTyTy'
               withResolved \exs2 → pure $ resolve exs2 inTyTy'
           )
           inTyTy
