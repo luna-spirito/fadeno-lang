@@ -162,10 +162,13 @@ data BuiltinT
   | ULt
   | UEq
   | UNeq
+  | W
+  | Wrap
+  | Unwrap
   deriving (Show, Eq, Lift)
 
 builtinsList ∷ Vector BuiltinT
-builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, ULte, ULt, UEq, UNeq]
+builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, ULte, ULt, UEq, UNeq, W, Wrap, Unwrap]
 
 identOfBuiltin ∷ BuiltinT → Ident
 identOfBuiltin = \case
@@ -189,6 +192,9 @@ identOfBuiltin = \case
   ULt → o "<"
   UEq → o "=="
   UNeq → o "!="
+  W → r "W"
+  Wrap → r "wrap"
+  Unwrap → r "unwrap"
  where
   -- \| regular
   r x = x `Ident` False

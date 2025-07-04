@@ -1,4 +1,4 @@
-unpack fadeno. Type+ U32 Tag List Bool Eq refl Row Record list-length if _<_
+unpack fadeno. Type+ U32 Tag List Bool Eq refl Row Record list-length if _<_ W wrap unwrap
 
 Kind = Type+ 1
 /: Kind
@@ -42,6 +42,19 @@ nat~fold = fadeno.nat~fold
 /: forall (u : U32) (Acc : Type+ u). n : U32 -> Acc -> (i : Fin n -> Acc -> Acc) -> Acc
 nat-fold = \@u @Acc. nat~fold @u @(\_. Acc)
 
+/: u : U32 -> Type+ u -> Type+ u -> Type+ u
+Choice = \u A B. forall (R : Type+ u). (A -> R) -> (B -> R) -> R
+
+ListM = forall (R : Type+ 0). (forall (Acc : Type+ 0). (Acc -> R) -> Choice 0 (Record {}) (Record { .head = U32 | .tail = Acc }) -> R) -> R
+
+/: W ListM
+nil = wrap ListM (\analyser. analyser (\x. x) (\l r. l {}))
+
+/: U32 -> W ListM -> W ListM
+cons = \x xs. wrap ListM (\analyser. analyser (\xs'. unwrap ListM xs' analyser) (\l r. r { .head = x | .tail = xs }))
+
+in cons 3 (cons 5 (cons 5 (cons 8 nil)))
+//in cons 3 (cons 4 (cons 6 (cons 8 nil)))
 // /: forall (u : U32). Tag -> Row (Type+ u) -> Row (Type+ u)
 // Optional = \tag row. s : { (tag) = Bool } \/ row
 
@@ -61,4 +74,12 @@ nat-fold = \@u @Acc. nat~fold @u @(\_. Acc)
 // Union = \cases.
 //   Record (meta : { .tag = Tag } \/ fadeno.record-get meta.tag cases)
 
-in [ \x. x ] //Type+ 0 -> Type+ 1 //nat~fold (\i. Unit -> Row (Type+ 0)) //Row (Type+ 4)
+// First of all, Mendler-style nat-fold. Second of all, IS IT POSSIBLE TO SEPARATE `rec` function by making `acc` indexed, so you don't have to pass `rec` at each step?
+// Most likely not, since continuation is basically a proof. If it's a proof, though... couldn't it be just erased?
+
+//ListC = \A. forall R. (forall Acc. (Acc -> R) -> Union [ .nil = {} | .cons = { .head = A | .tail = Acc } ] -> R) -> R
+
+//list13 = \consumer.
+//  consumer
+//    (consumer (consumer identity))
+//    { .tag = .cons | .head = 1 | .tail = { .tag = .cons | .head = 2 | .tail = { .tag = .nil } } }

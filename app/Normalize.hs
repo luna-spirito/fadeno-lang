@@ -127,7 +127,23 @@ isEq' f = curry \case
     runSeqResolve
       $ force (withResolved \_ → isEq' f x y)
       $ withResolved \exs → isEq' f (ListLit $ Vector' $ resolve exs <$> xs) (ListLit $ Vector' $ resolve exs <$> ys)
+  (ListLit (Vector' (null → True)), ListLit (Vector' (null → True))) → pure EqYes
   (ListLit _, _) → pure EqNot
+  (RecordLit (Vector' (viewl → Just ((tagx, x), xs))), RecordLit (Vector' origY)) →
+    ifoldr
+      ( \i (tagy, y) rec →
+          runSeqResolve
+            $ (withResolved \_ → isEq' f tagx tagy)
+            >>= \case
+              EqYes → force (withResolved \exs → isEq' f (resolve exs x) (resolve exs y))
+                $ withResolved \exs → isEq' f (RecordLit $ Vector' $ bimap (resolve exs) (resolve exs) <$> xs) (RecordLit $ Vector' $ bimap (resolve exs) (resolve exs) <$> deleteAt i origY)
+              EqNot → lift $ rec
+              EqUnknown → pure EqUnknown
+      )
+      (pure EqNot)
+      origY
+  (RecordLit (Vector' (null → True)), RecordLit (Vector' (null → True))) → pure EqYes
+  (RecordLit _, _) → pure EqNot
  where
   -- TODO: FRow???
   try act cont =
@@ -219,6 +235,8 @@ postApp = curry \case
   (Builtin ULt `App` (NatLit l), NatLit r) → BoolLit $ l < r
   (Builtin UEq `App` (NatLit l), NatLit r) → BoolLit $ l == r
   (Builtin UNeq `App` (NatLit l), NatLit r) → BoolLit $ l /= r
+  (Builtin Wrap `App` _ty, b) → b
+  (Builtin Unwrap `App` _ty, b) → b
   (f, a) → App f a
  where
   -- Drop `x` from ListLit.

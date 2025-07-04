@@ -674,6 +674,9 @@ typOfBuiltin =
     ULt → [termQQ| U32 -> U32 -> Bool |]
     UEq → [termQQ| U32 -> U32 -> Bool |]
     UNeq → [termQQ| U32 -> U32 -> Bool |]
+    W → [termQQ| forall (u : U32). Type+ u -> Type+ u |]
+    Wrap → [termQQ| forall (u : U32). A : Type+ u -> A -> W A |]
+    Unwrap → [termQQ| forall (u : U32). A : Type+ u -> W A -> A |]
 
 instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ Ident → ExVarId → Maybe TermT → TermT → m ()
 instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1) t1 →
@@ -691,6 +694,7 @@ instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1)
               pure $ var1R
         uni@(UniVar _ uni2 _)
           | [uni2] <= var1 → pure uni
+        App (Builtin W) a → pure $ Builtin W `App` a
         App f a → runSeqResolve do
           f' ← withResolved \_ → instMeta' f
           a' ← withResolved \exs → instMeta' $ resolve exs a
@@ -813,6 +817,20 @@ subtype = \a b →
     (App (Builtin Record) fieldsVal, App (Builtin Row) fieldsTy) →
       withKnownFields (const pure) fieldsVal \fi →
         runState (\_ _ → pure ()) (Just fieldsTy) $ unifyFields fi
+    (App (Builtin W) a, App (Builtin W) b) →
+      isEqUnify a b >>= \case
+        EqYes → pure ()
+        _ → stackError $ "Cannot equate wrapped types" <+> pTerm' a <+> "and" <+> pTerm' b
+    -- App f1 a1 <: App f2 a2
+    (App f1 a1, App f2 a2) → runSeqResolve do
+      eqF ← withResolved \_ → isEqUnify f1 f2
+      case eqF of
+        EqYes → do
+          eqA ← withResolved \exs → isEqUnify (resolve exs a1) (resolve exs a2)
+          case eqA of
+            EqYes → pure ()
+            _ → stackError $ "Cannot subtype applications with different arguments:" <+> pTerm' a1 <+> "vs" <+> pTerm' a2
+        _ → stackError $ "Cannot subtype applications with different functions:" <+> pTerm' f1 <+> "vs" <+> pTerm' f2
     (RecordLit (Vector' fields1), RecordLit fields2) →
       let
         fields1Drop fields1' name ty =
@@ -845,16 +863,6 @@ subtype = \a b →
         let body2 = resolve exs $ normalize [Just var] $ unLambda lr2
         subtype body1 body2
 
-    -- App f1 a1 <: App f2 a2
-    (App f1 a1, App f2 a2) → runSeqResolve do
-      eqF ← withResolved \_ → isEqUnify f1 f2
-      case eqF of
-        EqYes → do
-          eqA ← withResolved \exs → isEqUnify (resolve exs a1) (resolve exs a2)
-          case eqA of
-            EqYes → pure ()
-            _ → stackError $ "Cannot subtype applications with different arguments:" <+> pTerm' a1 <+> "vs" <+> pTerm' a2
-        _ → stackError $ "Cannot subtype applications with different functions:" <+> pTerm' f1 <+> "vs" <+> pTerm' f2
     -- Catch-all: if no rule matches, they are not subtypes
     (t1, t2) → stackError $ "Subtype check failed, no rule applies for:" <+> pTerm' t1 <+> "<:" <+> pTerm' t2
 
