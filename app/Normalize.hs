@@ -10,9 +10,11 @@ import Control.Effect.Writer (Writer, listen, tell)
 import Data.ByteString.Char8 (pack)
 import Data.RRBVector (Vector, deleteAt, ifoldr, splitAt, viewl, (!?), (<|))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (BlockT (..), BuiltinT (..), ExVarId, Ident (..), Lambda (..), OpT (..), Quant (..), Quantifier (..), TermT (..), Vector' (..), builtinsList, eqOf, identOfBuiltin, pTerm', parse, parseFile, recordGet, recordOf, render)
+import Parser (BlockT (..), BuiltinT (..), ExVarId, Ident (..), Lambda (..), OpT (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parse, parseFile, recordGet, recordOf, render)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try)
 import RIO.HashMap qualified as HM
+
+-- TODO: Erasure is wrong... Verify for \f. f @4
 
 -- | Intensional equality.
 data EqRes
@@ -129,6 +131,7 @@ isEq' f = curry \case
       $ withResolved \exs → isEq' f (ListLit $ Vector' $ resolve exs <$> xs) (ListLit $ Vector' $ resolve exs <$> ys)
   (ListLit (Vector' (null → True)), ListLit (Vector' (null → True))) → pure EqYes
   (ListLit _, _) → pure EqNot
+  -- TODO: This is greedy, which is bad. Should uwrap lazily.
   (RecordLit (Vector' (viewl → Just ((tagx, x), xs))), RecordLit (Vector' origY)) →
     ifoldr
       ( \i (tagy, y) rec →
@@ -217,7 +220,7 @@ postApp = curry \case
   (f@(Builtin ListIndexL `App` ListLit (Vector' vals) `App` NatLit i), a) → case vals !? fromIntegral i of
     Just v → v
     Nothing → App f a
-  (Builtin NatFold `App` accf `App` n `App` start, step) →
+  (Builtin NatFold `App` start `App` step, n) →
     let
       (nTM, nV) = unplus n
      in
@@ -226,7 +229,7 @@ postApp = curry \case
         $ repeat nV (App step)
         $ case nTM of
           Nothing → start
-          Just nT → Builtin NatFold `App` accf `App` nT `App` start `App` step
+          Just nT → Builtin NatFold `App` start `App` step `App` nT
   (Builtin If `App` (BoolLit cond) `App` thenBranch, elseBranch) →
     if cond
       then normalize [Just $ RecordLit []] thenBranch
@@ -384,6 +387,7 @@ termQQ =
         $ Concat
           (RecordLit [(TagLit (Ident "val" False), ty)])
           (Left (Ident "s" False, Lambda $ RecordLit [(TagLit (Ident "prf" False), pred1 $ recordGet (TagLit (Ident "val" False)) (Var 0))]))
+    -- TODO: Implement via LTE?
     lt a b = Builtin Eq `App` (Builtin ULt `App` a `App` b) `App` BoolLit True
     finT n = refTy1 (Builtin U32) \a → lt a $ nested n
     -- Lam (Ident "n" False)

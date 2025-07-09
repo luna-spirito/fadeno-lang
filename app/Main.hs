@@ -668,7 +668,7 @@ typOfBuiltin =
     RecordDropFields → [termQQ| forall (u : U32) (row : Row (Type+ u)). exists (new-row : Row (Type+ u)). List Tag -> Record row -> Record new-row |]
     ListLength → [termQQ| forall (u : U32) (a : Type+ u). List a -> U32 |]
     ListIndexL → [termQQ| forall (u : U32) (a : Type+ u). l : List a -> Fin (list-length l) -> a |]
-    NatFold → [termQQ| forall (u : U32) (Acc : (U32 -> Type+ u)). n : U32 -> Acc 0 -> (i : Fin n -> Acc i -> Acc (i + 1)) -> Acc n |]
+    NatFold → [termQQ| forall (u : U32) (Acc : (U32 -> Type+ u)). Acc 0 -> (i : U32 -> Acc i -> Acc (i + 1)) -> n : U32 -> Acc n |]
     If → [termQQ| forall (u : U32) (a : Type+ u). cond : Bool -> (Eq cond true -> a) -> (Eq cond false -> a) -> a |]
     ULte → [termQQ| U32 -> U32 -> Bool |]
     ULt → [termQQ| U32 -> U32 -> Bool |]
@@ -779,21 +779,20 @@ subtype = \a b →
       -- Input types are contravariant (T2 <: T1)
       withResolved \_ → subtype inT2 inT1
       -- Output types are covariant
-      withResolved \exs → case (outT1E, outT2E) of
-        -- Both non-dependent
-        (Right outT1, Right outT2) → subtype (resolve exs outT1) (resolve exs outT2)
-        -- Both dependent
-        (Left (_n1, lbd1), Left (n2, lbd2)) → do
-          uniId ← fresh
-          -- Introduce UniVar with the *supertype's* input type (inT2)
-          scopedUniVar (const pure) uniId do
-            let var = UniVar n2 uniId inT2 -- Use common name/type for substitution
-            let body1 = resolve exs $ normalize [Just var] $ unLambda lbd1
-            let body2 = resolve exs $ normalize [Just var] $ unLambda lbd2
-            subtype body1 body2
-        -- Mixed cases are not subtypes of each other
-        _ → stackError "Cannot subtype mixed dependent/non-dependent Pi types"
-
+      withResolved \exs →
+        let process name bod1 bod2 = do
+              uniId ← fresh
+              scopedUniVar (const pure) uniId do
+                let var = UniVar name uniId inT2 -- Use common name/type for substitution
+                let body1 = resolve exs $ either id (normalize [Just var] . unLambda) bod1
+                let body2 = resolve exs $ either id (normalize [Just var] . unLambda) bod2
+                subtype body1 body2
+         in case (outT1E, outT2E) of
+              -- Both non-dependent
+              (Right outT1, Right outT2) → subtype (resolve exs outT1) (resolve exs outT2)
+              (Left (_n1, lbd1), Left (n2, lbd2)) → process n2 (Right lbd1) (Right lbd2)
+              (Left (n1, lbd1), Right outT2) → process n1 (Right lbd1) (Left outT2)
+              (Right outT1, Left (n2, lbd2)) → process n2 (Left outT1) (Right lbd2)
     -- Builtin Types (must be identical)
     (Builtin a, Builtin b) | a == b → pure ()
     (Var i, Var j) | i == j → pure ()

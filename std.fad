@@ -36,10 +36,10 @@ Fin = \n. Ref U32 (\i. i < n)
 /: forall (u : U32) (A : Type+ u). l : List A -> Fin (list-length l) -> A
 list-indexl = fadeno.list-indexl
 
-/: forall (u : U32) (Acc : (U32 -> Type+ u)). n : U32 -> Acc 0 -> (i : Fin n -> Acc i -> Acc (i + 1)) -> Acc n
+/: forall (u : U32) (Acc : (U32 -> Type+ u)). Acc 0 -> (i : U32 -> Acc i -> Acc (i + 1)) -> n : U32 -> Acc n
 nat~fold = fadeno.nat~fold
 
-/: forall (u : U32) (Acc : Type+ u). n : U32 -> Acc -> (i : Fin n -> Acc -> Acc) -> Acc
+/: forall (u : U32) (Acc : Type+ u). Acc -> (U32 -> Acc -> Acc) -> U32 -> Acc
 nat-fold = \@u @Acc. nat~fold @u @(\_. Acc)
 
 /: u : U32 -> Type+ u -> Type+ u -> Type+ u
