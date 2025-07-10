@@ -1,60 +1,50 @@
-unpack fadeno. Type+ U32 Tag List Bool Eq refl Row Record list-length if _<_ W wrap unwrap
+unpack fadeno. Type+ U32 Tag List Bool Eq refl Row Record list-length list-indexl if _<_ W wrap unwrap
 
 Kind = Type+ 1
 /: Kind
 Type = Type+ 0
 
-/: forall (u : U32) (A : Type+ u). A -> A
+/: u : U32 -@> A : Type+ u -@> A -> A
 id = \x. x
 
-/: forall (u : U32) (K : Type+ u) (V : Type+ u). K -> V -> Record { .k = K | .v = V }
+/: u : U32 -@> K : Type+ u -@> V : Type+ u -@> K -> V -> Record { .k = K | .v = V }
 _=>_ = \k v. { .k = k | .v = v }
 
-/: forall (u : U32). Type+ u
+/: u : U32 -@> Type+ u
 Unit = Record {}
 /: Unit
 unit = {}
 
 /: Type
-Never = exists A. A
+Never = Unit
 
-/: forall (u : U32). Type+ u -> Type+ u
+/: u : U32 -@> Type+ u -> Type+ u
 Not = \a. a -> Never
 
 /: Bool -> Type
 Where = \x. Eq x true
 
-/: forall (u : U32). A : Type+ u -> (A -> Bool) -> Type+ u
-Ref = \Ty predicate. Record (s : { .val = Ty } \/ { .prf = Where (predicate s.val) })
-
-// // /: forall (u : U32) (A : Type+ u). List A -> Type+ A
-// // IsEmpty = \l. Eq (list-length l) 0
-
-/: U32 -> Type
-Fin = \n. Ref U32 (\i. i < n)
-
-/: forall (u : U32) (A : Type+ u). l : List A -> Fin (list-length l) -> A
-list-indexl = fadeno.list-indexl
-
-/: forall (u : U32) (Acc : (U32 -> Type+ u)). Acc 0 -> (i : U32 -> Acc i -> Acc (i + 1)) -> n : U32 -> Acc n
+// Checking fails due to a commented `infer []`. Yeah, @7ba939ac886954e9afd0163dfc5ec4eea0dd8e00 was a great idea.
+// /: u : U32 -@> Acc : (U32 -> Type+ u) -@> Acc 0 -> (i : U32 -> Acc i -> Acc (i + 1)) -> n : U32 -> Acc n
 nat~fold = fadeno.nat~fold
 
-/: forall (u : U32) (Acc : Type+ u). Acc -> (U32 -> Acc -> Acc) -> U32 -> Acc
-nat-fold = \@u @Acc. nat~fold @u @(\_. Acc)
+// /: u : U32 -@> Acc : Type+ u -@> Acc -> (U32 -> Acc -> Acc) -> U32 -> Acc
+// nat-fold = \@u @Acc. nat~fold @u @(\_. Acc)
 
-/: u : U32 -> Type+ u -> Type+ u -> Type+ u
-Choice = \u A B. forall (R : Type+ u). (A -> R) -> (B -> R) -> R
+in {}
 
-ListM = forall (R : Type+ 0). (forall (Acc : Type+ 0). (Acc -> R) -> Choice 0 (Record {}) (Record { .head = U32 | .tail = Acc }) -> R) -> R
+// /: forall (u : U32). Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
+// find-case =
 
-/: W ListM
-nil = wrap ListM (\analyser. analyser (\x. x) (\l r. l {}))
+// /: u : U32 -> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
+// find-case = \u tag cases. nat~fold
+//  (\i. Unit -> Row (Type+ u))
+//  (list-length cases)
+//  {} //(forall (row : Row (Type+ u)). row)
+//  (\i rec. {})
+//  {}
 
-/: U32 -> W ListM -> W ListM
-cons = \x xs. wrap ListM (\analyser. analyser (\xs'. unwrap ListM xs' analyser) (\l r. r { .head = x | .tail = xs }))
 
-in cons 3 (cons 5 (cons 5 (cons 8 nil)))
-//in cons 3 (cons 4 (cons 6 (cons 8 nil)))
 // /: forall (u : U32). Tag -> Row (Type+ u) -> Row (Type+ u)
 // Optional = \tag row. s : { (tag) = Bool } \/ row
 

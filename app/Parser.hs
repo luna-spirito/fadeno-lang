@@ -4,7 +4,6 @@ module Parser (
   BuiltinT (..),
   builtinsList,
   Quant (..),
-  Quantifier (..),
   BlockT (..),
   Lambda (..),
   ExVarId (..),
@@ -116,7 +115,7 @@ identRightNow = do
         _ → (rawResult, False)
   guard $ not $ BS.null result
   guard $ not $ "@" `BS.isPrefixOf` result
-  guard $ not $ result `elem` (["=", "in", "+", "-", "/", "\\/", "*", "->", "forall", "unpack", "fadeno", "rewrite", "true", "false"] ∷ [ByteString])
+  guard $ not $ result `elem` (["=", "in", "+", "-", "/", "\\/", "*", "->", "-@>", "unpack", "fadeno", "rewrite", "true", "false"] ∷ [ByteString])
   pure (Ident result isOp)
 
 ident ∷ Parser' Ident
@@ -201,8 +200,6 @@ identOfBuiltin = \case
   -- \| op
   o x = x `Ident` True
 
-data Quantifier = Forall | Exists deriving (Show, Eq, Lift)
-
 newtype Lambda a = Lambda {unLambda ∷ a}
   deriving (Show, Eq, Lift)
 
@@ -252,9 +249,9 @@ data TermT
   | ListLit !(Vector' TermT)
   | RecordLit !(Vector' (TermT, TermT))
   | -- Type-level
-    Quantification !Quantifier !Ident !TermT !(Lambda TermT)
-  | -- | Cedille: Π x : T | T’ / Fadeno: x : T -> T'
-    Pi !TermT !(Either (Ident, Lambda TermT) TermT)
+
+    -- | Cedille: Π x : T | T' / Fadeno: x : T -> T' or x : T -@> T'
+    Pi !Quant !TermT !(Either (Ident, Lambda TermT) TermT)
   | Concat !TermT !(Either (Ident, Lambda TermT) TermT)
   | Builtin !BuiltinT
   | BuiltinsVar
@@ -396,37 +393,20 @@ parseApp = parsePrim >>= infxl'
 parseTy ∷ Parser' TermT
 parseTy =
   ( do
-      q ← token $ ($(string "forall") $> Forall) <|> ($(string "exists") $> Exists)
-      -- TODO: unify syntax with how Pi works?
-      let
-        kind = do
-          token $(char ':')
-          parseTy
-        someEntries = do
-          (ty, ki) ←
-            token
-              $ ((,Builtin TypePlus `App` NatLit 0) <$> ident)
-              <|> ($(char '(') *> ((,) <$> ident <*> kind) <* $(char ')'))
-          Quantification q ty ki . Lambda <$> local ((QNorm, ty) <|) manyEntries
-        manyEntries =
-          someEntries <|> (token $(char '.') *> parseTy)
-      someEntries
+      $(string "sorry/")
+      n ← ident
+      token $ $(char ':')
+      ty ← parseTy
+      pure $ Sorry n ty
   )
-    <|> ( do
-            $(string "sorry/")
-            n ← ident
-            token $ $(char ':')
-            ty ← parseTy
-            pure $ Sorry n ty
-        )
     <|> do
-      -- Fused: parseApp <|> (->) <|> (/\)
+      -- Fused: parseApp <|> (->) <|> (-@>) <|> (/\)
       inNameM ← optional $ (ident <* $(char ':'))
       inTy ← parseApp
       ( ( do
-            token $ $(string "->")
+            q ← token $ ($(string "->") $> QNorm) <|> ($(string "-@>") $> QEra)
             outTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local ((QNorm, name) <|)) inNameM parseTy
-            pure $ Pi inTy outTy
+            pure $ Pi q inTy outTy
         )
           <|> ( do
                   token $ $(string "\\/")
@@ -601,8 +581,7 @@ isSimple =
         Var _ → ping
         ListLit vs → ping *> traverse_ complexity vs
         RecordLit fields → ping *> traverse_ (\(k, v) → complexity k *> complexity v) fields
-        Quantification _ _ b (Lambda c) → ping *> complexity b *> complexity c
-        Pi b c → ping *> complexity b *> either (complexity . unLambda . snd) complexity c
+        Pi _ b c → ping *> complexity b *> either (complexity . unLambda . snd) complexity c
         Concat a b → complexity a *> either (complexity . unLambda . snd) complexity b
         Builtin _ → ping
         BuiltinsVar → ping
@@ -615,7 +594,7 @@ pQuant = \case
   QEra → "@"
   QNorm → mempty
 
--- TODO: Concise syntax for `\` and `forall`
+-- TODO: Concise syntax for `\` and `-@>`
 pTerm ∷ (Int, ParserContext) → TermT → Doc AnsiStyle
 pTerm (oldPrec, vars) =
   withPrec oldPrec . \case
@@ -669,20 +648,10 @@ pTerm (oldPrec, vars) =
             Mul → 3
             Div → 3
        in (prec, pTerm (prec, vars) a <+> pOp op <+> pTerm (prec, vars) b)
-    Quantification q name kind ty →
-      ( 5
-      , let kind' = case kind of
-              App (Builtin TypePlus) (NatLit 0) → mempty
-              _ → " :" <+> pTerm (5, vars) kind
-            q' = case q of
-              Forall → "forall"
-              Exists → "exists"
-         in annotate (color Cyan) q' <+> pIdent name <> kind' <> "." <+> pTerm (5, (QNorm, name) <| vars) (unLambda ty)
-      )
-    Pi inTy outTy →
+    Pi quant inTy outTy →
       ( 5
       , either (\(name, _) → pIdent name <+> ": ") mempty outTy <> pTerm (6, vars) inTy
-          <+> "->"
+          <+> (case quant of QNorm → "->"; QEra → "-@>")
           <+> case outTy of
             Left (name, outTy') → pTerm (5, (QNorm, name) <| vars) $ unLambda outTy'
             Right outTy' → pTerm (5, vars) outTy'

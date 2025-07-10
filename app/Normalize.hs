@@ -101,11 +101,6 @@ isEq' f = curry \case
   (BoolLit a, BoolLit b)
     | a == b → pure EqYes
   (BoolLit _, _) → pure EqNot
-  (Quantification q1 _n1 k1 t1, Quantification q2 _n2 k2 t2)
-    | q1 == q2 → runSeqResolve
-        $ force (withResolved \_ → isEq' f k1 k2)
-        $ withResolved \exs → isEq' f (resolve' 1 exs $ unLambda t1) (resolve' 1 exs $ unLambda t2)
-  (Quantification{}, _) → pure EqUnknown
   (Builtin a, Builtin b)
     | a == b → pure EqYes
   (Builtin _, _) → pure EqNot
@@ -115,14 +110,14 @@ isEq' f = curry \case
   (_, BuiltinsVar) → pure EqNot
   -- TODO: Handle mixed?
   -- Shame.
-  (Pi inT1 (Left (_, outT1)), Pi inT2 (Left (_, outT2))) →
-    runSeqResolve
-      $ force (withResolved \_ → isEq' f inT1 inT2)
-      $ withResolved \exs → isEq' f (resolve' 1 exs $ unLambda outT1) (resolve' 1 exs $ unLambda outT2)
-  (Pi inT1 (Right outT1), Pi inT2 (Right outT2)) →
-    runSeqResolve
-      $ force (withResolved \_ → isEq' f inT1 inT2)
-      $ withResolved \exs → isEq' f (resolve exs outT1) (resolve exs outT2)
+  (Pi q1 inT1 (Left (_, outT1)), Pi q2 inT2 (Left (_, outT2)))
+    | q1 == q2 → runSeqResolve
+        $ force (withResolved \_ → isEq' f inT1 inT2)
+        $ withResolved \exs → isEq' f (resolve' 1 exs $ unLambda outT1) (resolve' 1 exs $ unLambda outT2)
+  (Pi q1 inT1 (Right outT1), Pi q2 inT2 (Right outT2))
+    | q1 == q2 → runSeqResolve
+        $ force (withResolved \_ → isEq' f inT1 inT2)
+        $ withResolved \exs → isEq' f (resolve exs outT1) (resolve exs outT2)
   (Pi{}, _) → pure EqNot
   (Concat _ _, _) → error "TODO isEq Concat"
   (ListLit (Vector' (viewl → Just (x, xs))), ListLit (Vector' (viewl → Just (y, ys)))) →
@@ -310,15 +305,14 @@ rewrite onLet onNest rewriter = go
     RecordLit (Vector' vec) → RecordLit . Vector' <$> traverse (bitraverse (go via) (go via)) vec
     Sorry n x → Sorry n <$> go via x
     Var i → pure $ Var i
-    Quantification q x a b → Quantification q x <$> go via a <*> (Lambda <$> go (onNest via) (unLambda b))
     Builtin x → pure $ Builtin x
     BuiltinsVar → pure builtinsVar
-    Pi inT outT → do
+    Pi q inT outT → do
       inT' ← go via inT
       outT' ← case outT of
         Left (n, x) → Left . (n,) . Lambda <$> go (onNest via) (unLambda x)
         Right x → Right <$> go via x
-      pure $ Pi inT' outT'
+      pure $ Pi q inT' outT'
     Concat a b → do
       a' ← go via a
       b' ← either (\(n, b') → Left . (n,) . Lambda <$> go (onNest via) (unLambda b')) (fmap Right . go via) b
@@ -382,29 +376,8 @@ Just a variation of parseQQ that has all the builtins in scope from the start.
 termQQ ∷ QuasiQuoter
 termQQ =
   let
-    refTy1 ty pred1 =
-      recordOf
-        $ Concat
-          (RecordLit [(TagLit (Ident "val" False), ty)])
-          (Left (Ident "s" False, Lambda $ RecordLit [(TagLit (Ident "prf" False), pred1 $ recordGet (TagLit (Ident "val" False)) (Var 0))]))
-    -- TODO: Implement via LTE?
-    lt a b = Builtin Eq `App` (Builtin ULt `App` a `App` b) `App` BoolLit True
-    finT n = refTy1 (Builtin U32) \a → lt a $ nested n
-    -- Lam (Ident "n" False)
-    --   $ Lambda
-    --   $ recordOf
-    --   $ Concat
-    --     (RecordLit [(TagLit (Ident "val" False), Builtin U32)])
-    --   $ Left
-    --     ( Ident "s" False
-    --     , Lambda
-    --         $ RecordLit
-    --           [
-    --             ( TagLit (Ident "prf" False)
-    --             , lt (recordGet (TagLit (Ident "val" False)) (Var 1)) (Var 2))
-    --           ]
-    --     )
-    scope = ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList) <> [(Ident "Fin" False, Lam QNorm (Ident "n" False) $ Lambda $ finT $ Var 0)]
+    wher = Lam QNorm (Ident "n" False) $ Lambda $ Builtin Eq `App` (Var 0) `App` BoolLit True
+    scope = ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList) <> [(Ident "Where" False, wher)]
    in
     QuasiQuoter
       { quoteExp = \s → do
