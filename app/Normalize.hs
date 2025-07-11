@@ -12,7 +12,7 @@ import Control.Effect.Writer (Writer, listen, tell)
 import Data.ByteString.Char8 (pack)
 import Data.RRBVector (Vector, deleteAt, ifoldr, splitAt, viewl, (!?), (<|))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (BlockT (..), BuiltinT (..), ExType (..), ExVarId, Ident (..), Lambda (..), OpT (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parse, parseFile, recordGet, render)
+import Parser (BlockT (..), BuiltinT (..), ExType (..), ExVarId, Ident (..), Lambda (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parse, parseFile, recordGet, render)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try)
 import RIO.HashMap qualified as HM
 
@@ -89,20 +89,14 @@ isEq' f = curry \case
       $ pure EqYes
   (App{}, _) → pure EqUnknown
   (_, App{}) → pure EqUnknown
-  (Op a1 op1 b1, Op a2 op2 b2)
-    | op1 == op2 → runSeqResolve
-        $ try (withResolved \_ → isEq' f a1 a2)
-        $ withResolved \exs → isEq' f (resolve exs b1) (resolve exs b2)
-  (Op{}, _) → pure EqUnknown
-  (_, Op{}) → pure EqUnknown
   (Sorry _ a, b) → isEq' f a b
   (a, Sorry _ b) → isEq' f a b
   -- Literals
   (Lam QNorm _ bod1, Lam QNorm _ bod2) → local (insertBinds (QNorm, Nothing, Nothing)) $ isEq' f (unLambda bod1) (unLambda bod2)
   (Lam QNorm _ _, _) → pure EqNot
-  (NatLit a, NatLit b)
+  (NumLit a, NumLit b)
     | a == b → pure EqYes
-  (NatLit _, _) → pure EqNot
+  (NumLit _, _) → pure EqNot
   (TagLit a, TagLit b)
     | a == b → pure EqYes
   (TagLit _, _) → pure EqNot
@@ -194,15 +188,15 @@ unconsField = \case
     Nothing → Nothing
   _ → Nothing
 
-repeat ∷ Word32 → (a → a) → a → a
+repeat ∷ Integer → (a → a) → a → a
 repeat n f = case n of
   0 → id
   _ → f . repeat (n - 1) f
 
 -- TODO: Really simple, expand upon.
-unplus ∷ TermT → (Maybe TermT, Word32)
-unplus (NatLit n) = (Nothing, n)
-unplus (Op a Add (NatLit n)) = (Just a, n)
+unplus ∷ TermT → (Maybe TermT, Integer)
+unplus (NumLit n) | n >= 0 = (Nothing, n)
+unplus (Builtin Add `App` a `App` NumLit n) | n >= 0 = (Just a, n)
 unplus x = (Just x, 0)
 
 -- | Processes application of `f` onto `a`.
@@ -221,8 +215,8 @@ postApp = curry \case
       search a
   (Builtin RecordKeepFields `App` ListLit tags, a) → RecordLit $ (\tag → (tag, recordGet tag a)) <$> tags
   (Builtin RecordDropFields `App` ListLit tags, a) → recordDropFields tags a
-  (Builtin ListLength, ListLit (Vector' fi)) → NatLit $ fromIntegral $ length fi
-  (f@(Builtin ListIndexL `App` ListLit (Vector' vals) `App` NatLit i), a) → case vals !? fromIntegral i of
+  (Builtin ListLength, ListLit (Vector' fi)) → NumLit $ fromIntegral $ length fi
+  (f@(Builtin ListIndexL `App` ListLit (Vector' vals) `App` NumLit i), a) → case vals !? fromIntegral i of
     Just v → v
     Nothing → App f a
   (Builtin NatFold `App` start `App` step, n) →
@@ -239,12 +233,14 @@ postApp = curry \case
     if cond
       then normalize [Just $ RecordLit []] thenBranch
       else normalize [Just $ RecordLit []] elseBranch
-  (Builtin ULte `App` (NatLit l), NatLit r) → BoolLit $ l <= r
-  (Builtin ULt `App` (NatLit l), NatLit r) → BoolLit $ l < r
-  (Builtin UEq `App` (NatLit l), NatLit r) → BoolLit $ l == r
-  (Builtin UNeq `App` (NatLit l), NatLit r) → BoolLit $ l /= r
+  (Builtin ULte `App` (NumLit l), NumLit r) → BoolLit $ l <= r
+  (Builtin ULt `App` (NumLit l), NumLit r) → BoolLit $ l < r
+  (Builtin UEq `App` (NumLit l), NumLit r) → BoolLit $ l == r
+  (Builtin UNeq `App` (NumLit l), NumLit r) → BoolLit $ l /= r
   (Builtin Wrap `App` _ty, b) → b
   (Builtin Unwrap `App` _ty, b) → b
+  (Builtin Add `App` (NumLit a), NumLit b) → NumLit $ a + b
+  (Builtin Mul `App` (NumLit a), NumLit b) → NumLit $ a * b
   (f, a) → App f a
  where
   -- Drop `x` from ListLit.
@@ -293,22 +289,12 @@ rewrite onLet onNest rewriter = go
     Block (BlockRewrite from to) → error "TODO rewrite BlockRewrite"
     Lam QNorm arg bod → Lam QNorm arg . Lambda <$> go (onNest via) (unLambda bod)
     Lam QEra _ bod → go (onLet undefined via) $ unLambda bod
-    Op aT op bT → do
-      aT' ← go via aT
-      bT' ← go via bT
-      pure $ case (aT', bT') of
-        (NatLit a, NatLit b) → NatLit $ case op of
-          Add → a + b
-          Sub → a - b
-          Mul → a * b
-          Div → a `div` b
-        _ → Op aT' op bT'
     AppErased f _ → go via f
     App f a → do
       f' ← go via f
       a' ← go via a
       pure $ postApp f' a'
-    NatLit x → pure $ NatLit x
+    NumLit x → pure $ NumLit x
     TagLit x → pure $ TagLit x
     BoolLit x → pure $ BoolLit x
     ListLit (Vector' vec) → ListLit . Vector' <$> traverse (go via) vec

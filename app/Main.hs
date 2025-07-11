@@ -209,7 +209,7 @@ scopedExVar mapTerm (ex1, ex1ty) act = do
                           uN ← freshIdent
                           n ← freshIdent
                           pure
-                            $ Pi QEra (Builtin U32)
+                            $ Pi QEra (Builtin UInt)
                             . Left
                             . (uN,)
                             . Lambda
@@ -361,10 +361,10 @@ withKnownFields tmap t f =
     t
 
 bottom ∷ TermT
-bottom = [termQQ| u : U32 -@> a : Type+ u -@> a |]
+bottom = [termQQ| u : UInt -@> a : Type+ u -@> a |]
 
 bottomRow ∷ TermT
-bottomRow = [termQQ| u : U32 -@> row : Row (Type+ u) -@> row |]
+bottomRow = [termQQ| u : UInt -@> row : Row (Type+ u) -@> row |]
 
 ensureIsType ∷ (Has Solve sig m) ⇒ TermT → m TermT
 ensureIsType t =
@@ -516,10 +516,6 @@ infer = logAndRunInfer \case
       outT ← withResolved \_ →
         scopedVar id (QNorm, Nothing, inT') $ infer (unLambda bod) Infer
       withResolved \exs → pure $ Pi QNorm (resolve exs inT') $ Right outT
-  (Op a _op b, Infer) → runSeqResolve do
-    withResolved \_ → infer a $ Check $ Builtin U32
-    withResolved \_ → infer b $ Check $ Builtin U32
-    pure $ Builtin U32
   (Lam QNorm _ bod, Check (Pi QNorm inT outT)) → checkLam QNorm bod inT outT
   (App (App (Builtin RecordGet) tag) record, mode) → runSeqResolve do
     recordT ← withResolved \_ → infer record Infer
@@ -614,7 +610,7 @@ infer = logAndRunInfer \case
             rE
         withResolved \exs →
           withKnown (resolve exs lT) \lT' → withKnown rT \rT' → concatT lT' rT'
-  (NatLit _, Infer) → pure $ Builtin U32
+  (NumLit x, Infer) → pure $ Builtin $ if x >= 0 then UInt else SInt
   (TagLit _, Infer) → pure $ Builtin Tag
   (BoolLit _, Infer) → pure $ Builtin Bool
   (Var i, Infer) → do
@@ -634,7 +630,7 @@ infer = logAndRunInfer \case
   --     $ infer y
   --     $ Check
   --     $ typOf u
-  (Pi QNorm inTy (Right outTy), Infer) → runSeqResolve do
+  (Pi _q inTy (Right outTy), Infer) → runSeqResolve do
     inTyTy ← withResolved \_ → ensureIsType =<< infer inTy Infer
     withResolved \_ →
       -- TODO: recheck
@@ -664,36 +660,39 @@ infer = logAndRunInfer \case
 typOfBuiltin ∷ BuiltinT → TermT
 typOfBuiltin =
   \case
-    U32 → [termQQ| Type+ 0 |]
+    UInt → [termQQ| Type+ 0 |]
+    SInt → [termQQ| Type+ 0 |]
     Tag → [termQQ| Type+ 0 |]
     Bool → [termQQ| Type+ 0 |]
-    Row → [termQQ| u : U32 -@> Type+ u -> Type+ u |]
-    Record → [termQQ| u : U32 -@> Row (Type+ u) -> Type+ u |]
-    List → [termQQ| u : U32 -@> Type+ u -> Type+ u |]
-    TypePlus → [termQQ| u : U32 -> Type+ (u + 1) |]
-    Eq → [termQQ| u : U32 -@> a : Type+ u -@> a -> a -> Type+ u |]
-    Refl → [termQQ| u : U32 -@> a : Type+ u -@> x : a -@> Eq x x |]
+    Row → [termQQ| u : UInt -@> Type+ u -> Type+ u |]
+    Record → [termQQ| u : UInt -@> Row (Type+ u) -> Type+ u |]
+    List → [termQQ| u : UInt -@> Type+ u -> Type+ u |]
+    TypePlus → [termQQ| u : UInt -> Type+ (u + 1) |]
+    Eq → [termQQ| u : UInt -@> a : Type+ u -@> a -> a -> Type+ u |]
+    Refl → [termQQ| u : UInt -@> a : Type+ u -@> x : a -@> Eq x x |]
     RecordGet →
       [termQQ|
-        u : U32 -@> row : Row (Type+ u) -@> t : Type+ u -@>
+        u : UInt -@> row : Row (Type+ u) -@> t : Type+ u -@>
           tag : Tag ->
           record : Record ({(tag) = t} \/ row) ->
           t
       |]
     -- TODO: Better type
-    RecordKeepFields → [termQQ| u : U32 -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
-    RecordDropFields → [termQQ| u : U32 -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
-    ListLength → [termQQ| u : U32 -@> a : Type+ u -@> List a -> U32 |]
-    ListIndexL → [termQQ| u : U32 -@> a : Type+ u -@> i : U32 -> l : List a -> Where (i < list-length l) -@> a |]
-    NatFold → [termQQ| u : U32 -@> Acc : (U32 -> Type+ u) -@> Acc 0 -> (i : U32 -> Acc i -> Acc (i + 1)) -> n : U32 -> Acc n |]
-    If → [termQQ| u : U32 -@> a : Type+ u -@> cond : Bool -> (Eq cond true -> a) -> (Eq cond false -> a) -> a |]
-    ULte → [termQQ| U32 -> U32 -> Bool |]
-    ULt → [termQQ| U32 -> U32 -> Bool |]
-    UEq → [termQQ| U32 -> U32 -> Bool |]
-    UNeq → [termQQ| U32 -> U32 -> Bool |]
-    W → [termQQ| u : U32 -@> Type+ u -> Type+ u |]
-    Wrap → [termQQ| u : U32 -@> A : Type+ u -@> A -> W A |]
-    Unwrap → [termQQ| u : U32 -@> A : Type+ u -@> W A -> A |]
+    RecordKeepFields → [termQQ| u : UInt -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
+    RecordDropFields → [termQQ| u : UInt -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
+    ListLength → [termQQ| u : UInt -@> A : Type+ u -@> List A -> UInt |]
+    ListIndexL → [termQQ| u : UInt -@> A : Type+ u -@> i : UInt -> l : List A -> Where (i < list-length l) -@> A |]
+    NatFold → [termQQ| u : UInt -@> Acc : (UInt -> Type+ u) -@> Acc 0 -> (i : UInt -> Acc i -> Acc (i + 1)) -> n : UInt -> Acc n |]
+    If → [termQQ| u : UInt -@> A : Type+ u -@> cond : Bool -> (Eq cond true -> A) -> (Eq cond false -> A) -> A |]
+    ULte → [termQQ| SInt -> SInt -> Bool |]
+    ULt → [termQQ| SInt -> SInt -> Bool |]
+    UEq → [termQQ| SInt -> SInt -> Bool |]
+    UNeq → [termQQ| SInt -> SInt -> Bool |]
+    W → [termQQ| u : UInt -@> Type+ u -> Type+ u |]
+    Wrap → [termQQ| u : UInt -@> A : Type+ u -@> A -> W A |]
+    Unwrap → [termQQ| u : UInt -@> A : Type+ u -@> W A -> A |]
+    Add → [termQQ| UInt -> UInt -> UInt |]
+    Mul → [termQQ| UInt -> UInt -> UInt |]
 
 instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ Ident → ExVarId → ExType → TermT → m ()
 instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1) t1 →
@@ -727,7 +726,7 @@ instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1)
           pure $ Concat a' b'
         Var x → pure $ Var x -- TODO: I hope this is correct, but needs to be rechecked.
         Builtin x → pure $ Builtin x
-        NatLit x → pure $ NatLit x
+        NumLit x → pure $ NumLit x
         Pi QNorm inT outT → runSeqResolve do
           inT' ← withResolved \_ → instMeta' inT
           outT' ←
@@ -739,10 +738,6 @@ instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1)
                     outT
               )
           pure $ Pi QNorm inT' outT'
-        Op a op b → do
-          a' ← instMeta' a
-          b' ← instMeta' b
-          pure $ Op a' op b'
         x → stackError $ "instMeta (of" <+> pretty (tshow $ ExVarId var1) <> ")" <+> pTerm' x
    in \val →
         let r = writeMeta n1 (ExVarId var1) t1 =<< instMeta' val
@@ -801,14 +796,15 @@ subtype = \a b →
               (Left (_n1, lbd1), Left (n2, lbd2)) → process n2 (Right lbd1) (Right lbd2)
               (Left (n1, lbd1), Right outT2) → process n1 (Right lbd1) (Left outT2)
               (Right outT1, Left (n2, lbd2)) → process n2 (Left outT1) (Right lbd2)
+    (Builtin UInt, Builtin SInt) → pure ()
     -- Builtin Types (must be identical)
     (Builtin a, Builtin b) | a == b → pure ()
     (Var i, Var j) | i == j → pure ()
     -- Type Universes (Type L1 <: Type L2 where L1 <= L2)
     (App (Builtin TypePlus) a, App (Builtin TypePlus) b) → do
       case (a, b) of
-        (NatLit x, NatLit y) | x <= y → pure ()
-        (NatLit 0, _) → pure ()
+        (NumLit x, NumLit y) | x <= y → pure ()
+        (NumLit 0, _) → pure ()
         -- If one level is existential, unify it with the other level constraint.
         (ExVar nA exA tyA, lvl2) → instMeta nA exA tyA lvl2
         (lvl1, ExVar nB exB tyB) → instMeta nB exB tyB lvl1

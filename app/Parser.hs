@@ -5,7 +5,6 @@ module Parser (
   ExVarId (..),
   Ident (..),
   Lambda (..),
-  OpT (..),
   Quant (..),
   TermT (..),
   Vector' (..),
@@ -44,13 +43,6 @@ import RIO hiding (Reader, Vector, ask, local, toList, try)
 -- TODO ASAP: assocativity for operators. YeAh, TuRns oUT wE NeEd iT, wHo coUlD hAvE GuESseD?
 -- (6 - 4 - 2 ≠ 6 - (4 - 2))
 
-data OpT
-  = Add
-  | Sub
-  | Mul
-  | Div
-  deriving (Show, Eq, Ord, Lift)
-
 data Ident = Ident !ByteString !Bool -- raw name, is operator
   deriving (Show, Eq, Ord, Generic, Lift)
 
@@ -71,7 +63,7 @@ space =
 token ∷ Parser' a → Parser' a
 token x = space *> x <* space
 
-digit ∷ Parser' Word32
+digit ∷ Parser' Integer
 digit =
   anyAsciiChar >>= \case
     '0' → pure 0
@@ -86,19 +78,11 @@ digit =
     '9' → pure 9
     _ → failed
 
-number ∷ Parser' Word32
-number = token $ foldl' (\acc x → acc * 10 + x) 0 <$> some digit
-
-operator ∷ Parser' OpT
-operator =
-  token
-    $ anyAsciiChar
-    >>= \case
-      '+' → pure Add
-      '-' → pure Sub
-      '*' → pure Mul
-      '/' → pure Div
-      _ → failed
+number ∷ Parser' Integer
+number = token do
+  sign ← optional $ $(char '-')
+  val ← foldl' (\acc x → acc * 10 + x) 0 <$> some digit
+  pure $ if isJust sign then (-val) else val
 
 -- TODO: block words from ident' as well?.. probably not.
 -- TODO: Convert blocklists to functions
@@ -116,7 +100,7 @@ identRightNow = do
         _ → (rawResult, False)
   guard $ not $ BS.null result
   guard $ not $ "@" `BS.isPrefixOf` result
-  guard $ not $ result `elem` (["=", "in", "+", "-", "/", "\\/", "*", "->", "-@>", "unpack", "fadeno", "rewrite", "true", "false"] ∷ [ByteString])
+  guard $ not $ result `elem` (["=", "in", "/", "\\/", "->", "-@>", "unpack", "fadeno", "rewrite", "true", "false"] ∷ [ByteString])
   pure (Ident result isOp)
 
 ident ∷ Parser' Ident
@@ -142,7 +126,8 @@ To the above constructs, Cedille adds the following, discussed more below:
 -}
 
 data BuiltinT
-  = U32
+  = UInt
+  | SInt
   | Tag
   | Row
   | Record
@@ -165,14 +150,17 @@ data BuiltinT
   | W
   | Wrap
   | Unwrap
+  | Add
+  | Mul
   deriving (Show, Eq, Lift)
 
 builtinsList ∷ Vector BuiltinT
-builtinsList = [U32, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, ULte, ULt, UEq, UNeq, W, Wrap, Unwrap]
+builtinsList = [UInt, SInt, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, ULte, ULt, UEq, UNeq, W, Wrap, Unwrap, Add, Mul]
 
 identOfBuiltin ∷ BuiltinT → Ident
 identOfBuiltin = \case
-  U32 → r "U32"
+  UInt → r "UInt"
+  SInt → r "SInt"
   Tag → r "Tag"
   Bool → r "Bool"
   Row → r "Row"
@@ -195,6 +183,8 @@ identOfBuiltin = \case
   W → r "W"
   Wrap → r "wrap"
   Unwrap → r "unwrap"
+  Add → o "+"
+  Mul → o "*"
  where
   -- \| regular
   r x = x `Ident` False
@@ -239,10 +229,9 @@ data TermT
     -- | Annotations only allowed on Block.
     Block !BlockT
   | Lam !Quant !Ident !(Lambda TermT)
-  | Op !TermT !OpT !TermT
   | App !TermT !TermT
   | AppErased !TermT !TermT
-  | NatLit !Word32
+  | NumLit !Integer
   | TagLit !Ident
   | BoolLit !Bool
   | Sorry !Ident !TermT
@@ -284,7 +273,7 @@ recordGet ∷ TermT → TermT → TermT
 recordGet tag record = (Builtin RecordGet `App` tag) `App` record
 
 typ ∷ TermT
-typ = typOf $ NatLit 0
+typ = typOf $ NumLit 0
 
 eqOf ∷ TermT → TermT → TermT
 eqOf a b = (Builtin Eq) `App` a `App` b
@@ -300,16 +289,16 @@ infxr a oper = do
     )
     <|> pure a'
 
-infxl ∷ Parser' a → Parser' (a → a → a) → Parser' a
-infxl a oper = a >>= infxl'
- where
-  infxl' prev =
-    ( do
-        oper' ← oper
-        next ← a
-        infxl' $ oper' prev next
-    )
-      <|> pure prev
+-- infxl ∷ Parser' a → Parser' (a → a → a) → Parser' a
+-- infxl a oper = a >>= infxl'
+--  where
+--   infxl' prev =
+--     ( do
+--         oper' ← oper
+--         next ← a
+--         infxl' $ oper' prev next
+--     )
+--       <|> pure prev
 
 sepBy ∷ Parser' () → Parser' a → Parser' [a]
 sepBy with x = ((:) <$> x <*> many (with *> x)) <|> pure []
@@ -333,7 +322,7 @@ findVar name = do
 parsePrim ∷ Parser' TermT
 parsePrim = token do
   prim ←
-    (NatLit <$> number)
+    (NumLit <$> number)
       <|> (TagLit <$> ($(char '.') *> ident))
       <|> (BoolLit <$> notFollowedBy ((True <$ $(string "true")) <|> (False <$ $(string "false"))) identSym)
       <|> ( do
@@ -445,28 +434,6 @@ parseInfixOps = infxr parseTy parseOperator'
           _ → empty -- Not a known operator in this scope
       _ → empty
 
--- 3
-parseMath1 ∷ Parser' TermT
-parseMath1 =
-  infxl
-    parseInfixOps
-    ( operator >>= \case
-        Mul → pure \x → Op x Mul
-        Div → pure \x → Op x Div
-        _ → empty
-    )
-
--- 2
-parseMath0 ∷ Parser' TermT
-parseMath0 =
-  infxl
-    parseMath1
-    ( operator >>= \case
-        Add → pure \x → Op x Add
-        Sub → pure \x → Op x Sub
-        _ → empty
-    )
-
 insideLet ∷ Quant → ParserContext → ParserContext
 insideLet = \case
   QEra → id
@@ -479,7 +446,7 @@ parseBlock = do
     binding = do
       ty ← optional do
         token $(string "/:")
-        parseMath0
+        parseInfixOps
       q ← ($(char '@') $> QEra) <|> pure QNorm
       name ← ident
       parseEq
@@ -537,7 +504,7 @@ parseTop =
     -- parseNode
     parseBlock
     <|> parseLam
-    <|> parseMath0
+    <|> parseInfixOps
 
 --
 
@@ -548,13 +515,6 @@ pIdent ∷ Ident → Doc AnsiStyle
 pIdent (Ident x isOp) =
   let res = pBS x
    in if isOp then "_" <> res <> "_" else res
-
-pOp ∷ OpT → Doc AnsiStyle
-pOp = \case
-  Add → "+"
-  Sub → "-"
-  Mul → "*"
-  Div → "/"
 
 -- Left/right?
 withPrec ∷ Int → (Int, Doc ann) → Doc ann
@@ -583,10 +543,9 @@ isSimple =
                   BlockLet _ _ b c x → for_ b complexity *> complexity c *> complexity (unLambda x)
                   BlockRewrite r x → ping *> complexity r *> complexity x
                )
-        Op a _ c → complexity a *> complexity c
         App f a → complexity f *> complexity a
         AppErased f a → complexity f *> complexity a
-        NatLit _ → ping
+        NumLit _ → ping
         TagLit _ → ping
         BoolLit _ → ping
         Sorry _ _ → ping
@@ -653,57 +612,50 @@ pTerm (oldPrec, vars) =
                 <> annotate (color Cyan) "in"
                 <+> nest 2 (pTerm (1, vars'') rest)
       )
-    Op a op b →
-      let prec = case op of
-            Add → 2
-            Sub → 2
-            Mul → 3
-            Div → 3
-       in (prec, pTerm (prec, vars) a <+> pOp op <+> pTerm (prec, vars) b)
     Pi quant inTy outTy →
-      ( 5
-      , either (\(name, _) → pIdent name <+> ": ") mempty outTy <> pTerm (6, vars) inTy
+      ( 3
+      , either (\(name, _) → pIdent name <+> ": ") mempty outTy <> pTerm (4, vars) inTy
           <+> (case quant of QNorm → "->"; QEra → "-@>")
           <+> case outTy of
-            Left (name, outTy') → pTerm (5, (QNorm, name) <| vars) $ unLambda outTy'
-            Right outTy' → pTerm (5, vars) outTy'
+            Left (name, outTy') → pTerm (3, (QNorm, name) <| vars) $ unLambda outTy'
+            Right outTy' → pTerm (3, vars) outTy'
       )
     Concat a b →
-      ( 5
+      ( 3
       , case b of
-          Left (n, b') → pIdent n <+> ":" <+> pTerm (6, vars) a <+> "\\/" <+> pTerm (5, (QNorm, n) <| vars) (unLambda b')
-          Right b' → pTerm (6, vars) a <+> "\\/" <+> pTerm (5, vars) b'
+          Left (n, b') → pIdent n <+> ":" <+> pTerm (4, vars) a <+> "\\/" <+> pTerm (3, (QNorm, n) <| vars) (unLambda b')
+          Right b' → pTerm (4, vars) a <+> "\\/" <+> pTerm (3, vars) b'
       )
-    Sorry x _ → (7, "sorry/" <> pIdent x)
+    Sorry x _ → (5, "sorry/" <> pIdent x)
     App (App (Builtin RecordGet) (TagLit tag)) rec →
-      (7, pTerm (7, vars) rec <> "." <> pIdent tag)
+      (5, pTerm (5, vars) rec <> "." <> pIdent tag)
     App lam arg2 → case lam of
       (App (Var opIdx) arg1)
         | Just (QNorm, Ident opName True) ← vars !? opIdx →
-            (4, pTerm (5, vars) arg1 <+> pBS opName <+> pTerm (4, vars) arg2)
+            (2, pTerm (3, vars) arg1 <+> pBS opName <+> pTerm (2, vars) arg2)
       _ →
-        (6, pTerm (6, vars) lam <+> pTerm (7, vars) arg2)
-    AppErased lam arg → (6, pTerm (6, vars) lam <+> "@" <> pTerm (7, vars) arg)
-    Builtin x → (7, "fadeno." <> pIdent (identOfBuiltin x))
-    BuiltinsVar → (7, "fadeno")
-    NatLit x → (7, pretty x)
-    BoolLit x → (7, if x then "true" else "false")
-    TagLit x → (7, "." <> pIdent x)
+        (4, pTerm (4, vars) lam <+> pTerm (5, vars) arg2)
+    AppErased lam arg → (4, pTerm (4, vars) lam <+> "@" <> pTerm (5, vars) arg)
+    Builtin x → (5, "fadeno." <> pIdent (identOfBuiltin x))
+    BuiltinsVar → (5, "fadeno")
+    NumLit x → (5, pretty x)
+    BoolLit x → (5, if x then "true" else "false")
+    TagLit x → (5, "." <> pIdent x)
     RecordLit fields →
-      ( 7
+      ( 5
       , encloseSep
           (annotate (color White) "{")
           (annotate (color White) "}")
           (annotate (color White) " | ")
-          (fmap (\(n, v) → pTerm (7, vars) n <+> annotate (color Cyan) "=" <+> pTerm (0, vars) v) (toList fields))
+          (fmap (\(n, v) → pTerm (5, vars) n <+> annotate (color Cyan) "=" <+> pTerm (0, vars) v) (toList fields))
       )
-    ListLit vec → (7, encloseSep "[" "]" " | " $ fmap (\x → pTerm (0, vars) x) (toList vec))
-    Var x → (7, maybe ("#" <> pretty x) (\(q, i) → pQuant q <> pIdent i) $ vars !? x)
+    ListLit vec → (5, encloseSep "[" "]" " | " $ fmap (\x → pTerm (0, vars) x) (toList vec))
+    Var x → (5, maybe ("#" <> pretty x) (\(q, i) → pQuant q <> pIdent i) $ vars !? x)
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
-    ExVar n l t → (7, "(exi#" <> pretty (show l) <+> pIdent n <+> ":" <+> pExType (0, vars) t <> ")")
-    UniVar x' l t → (7, "(uni#" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
+    ExVar n l t → (5, "(exi#" <> pretty (show l) <+> pIdent n <+> ":" <+> pExType (0, vars) t <> ")")
+    UniVar x' l t → (5, "(uni#" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
 
 pTerm' ∷ TermT → Doc AnsiStyle
 pTerm' = pTerm (0, [])
