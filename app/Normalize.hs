@@ -2,15 +2,17 @@ module Normalize where
 
 import Control.Algebra
 import Control.Carrier.Empty.Church (runEmpty)
+import Control.Carrier.Reader (runReader)
 import Control.Carrier.State.Church (StateC, runState)
 import Control.Carrier.Writer.Church (runWriter)
 import Control.Effect.Empty (empty)
+import Control.Effect.Reader (Reader, local)
 import Control.Effect.State (get, put)
 import Control.Effect.Writer (Writer, listen, tell)
 import Data.ByteString.Char8 (pack)
 import Data.RRBVector (Vector, deleteAt, ifoldr, splitAt, viewl, (!?), (<|))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (BlockT (..), BuiltinT (..), ExVarId, Ident (..), Lambda (..), OpT (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parse, parseFile, recordGet, recordOf, render)
+import Parser (BlockT (..), BuiltinT (..), ExType (..), ExVarId, Ident (..), Lambda (..), OpT (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parse, parseFile, recordGet, render)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try)
 import RIO.HashMap qualified as HM
 
@@ -23,16 +25,7 @@ data EqRes
   | EqUnknown
 
 type Resolved = HashMap ExVarId TermT
-
-runSeqResolve ∷ (Has (Writer Resolved) sig m) ⇒ StateC Resolved m a → m a
-runSeqResolve = runState (\resolved a → tell resolved $> a) mempty
-
-withResolved ∷ ((Has (Writer Resolved)) sig m) ⇒ (Resolved → m a) → StateC Resolved m a
-withResolved f = do
-  old ← get
-  (exs, result) ← lift $ listen $ f old
-  put $ old <> exs
-  pure result
+type Binding = (Quant, Maybe TermT, Maybe TermT)
 
 resolve' ∷ Int → Resolved → TermT → TermT
 resolve' _ (HM.null → True) = id
@@ -52,10 +45,25 @@ resolve' nest exs =
 resolve ∷ Resolved → TermT → TermT
 resolve = resolve' 0
 
+runSeqResolve ∷ (Has (Reader (Vector Binding) :+: Writer Resolved) sig m) ⇒ StateC Resolved m a → m a
+runSeqResolve = runState (\resolved a → tell resolved $> a) mempty
+
+withResolved ∷ ((Has (Reader (Vector Binding) :+: Writer Resolved)) sig m) ⇒ (Resolved → m a) → StateC Resolved m a
+withResolved f = do
+  old ← get
+  let resolveBinds ∷ Vector Binding → Vector Binding
+      resolveBinds = if HM.null old then id else fmap $ bimap id $ fmap (resolve old)
+  (exs, result) ← lift $ listen $ local resolveBinds $ f old
+  put $ old <> exs
+  pure result
+
+insertBinds ∷ Binding → Vector Binding → Vector Binding
+insertBinds (nQ, nV, nTy) old = (nQ, nested <$> nV, nested <$> nTy) <| (bimap (nested <$>) (nested <$>) <$> old)
+
 {- | Checks if two normalized terms are intensionally equivalent.
 TODO: η-conversion
 -}
-isEq' ∷ (Has (Writer Resolved) sig m) ⇒ (Ident → ExVarId → Maybe TermT → TermT → m ()) → TermT → TermT → m EqRes
+isEq' ∷ (Has (Reader (Vector Binding) :+: Writer Resolved) sig m) ⇒ (Ident → ExVarId → ExType → TermT → m ()) → TermT → TermT → m EqRes
 isEq' f = curry \case
   (Block{}, _) → undefined
   (_, Block{}) → undefined
@@ -90,7 +98,7 @@ isEq' f = curry \case
   (Sorry _ a, b) → isEq' f a b
   (a, Sorry _ b) → isEq' f a b
   -- Literals
-  (Lam QNorm _ bod1, Lam QNorm _ bod2) → isEq' f (unLambda bod1) (unLambda bod2)
+  (Lam QNorm _ bod1, Lam QNorm _ bod2) → local (insertBinds (QNorm, Nothing, Nothing)) $ isEq' f (unLambda bod1) (unLambda bod2)
   (Lam QNorm _ _, _) → pure EqNot
   (NatLit a, NatLit b)
     | a == b → pure EqYes
@@ -113,7 +121,9 @@ isEq' f = curry \case
   (Pi q1 inT1 (Left (_, outT1)), Pi q2 inT2 (Left (_, outT2)))
     | q1 == q2 → runSeqResolve
         $ force (withResolved \_ → isEq' f inT1 inT2)
-        $ withResolved \exs → isEq' f (resolve' 1 exs $ unLambda outT1) (resolve' 1 exs $ unLambda outT2)
+        $ withResolved \exs →
+          local (insertBinds (QNorm, Nothing, Just $ resolve exs inT1))
+            $ isEq' f (resolve' 1 exs $ unLambda outT1) (resolve' 1 exs $ unLambda outT2)
   (Pi q1 inT1 (Right outT1), Pi q2 inT2 (Right outT2))
     | q1 == q2 → runSeqResolve
         $ force (withResolved \_ → isEq' f inT1 inT2)
@@ -155,7 +165,7 @@ isEq' f = curry \case
 
 isEq ∷ TermT → TermT → EqRes
 isEq a b =
-  case runIdentity $ runEmpty (pure Nothing) (pure . Just) $ runWriter @Resolved (curry pure) $ isEq' (\_ _ _ _ → empty) a b of
+  case runIdentity $ runEmpty (pure Nothing) (pure . Just) $ runWriter @Resolved (curry pure) $ runReader @(Vector Binding) [] $ isEq' (\_ _ _ _ → empty) a b of
     Just (resolved, res) → if HM.null resolved then res else EqUnknown
     Nothing → EqNot
 
@@ -319,7 +329,10 @@ rewrite onLet onNest rewriter = go
       pure $ case (a', b') of
         (RecordLit a'', Right (RecordLit b'')) → RecordLit $ a'' <> b''
         _ → Concat a' b'
-    ExVar n i t → ExVar n i <$> traverse (go via) t
+    ExVar n i t →
+      ExVar n i <$> case t of
+        ExType t' → ExType <$> go via t'
+        ExSuperType → pure ExSuperType
     UniVar n i t → UniVar n i <$> go via t
 
 nestedBy ∷ Int → TermT → TermT

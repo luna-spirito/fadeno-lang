@@ -1,28 +1,29 @@
 module Parser (
-  OpT (..),
-  Ident (..),
-  BuiltinT (..),
-  builtinsList,
-  Quant (..),
   BlockT (..),
-  Lambda (..),
+  BuiltinT (..),
+  ExType (..),
   ExVarId (..),
-  Vector' (..),
+  Ident (..),
+  Lambda (..),
+  OpT (..),
+  Quant (..),
   TermT (..),
-  typOf,
-  rowOf,
-  recordOf,
-  recordGet,
-  typ,
+  Vector' (..),
+  builtinsList,
+  eqOf,
+  formatFile,
   identOfBuiltin,
   pIdent,
   pQuant,
   pTerm',
   parse,
   parseFile,
+  recordGet,
+  recordOf,
   render,
-  formatFile,
-  eqOf,
+  rowOf,
+  typ,
+  typOf,
 ) where
 
 import Control.Carrier.Empty.Church (runEmpty)
@@ -255,9 +256,20 @@ data TermT
   | Concat !TermT !(Either (Ident, Lambda TermT) TermT)
   | Builtin !BuiltinT
   | BuiltinsVar
-  | ExVar !Ident !ExVarId !(Maybe TermT)
+  | ExVar !Ident !ExVarId !ExType
   | UniVar !Ident !Int !TermT
   deriving (Show, Eq, Lift)
+
+-- | Type of existential variable.
+data ExType
+  = ExType !TermT -- Just a normal term.
+  | ExSuperType -- "Type+ ∞", i. e. supertype of all types, i. e. ∀ u. `Type+ u : ExSuperType`
+  deriving (Eq, Lift)
+
+instance Show ExType where
+  show = \case
+    ExType x → show x
+    ExSuperType → "Type+ ∞"
 
 typOf ∷ TermT → TermT
 typOf = App $ Builtin TypePlus
@@ -690,11 +702,16 @@ pTerm (oldPrec, vars) =
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
-    ExVar n l t → (7, "(exi#" <> pretty (show l) <+> pIdent n <> maybe mempty (\t' → " :" <+> pTerm (0, vars) t') t <> ")")
+    ExVar n l t → (7, "(exi#" <> pretty (show l) <+> pIdent n <+> ":" <+> pExType (0, vars) t <> ")")
     UniVar x' l t → (7, "(uni#" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
 
 pTerm' ∷ TermT → Doc AnsiStyle
 pTerm' = pTerm (0, [])
+
+pExType ∷ (Int, ParserContext) → ExType → Doc AnsiStyle
+pExType a = \case
+  ExType x → pTerm a x
+  ExSuperType → "Type+ ∞"
 
 parse ∷ ParserContext → ByteString → Either Text TermT
 parse vars inp = case runParser (parseTop <* eof) vars 0 inp of

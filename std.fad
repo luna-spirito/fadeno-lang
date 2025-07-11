@@ -1,4 +1,4 @@
-unpack fadeno. Type+ U32 Tag List Bool Eq refl Row Record list-length list-indexl if _<_ W wrap unwrap
+unpack fadeno. Type+ U32 Tag List Bool Eq refl Row Record list-length list-indexl if _<_ W wrap unwrap nat~fold
 
 Kind = Type+ 1
 /: Kind
@@ -23,10 +23,6 @@ Not = \a. a -> Never
 
 /: Bool -> Type
 Where = \x. Eq x true
-
-// Checking fails due to a commented `infer []`. Yeah, @7ba939ac886954e9afd0163dfc5ec4eea0dd8e00 was a great idea.
-// /: u : U32 -@> Acc : (U32 -> Type+ u) -@> Acc 0 -> (i : U32 -> Acc i -> Acc (i + 1)) -> n : U32 -> Acc n
-nat~fold = fadeno.nat~fold
 
 // /: u : U32 -@> Acc : Type+ u -@> Acc -> (U32 -> Acc -> Acc) -> U32 -> Acc
 // nat-fold = \@u @Acc. nat~fold @u @(\_. Acc)
