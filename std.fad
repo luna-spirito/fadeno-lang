@@ -24,8 +24,8 @@ Not = \a. a -> Never
 /: Bool -> Type
 Where = \x. Eq x true
 
-// /: u : U32 -@> Acc : Type+ u -@> Acc -> (U32 -> Acc -> Acc) -> U32 -> Acc
-// nat-fold = \@u @Acc. nat~fold @u @(\_. Acc)
+/: u : U32 -@> Acc : Type+ u -@> Acc -> (U32 -> Acc -> Acc) -> U32 -> Acc
+nat-fold = \@u @Acc. nat~fold @u @(\_. Acc)
 
 in {}
 

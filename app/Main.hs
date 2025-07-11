@@ -435,6 +435,31 @@ checkLam q bod inT outT = case outT of
   Left (_, outT') → checkDepLam q bod inT outT'
   Right outT' → scopedVar (const pure) (q, Nothing, inT) $ infer (unLambda bod) $ Check $ nested outT'
 
+inferApp ∷ (Has Solve sig m) ⇒ Quant → TermT → TermT → m TermT
+inferApp q f a = runSeqResolve do
+  let norm = q == QNorm
+  fTy ← withResolved \_ → infer f Infer
+  withResolved \_ →
+    withMono'
+      norm
+      id
+      ( if norm
+          then Pi QNorm <$> subExVar "in" ExSuperType <*> (Right <$> subExVar "out" ExSuperType)
+          else stackError "Cannot apply erased argument to unknown"
+      )
+      ( \_ → \case
+          Pi q2 inT outTE | q == q2 → runSeqResolve do
+            let updCtx = if norm then id else local @(Vector Binding) ((\(_, t, ty) → (QNorm, t, ty)) <$>)
+            withResolved \_ → updCtx $ infer a $ Check $ inT
+            withResolved \exs3 → case outTE of
+              Left (_, outT) → do
+                ab ← annoBinds
+                pure $ resolve exs3 $ normalize [Just $ normalize ab a] $ unLambda outT
+              Right outT → pure $ resolve exs3 outT
+          t → stackError $ "inferApp" <+> pretty (show q) <+> pTerm' t
+      )
+      fTy
+
 -- stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode mode) $
 logAndRunInfer ∷ ∀ sig m a. (Has Solve sig m) ⇒ ((TermT, InferMode a) → m a) → TermT → InferMode a → m a
 logAndRunInfer f t mode =
@@ -478,22 +503,7 @@ infer = logAndRunInfer \case
         $ resolveMode exs mode
   -- TODO: (Lam QEra arg bod, Infer)
   (Lam QEra _ bod, Check (Pi QEra inT outT)) → checkLam QEra bod inT outT
-  (AppErased f a, Infer) → runSeqResolve do
-    fT ← withResolved \_ → infer f Infer
-    withResolved \exs →
-      withMono'
-        False
-        id
-        (stackError "Cannot apply erased argument to unknown")
-        ( \_ → \case
-            Pi QEra xT yT → runSeqResolve do
-              withResolved \_ → infer a $ Check $ resolve exs xT
-              withResolved \exs2 → pure $ resolve (exs <> exs2) $ case yT of
-                Left (_, body) → normalize [Just a] $ unLambda body
-                Right body → body
-            t → stackError $ "Cannot apply erased argument to " <> pTerm' t
-        )
-        fT
+  (AppErased f a, Infer) → inferApp QEra f a
   (term, Check (Pi QEra xTy (Left (n, yT)))) → do
     uniId ← fresh
     scopedUniVar (const pure) uniId $ infer term $ Check $ normalize [Just $ UniVar n uniId xTy] $ unLambda yT
@@ -544,24 +554,7 @@ infer = logAndRunInfer \case
               _ → stackError "Not a record"
           )
           (resolve exs recordT)
-  (App f a, Infer) → runSeqResolve do
-    fTy ← withResolved \_ → infer f Infer
-    withResolved \_ →
-      withMono
-        id
-        (Pi QNorm <$> subExVar "in" ExSuperType <*> (Right <$> subExVar "out" ExSuperType))
-        ( \_ → \case
-            Pi QNorm inT outTE → runSeqResolve do
-              withResolved \_ → infer a $ Check $ inT
-              stackLog $ "!!! " <+> pretty (show outTE)
-              withResolved \exs3 → case outTE of
-                Left (_, outT) → do
-                  ab ← annoBinds
-                  pure $ resolve exs3 $ normalize [Just $ normalize ab a] $ unLambda outT
-                Right outT → pure $ resolve exs3 outT
-            t → stackError $ "inferApp " <> pTerm' t
-        )
-        fTy
+  (App f a, Infer) → inferApp QNorm f a
   (RecordLit flds, Infer) → runSeqResolve do
     rowFields ← for flds \(n, v) → do
       withResolved \_ → infer n $ Check $ Builtin Tag
