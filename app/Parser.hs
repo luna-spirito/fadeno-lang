@@ -152,10 +152,11 @@ data BuiltinT
   | Unwrap
   | Add
   | Mul
+  | Never
   deriving (Show, Eq, Lift)
 
 builtinsList ∷ Vector BuiltinT
-builtinsList = [UInt, SInt, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, ULte, ULt, UEq, UNeq, W, Wrap, Unwrap, Add, Mul]
+builtinsList = [UInt, SInt, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, ULte, ULt, UEq, UNeq, W, Wrap, Unwrap, Add, Mul, Never]
 
 identOfBuiltin ∷ BuiltinT → Ident
 identOfBuiltin = \case
@@ -185,6 +186,7 @@ identOfBuiltin = \case
   Unwrap → r "unwrap"
   Add → o "+"
   Mul → o "*"
+  Never → r "Never"
  where
   -- \| regular
   r x = x `Ident` False

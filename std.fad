@@ -1,4 +1,4 @@
-unpack fadeno. Type+ UInt SInt Tag List Bool Eq refl Row Record list-length list-indexl if _<_ _+_ _*_ W wrap unwrap nat~fold
+unpack fadeno. Type+ UInt SInt Tag List Bool Eq refl Row Record list-length list-indexl if _<_ _+_ _*_ W wrap unwrap nat~fold Never
 
 Kind = Type+ 1
 /: Kind
@@ -10,13 +10,10 @@ id = \x. x
 /: u : UInt -@> K : Type+ u -@> V : Type+ u -@> K -> V -> Record { .k = K | .v = V }
 _=>_ = \k v. { .k = k | .v = v }
 
-/: u : UInt -@> Type+ u
+/: Type
 Unit = Record {}
 /: Unit
 unit = {}
-
-/: Type
-Never = Unit
 
 /: u : UInt -@> Type+ u -> Type+ u
 Not = \a. a -> Never

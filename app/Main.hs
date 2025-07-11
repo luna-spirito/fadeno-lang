@@ -360,12 +360,6 @@ withKnownFields tmap t f =
     )
     t
 
-bottom ∷ TermT
-bottom = [termQQ| u : UInt -@> a : Type+ u -@> a |]
-
-bottomRow ∷ TermT
-bottomRow = [termQQ| u : UInt -@> row : Row (Type+ u) -@> row |]
-
 ensureIsType ∷ (Has Solve sig m) ⇒ TermT → m TermT
 ensureIsType t =
   withMono
@@ -571,7 +565,7 @@ infer = logAndRunInfer \case
                   withResolved \exs → pure (resolve exs unifiedTy0)
               withResolved \_ → rec (Just unifiedTy) vs
      in
-      App (Builtin List) . fromMaybe bottom <$> rec Nothing values
+      App (Builtin List) . fromMaybe (Builtin Never) <$> rec Nothing values
   (Concat l rE, Infer) →
     let
       -- TODO: what should be here?
@@ -581,7 +575,7 @@ infer = logAndRunInfer \case
         (App (Builtin Record) lR, App (Builtin Record) rR, Right _) → pure $ recordOf $ concat lR rR
         (App (Builtin Record) lR, App (Builtin Record) rR, Left (_, Lambda _)) →
           rowOf <$> withKnownFields' lR \lR' → withKnownFields' rR \rR' →
-            fromMaybe bottomRow
+            fromMaybe (Builtin Never)
               <$> execState
                 Nothing
                 ( runSeqResolve do
@@ -693,6 +687,7 @@ typOfBuiltin =
     Unwrap → [termQQ| u : UInt -@> A : Type+ u -@> W A -> A |]
     Add → [termQQ| UInt -> UInt -> UInt |]
     Mul → [termQQ| UInt -> UInt -> UInt |]
+    Never → [termQQ| Type+ 0 |]
 
 instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ Ident → ExVarId → ExType → TermT → m ()
 instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1) t1 →
@@ -797,6 +792,7 @@ subtype = \a b →
               (Left (n1, lbd1), Right outT2) → process n1 (Right lbd1) (Left outT2)
               (Right outT1, Left (n2, lbd2)) → process n2 (Left outT1) (Right lbd2)
     (Builtin UInt, Builtin SInt) → pure ()
+    (Builtin Never, _) → pure ()
     -- Builtin Types (must be identical)
     (Builtin a, Builtin b) | a == b → pure ()
     (Var i, Var j) | i == j → pure ()
