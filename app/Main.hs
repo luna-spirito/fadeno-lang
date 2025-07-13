@@ -692,7 +692,7 @@ typOfBuiltin =
     RecordKeepFields → [termQQ| u : Int+ -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
     RecordDropFields → [termQQ| u : Int+ -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
     ListLength → [termQQ| u : Int+ -@> A : Type+ u -@> List A -> Int+ |]
-    ListIndexL → [termQQ| u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (i < list-length l) -@> A |]
+    ListIndexL → [termQQ| u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (i < list_length l) -@> A |]
     NatFold → [termQQ| u : Int+ -@> Acc : (Int+ -> Type+ u) -@> Acc 0 -> (i : Int+ -> Acc i -> Acc (i + 1)) -> n : Int+ -> Acc n |]
     If → [termQQ| u : Int+ -@> A : Type+ u -@> cond : Bool -> (Eq cond true -> A) -> (Eq cond false -> A) -> A |]
     ULte → [termQQ| Int -> Int -> Bool |]

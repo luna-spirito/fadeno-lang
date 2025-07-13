@@ -1,4 +1,4 @@
-unpack fadeno. Type+ Int+ Int Tag List Bool Eq refl Row Record list-length list-indexl if _<_ W wrap unwrap nat~fold Never
+unpack fadeno. Type+ Int+ Int Tag List Bool Eq refl Row Record list_length list_indexl if _<_ W wrap unwrap nat_ind Never
 
 _+_ = fadeno.int+_add
 
@@ -24,11 +24,11 @@ Not = \a. a -> Never
 Where = \x. Eq x true
 
 /: u : Int+ -@> Acc : Type+ u -@> Acc -> (Int+ -> Acc -> Acc) -> Int+ -> Acc
-nat-fold = \@u @Acc. nat~fold @u @(\_. Acc)
+nat_fold = \@u @Acc. nat_ind @u @(\_. Acc)
 
 //list-fold
 
-// /: u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (i < list-length l) -@> A
+// /: u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (i < list_length l) -@> A
 // list-indexr =
 
 // /: u : Int+ -@> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
