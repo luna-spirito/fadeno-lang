@@ -462,6 +462,7 @@ inferApp q f a = runSeqResolve do
 
 -- stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode mode) $
 logAndRunInfer ∷ ∀ sig m a. (Has Solve sig m) ⇒ ((TermT, InferMode a) → m a) → TermT → InferMode a → m a
+logAndRunInfer f t@(Block{}) mode = f (t, mode) -- No logging to reduce noise
 logAndRunInfer f t mode =
   let
     scope x = stackScope @sig @m @a \p → ("<" <> group (p t) <> "> : " <> x p)
