@@ -16,7 +16,7 @@ module Parser (
   identOfBuiltin,
   pIdent,
   pQuant,
-  pTerm',
+  pTerm,
   parse,
   parseFile,
   recordGet,
@@ -367,7 +367,7 @@ parsePrim = token do
               pure (ListLit elems)
           )
       <|> (BuiltinsVar <$ (notFollowedBy $(string "fadeno") identSym))
-      <|> (Sorry <$ ($(string "SORRY") <* many ($(char '!'))))
+      <|> (Sorry <$ ($(string "SORRY") <* many ($(char '!') <|> $(char '1'))))
       <|> ( Var <$> do
               -- Variable parsing
               -- TODO: { x = 4 }
@@ -673,9 +673,6 @@ pTerm (oldPrec, vars) =
     ExVar n l t → (5, "(exi#" <> pretty (show l) <+> pIdent n <+> ":" <+> pExType (0, vars) t <> ")")
     UniVar x' l t → (5, "(uni#" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
 
-pTerm' ∷ TermT → Doc AnsiStyle
-pTerm' = pTerm (0, [])
-
 pExType ∷ (Int, ParserContext) → ExType → Doc AnsiStyle
 pExType a = \case
   ExType x → pTerm a x
@@ -694,4 +691,4 @@ render ∷ Doc AnsiStyle → IO ()
 render x = renderIO stdout $ layoutSmart defaultLayoutOptions $ x <> line
 
 formatFile ∷ FilePath → IO ()
-formatFile = render . pTerm' <=< parseFile
+formatFile = render . pTerm (0, []) <=< parseFile

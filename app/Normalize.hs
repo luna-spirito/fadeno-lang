@@ -12,7 +12,7 @@ import Control.Effect.Writer (Writer, listen, tell)
 import Data.ByteString.Char8 (pack)
 import Data.RRBVector (Vector, deleteAt, ifoldr, splitAt, viewl, (!?), (<|))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId, Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parse, parseFile, recordGet, render)
+import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId, Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm, parse, parseFile, recordGet, render)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try)
 import RIO.HashMap qualified as HM
 
@@ -25,7 +25,7 @@ data EqRes
   | EqUnknown
 
 type Resolved = HashMap ExVarId TermT
-type Binding = (Quant, Maybe TermT, Maybe TermT)
+type Binding = (Quant, Ident, Maybe TermT, Maybe TermT)
 
 resolve' ∷ Int → Resolved → TermT → TermT
 resolve' _ (HM.null → True) = id
@@ -58,7 +58,7 @@ withResolved f = do
   pure result
 
 insertBinds ∷ Binding → Vector Binding → Vector Binding
-insertBinds (nQ, nV, nTy) old = (nQ, nested <$> nV, nested <$> nTy) <| (bimap (nested <$>) (nested <$>) <$> old)
+insertBinds (i, nQ, nV, nTy) old = (i, nQ, nested <$> nV, nested <$> nTy) <| (bimap (nested <$>) (nested <$>) <$> old)
 
 {- | Checks if two normalized terms are intensionally equivalent.
 TODO: η-conversion
@@ -92,7 +92,7 @@ isEq' f = curry \case
   (Sorry, _) → pure EqUnknown
   (_, Sorry) → pure EqUnknown
   -- Literals
-  (Lam QNorm _ bod1, Lam QNorm _ bod2) → local (insertBinds (QNorm, Nothing, Nothing)) $ isEq' f (unLambda bod1) (unLambda bod2)
+  (Lam QNorm i bod1, Lam QNorm _ bod2) → local (insertBinds (QNorm, i, Nothing, Nothing)) $ isEq' f (unLambda bod1) (unLambda bod2)
   (Lam QNorm _ _, _) → pure EqNot
   (NumLit a, NumLit b)
     | a == b → pure EqYes
@@ -112,11 +112,11 @@ isEq' f = curry \case
   (_, BuiltinsVar) → pure EqNot
   -- TODO: Handle mixed?
   -- Shame.
-  (Pi q1 inT1 (Left (_, outT1)), Pi q2 inT2 (Left (_, outT2)))
+  (Pi q1 inT1 (Left (i, outT1)), Pi q2 inT2 (Left (_, outT2)))
     | q1 == q2 → runSeqResolve
         $ force (withResolved \_ → isEq' f inT1 inT2)
         $ withResolved \exs →
-          local (insertBinds (QNorm, Nothing, Just $ resolve exs inT1))
+          local (insertBinds (QNorm, i, Nothing, Just $ resolve exs inT1))
             $ isEq' f (resolve' 1 exs $ unLambda outT1) (resolve' 1 exs $ unLambda outT2)
   (Pi q1 inT1 (Right outT1), Pi q2 inT2 (Right outT2))
     | q1 == q2 → runSeqResolve
@@ -411,4 +411,4 @@ termQQ =
 normalizeFile ∷ FilePath → IO ()
 normalizeFile x = do
   t ← parseFile x
-  render $ pTerm' $ normalize [] t
+  render $ pTerm (0, []) $ normalize [] t
