@@ -15,11 +15,11 @@ import Control.Effect.Reader (Reader, ask, local)
 import Control.Effect.State (get, put)
 import Control.Effect.Writer (Writer, censor, listen, tell)
 import Data.ByteString.Char8 (pack)
-import Data.List (sortBy)
+import Data.List (find, sortBy)
 import Data.RRBVector (Vector, deleteAt, ifoldr, viewl, (!?), (<|))
 import GHC.Exts (IsList (..))
-import Normalize (Binding, EqRes (..), Resolved, concat, insertBinds, isEq', nested, nestedBy, normalize, resolve, resolve', rewrite, runSeqResolve, termQQ, withResolved)
-import Parser (BlockT (..), BuiltinT (..), ExType (..), ExVarId (..), Ident (..), Lambda (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pQuant, pTerm', parse, recordOf, render, rowOf)
+import Normalize (Binding, EqRes (..), Resolved, concat, insertBinds, isEq', nested, nestedBy, normalize, numDecDispatch, resolve, resolve', rewrite, runSeqResolve, termQQ, withResolved)
+import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pQuant, pTerm', parse, recordOf, render, rowOf)
 import Prettyprinter (Doc, annotate, group, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, filter, link, local, runReader, toList)
@@ -209,7 +209,7 @@ scopedExVar mapTerm (ex1, ex1ty) act = do
                           uN ← freshIdent
                           n ← freshIdent
                           pure
-                            $ Pi QEra (Builtin UInt)
+                            $ Pi QEra (Builtin $ Num $ NumDesc True BitsInf)
                             . Left
                             . (uN,)
                             . Lambda
@@ -468,6 +468,13 @@ logAndRunInfer f t mode =
         pure res
       Check t' → scope (pTerm' t') act
 
+numFitsInto ∷ Integer → NumDesc → Bool
+numFitsInto x d =
+  numDecDispatch
+    d
+    (\(_ ∷ Proxy e) → fromIntegral (minBound @e) <= x && fromIntegral (maxBound @e) >= x)
+    (\_ → True)
+
 -- | Either infers a normalized type for the value and context, or checks a value against the normalized type.
 infer ∷ ∀ sig m a. (Has Solve sig m) ⇒ TermT → InferMode a → m a
 infer = logAndRunInfer \case
@@ -604,7 +611,16 @@ infer = logAndRunInfer \case
             rE
         withResolved \exs →
           withKnown (resolve exs lT) \lT' → withKnown rT \rT' → concatT lT' rT'
-  (NumLit x, Infer) → pure $ Builtin $ if x >= 0 then UInt else SInt
+  (NumLit x, Check (Builtin (Num d))) →
+    if x `numFitsInto` d
+      then pure ()
+      else stackError $ "Number literal " <> pretty x <> " does not fit into " <> pIdent (identOfBuiltin $ Num d)
+  (NumLit x, Infer) →
+    pure
+      $ Builtin
+      $ Num
+      $ let candidates = NumDesc False <$> [Bits8, Bits16, Bits32, Bits64]
+         in fromMaybe (NumDesc False BitsInf) $ find @[] (x `numFitsInto`) candidates
   (TagLit _, Infer) → pure $ Builtin Tag
   (BoolLit _, Infer) → pure $ Builtin Bool
   (Var i, Infer) → do
@@ -654,40 +670,41 @@ infer = logAndRunInfer \case
 typOfBuiltin ∷ BuiltinT → TermT
 typOfBuiltin =
   \case
-    UInt → [termQQ| Type+ 0 |]
-    SInt → [termQQ| Type+ 0 |]
+    Num _d → [termQQ| Type+ 0 |]
+    Add d → opd d
+    Sub d → opd d
     Tag → [termQQ| Type+ 0 |]
     Bool → [termQQ| Type+ 0 |]
-    Row → [termQQ| u : UInt -@> Type+ u -> Type+ u |]
-    Record → [termQQ| u : UInt -@> Row (Type+ u) -> Type+ u |]
-    List → [termQQ| u : UInt -@> Type+ u -> Type+ u |]
-    TypePlus → [termQQ| u : UInt -> Type+ (u + 1) |]
-    Eq → [termQQ| u : UInt -@> a : Type+ u -@> a -> a -> Type+ u |]
-    Refl → [termQQ| u : UInt -@> a : Type+ u -@> x : a -@> Eq x x |]
+    Row → [termQQ| u : Int+ -@> Type+ u -> Type+ u |]
+    Record → [termQQ| u : Int+ -@> Row (Type+ u) -> Type+ u |]
+    List → [termQQ| u : Int+ -@> Type+ u -> Type+ u |]
+    TypePlus → [termQQ| u : Int+ -> Type+ (u + 1) |]
+    Eq → [termQQ| u : Int+ -@> a : Type+ u -@> a -> a -> Type+ u |]
+    Refl → [termQQ| u : Int+ -@> a : Type+ u -@> x : a -@> Eq x x |]
     RecordGet →
       [termQQ|
-        u : UInt -@> row : Row (Type+ u) -@> t : Type+ u -@>
+        u : Int+ -@> row : Row (Type+ u) -@> t : Type+ u -@>
           tag : Tag ->
           record : Record ({(tag) = t} \/ row) ->
           t
       |]
     -- TODO: Better type
-    RecordKeepFields → [termQQ| u : UInt -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
-    RecordDropFields → [termQQ| u : UInt -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
-    ListLength → [termQQ| u : UInt -@> A : Type+ u -@> List A -> UInt |]
-    ListIndexL → [termQQ| u : UInt -@> A : Type+ u -@> i : UInt -> l : List A -> Where (i < list-length l) -@> A |]
-    NatFold → [termQQ| u : UInt -@> Acc : (UInt -> Type+ u) -@> Acc 0 -> (i : UInt -> Acc i -> Acc (i + 1)) -> n : UInt -> Acc n |]
-    If → [termQQ| u : UInt -@> A : Type+ u -@> cond : Bool -> (Eq cond true -> A) -> (Eq cond false -> A) -> A |]
-    ULte → [termQQ| SInt -> SInt -> Bool |]
-    ULt → [termQQ| SInt -> SInt -> Bool |]
-    UEq → [termQQ| SInt -> SInt -> Bool |]
-    UNeq → [termQQ| SInt -> SInt -> Bool |]
-    W → [termQQ| u : UInt -@> Type+ u -> Type+ u |]
-    Wrap → [termQQ| u : UInt -@> A : Type+ u -@> A -> W A |]
-    Unwrap → [termQQ| u : UInt -@> A : Type+ u -@> W A -> A |]
-    Add → [termQQ| UInt -> UInt -> UInt |]
-    Mul → [termQQ| UInt -> UInt -> UInt |]
+    RecordKeepFields → [termQQ| u : Int+ -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
+    RecordDropFields → [termQQ| u : Int+ -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
+    ListLength → [termQQ| u : Int+ -@> A : Type+ u -@> List A -> Int+ |]
+    ListIndexL → [termQQ| u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (i < list-length l) -@> A |]
+    NatFold → [termQQ| u : Int+ -@> Acc : (Int+ -> Type+ u) -@> Acc 0 -> (i : Int+ -> Acc i -> Acc (i + 1)) -> n : Int+ -> Acc n |]
+    If → [termQQ| u : Int+ -@> A : Type+ u -@> cond : Bool -> (Eq cond true -> A) -> (Eq cond false -> A) -> A |]
+    ULte → [termQQ| Int -> Int -> Bool |]
+    ULt → [termQQ| Int -> Int -> Bool |]
+    UEq → [termQQ| Int -> Int -> Bool |]
+    UNeq → [termQQ| Int -> Int -> Bool |]
+    W → [termQQ| u : Int+ -@> Type+ u -> Type+ u |]
+    Wrap → [termQQ| u : Int+ -@> A : Type+ u -@> A -> W A |]
+    Unwrap → [termQQ| u : Int+ -@> A : Type+ u -@> W A -> A |]
     Never → [termQQ| Type+ 0 |]
+ where
+  opd d = Pi QNorm (Builtin $ Num d) $ Right $ Pi QNorm (Builtin $ Num d) $ Right $ Builtin $ Num d
 
 instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ Ident → ExVarId → ExType → TermT → m ()
 instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1) t1 →
@@ -791,7 +808,12 @@ subtype = \a b →
               (Left (_n1, lbd1), Left (n2, lbd2)) → process n2 (Right lbd1) (Right lbd2)
               (Left (n1, lbd1), Right outT2) → process n1 (Right lbd1) (Left outT2)
               (Right outT1, Left (n2, lbd2)) → process n2 (Left outT1) (Right lbd2)
-    (Builtin UInt, Builtin SInt) → pure ()
+    (Builtin (Num d1@(NumDesc nonneg1 bits1)), Builtin (Num d2@(NumDesc nonneg2 bits2))) →
+      let fits = case (nonneg1, nonneg2) of
+            (True, False) → bits1 < bits2
+            (False, True) → False
+            _ → bits1 <= bits2
+       in if fits then pure () else stackError $ "Cannot fit " <> pIdent (identOfBuiltin $ Num d1) <> " into " <> pIdent (identOfBuiltin $ Num d2)
     (Builtin Never, _) → pure ()
     -- Builtin Types (must be identical)
     (Builtin a, Builtin b) | a == b → pure ()

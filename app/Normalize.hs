@@ -12,7 +12,7 @@ import Control.Effect.Writer (Writer, listen, tell)
 import Data.ByteString.Char8 (pack)
 import Data.RRBVector (Vector, deleteAt, ifoldr, splitAt, viewl, (!?), (<|))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (BlockT (..), BuiltinT (..), ExType (..), ExVarId, Ident (..), Lambda (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parse, parseFile, recordGet, render)
+import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId, Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm', parse, parseFile, recordGet, render)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try)
 import RIO.HashMap qualified as HM
 
@@ -196,8 +196,20 @@ repeat n f = case n of
 -- TODO: Really simple, expand upon.
 unplus ∷ TermT → (Maybe TermT, Integer)
 unplus (NumLit n) | n >= 0 = (Nothing, n)
-unplus (Builtin Add `App` a `App` NumLit n) | n >= 0 = (Just a, n)
+unplus (Builtin (Add (NumDesc False BitsInf)) `App` a `App` NumLit n) | n >= 0 = (Just a, n)
 unplus x = (Just x, 0)
+
+numDecDispatch ∷ NumDesc → (∀ x. (Integral x, Bounded x) ⇒ Proxy x → a) → (Bool → a) → a
+numDecDispatch (NumDesc signed bits) f inf = case (signed, bits) of
+  (False, Bits8) → f (Proxy @Int8)
+  (True, Bits8) → f (Proxy @Word8)
+  (False, Bits16) → f (Proxy @Int16)
+  (True, Bits16) → f (Proxy @Word16)
+  (False, Bits32) → f (Proxy @Int32)
+  (True, Bits32) → f (Proxy @Word32)
+  (False, Bits64) → f (Proxy @Int64)
+  (True, Bits64) → f (Proxy @Word64)
+  (_, BitsInf) → inf signed
 
 -- | Processes application of `f` onto `a`.
 postApp ∷ TermT → TermT → TermT
@@ -239,8 +251,14 @@ postApp = curry \case
   (Builtin UNeq `App` (NumLit l), NumLit r) → BoolLit $ l /= r
   (Builtin Wrap `App` _ty, b) → b
   (Builtin Unwrap `App` _ty, b) → b
-  (Builtin Add `App` (NumLit a), NumLit b) → NumLit $ a + b
-  (Builtin Mul `App` (NumLit a), NumLit b) → NumLit $ a * b
+  (Builtin (Add d) `App` (NumLit a), NumLit b) →
+    NumLit
+      $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a + fromIntegral b) (\_ → a + b)
+  (Builtin (Sub d) `App` (NumLit a), NumLit b) → NumLit
+    $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a - fromIntegral b)
+    $ \case
+      False → a - b
+      True → if a >= b then a - b else 0
   (f, a) → App f a
  where
   -- Drop `x` from ListLit.
@@ -376,7 +394,7 @@ termQQ ∷ QuasiQuoter
 termQQ =
   let
     wher = Lam QNorm (Ident "n" False) $ Lambda $ Builtin Eq `App` (Var 0) `App` BoolLit True
-    scope = ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList) <> [(Ident "Where" False, wher)]
+    scope = ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList) <> [(Ident "+" True, Builtin $ Add $ NumDesc False BitsInf), (Ident "Where" False, wher)]
    in
     QuasiQuoter
       { quoteExp = \s → do

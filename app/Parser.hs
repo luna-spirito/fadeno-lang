@@ -1,4 +1,5 @@
 module Parser (
+  Bits (..),
   BlockT (..),
   BuiltinT (..),
   ExType (..),
@@ -6,6 +7,7 @@ module Parser (
   Ident (..),
   Lambda (..),
   Quant (..),
+  NumDesc (..),
   TermT (..),
   Vector' (..),
   builtinsList,
@@ -125,10 +127,13 @@ To the above constructs, Cedille adds the following, discussed more below:
   ∀ x : T . T’ – the dependent type for functions taking in an erased argument x of type T (aka implicit product)
 -}
 
+data Bits = Bits8 | Bits16 | Bits32 | Bits64 | BitsInf
+  deriving (Show, Eq, Ord, Lift)
+data NumDesc = NumDesc !Bool {- ≥ 0 -} !Bits
+  deriving (Show, Eq, Lift)
+
 data BuiltinT
-  = UInt
-  | SInt
-  | Tag
+  = Tag
   | Row
   | Record
   | List
@@ -150,18 +155,26 @@ data BuiltinT
   | W
   | Wrap
   | Unwrap
-  | Add
-  | Mul
   | Never
+  | Add !NumDesc
+  | Sub !NumDesc
+  | Num !NumDesc
   deriving (Show, Eq, Lift)
 
 builtinsList ∷ Vector BuiltinT
-builtinsList = [UInt, SInt, Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, ULte, ULt, UEq, UNeq, W, Wrap, Unwrap, Add, Mul, Never]
+builtinsList =
+  [Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, ULte, ULt, UEq, UNeq, W, Wrap, Unwrap, Never]
+    <> (Num <$> nd)
+    <> (Add <$> nd)
+    <> (Sub <$> nd)
+ where
+  nd = NumDesc <$> [False, True] <*> [Bits8, Bits16, Bits32, Bits64, BitsInf]
 
 identOfBuiltin ∷ BuiltinT → Ident
 identOfBuiltin = \case
-  UInt → r "UInt"
-  SInt → r "SInt"
+  Add d → r $ numDesc False d <> "_add"
+  Sub d → r $ numDesc False d <> "_sub"
+  Num d → r $ numDesc True d
   Tag → r "Tag"
   Bool → r "Bool"
   Row → r "Row"
@@ -184,10 +197,18 @@ identOfBuiltin = \case
   W → r "W"
   Wrap → r "wrap"
   Unwrap → r "unwrap"
-  Add → o "+"
-  Mul → o "*"
   Never → r "Never"
  where
+  numDesc upper (NumDesc nonneg bits) =
+    (if upper then "I" else "i")
+      <> ( case bits of
+            Bits8 → "8"
+            Bits16 → "16"
+            Bits32 → "32"
+            Bits64 → "64"
+            BitsInf → "nt"
+         )
+      <> (if nonneg then "+" else mempty)
   -- \| regular
   r x = x `Ident` False
   -- \| op

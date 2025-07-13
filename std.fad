@@ -1,13 +1,15 @@
-unpack fadeno. Type+ UInt SInt Tag List Bool Eq refl Row Record list-length list-indexl if _<_ _+_ _*_ W wrap unwrap nat~fold Never
+unpack fadeno. Type+ Int+ Int Tag List Bool Eq refl Row Record list-length list-indexl if _<_ W wrap unwrap nat~fold Never
+
+_+_ = fadeno.int+_add
 
 Kind = Type+ 1
 /: Kind
 Type = Type+ 0
 
-/: u : UInt -@> A : Type+ u -@> A -> A
+/: u : Int+ -@> A : Type+ u -@> A -> A
 id = \x. x
 
-/: u : UInt -@> K : Type+ u -@> V : Type+ u -@> K -> V -> Record { .k = K | .v = V }
+/: u : Int+ -@> K : Type+ u -@> V : Type+ u -@> K -> V -> Record { .k = K | .v = V }
 _=>_ = \k v. { .k = k | .v = v }
 
 /: Type
@@ -15,21 +17,21 @@ Unit = Record {}
 /: Unit
 unit = {}
 
-/: u : UInt -@> Type+ u -> Type+ u
+/: u : Int+ -@> Type+ u -> Type+ u
 Not = \a. a -> Never
 
 /: Bool -> Type
 Where = \x. Eq x true
 
-/: u : UInt -@> Acc : Type+ u -@> Acc -> (UInt -> Acc -> Acc) -> UInt -> Acc
+/: u : Int+ -@> Acc : Type+ u -@> Acc -> (Int+ -> Acc -> Acc) -> Int+ -> Acc
 nat-fold = \@u @Acc. nat~fold @u @(\_. Acc)
 
 //list-fold
 
-// /: u : UInt -@> A : Type+ u -@> i : UInt -> l : List A -> Where (i < list-length l) -@> A
+// /: u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (i < list-length l) -@> A
 // list-indexr =
 
-// /: u : UInt -@> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
+// /: u : Int+ -@> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
 // find-case = \@u tag l. nat~fold @u @(\i. Where (i < list-length l) -@> Row (Type+ u))
 //   (\@_. {})
 //   (\i rec @inrange. rec @inrange)
@@ -38,7 +40,7 @@ nat-fold = \@u @Acc. nat~fold @u @(\_. Acc)
 
 in {}
 
-// /: u : UInt -> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
+// /: u : Int+ -> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
 // find-case = \u tag cases. nat~fold
 //  (\i. Unit -> Row (Type+ u))
 //  (list-length cases)
@@ -47,14 +49,14 @@ in {}
 //  {}
 
 
-// /: forall (u : UInt). Tag -> Row (Type+ u) -> Row (Type+ u)
+// /: forall (u : Int+). Tag -> Row (Type+ u) -> Row (Type+ u)
 // Optional = \tag row. s : { (tag) = Bool } \/ row
 
 // Trash signature. It's way too overcomplicated by itself.
-// /: forall (u : UInt) (a : Type+ u) (b : Type+ u). l : List a -> (a -> Record (Optional .found {.val = b})) -> Record (Optional .found {.val = b})
+// /: forall (u : Int+) (a : Type+ u) (b : Type+ u). l : List a -> (a -> Record (Optional .found {.val = b})) -> Record (Optional .found {.val = b})
 // list-findl =
 
-// /: u : UInt -> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
+// /: u : Int+ -> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
 // find-case = \u tag cases. nat~fold
 //  (\i. Unit -> Row (Type+ u))
 //  (list-length cases)
@@ -62,7 +64,7 @@ in {}
 //  (\i rec. {})
 //  {}
 
-// // Union = Record (meta : { .tag = Tag } \/ { .val = UInt })
+// // Union = Record (meta : { .tag = Tag } \/ { .val = Int+ })
 // Union = \cases.
 //   Record (meta : { .tag = Tag } \/ fadeno.record-get meta.tag cases)
 
