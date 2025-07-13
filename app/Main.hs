@@ -815,7 +815,7 @@ subtype = \a b →
               (Right outT1, Left (n2, lbd2)) → process n2 (Left outT1) (Right lbd2)
     (Builtin (Num d1@(NumDesc nonneg1 bits1)), Builtin (Num d2@(NumDesc nonneg2 bits2))) →
       let fits = case (nonneg1, nonneg2) of
-            (True, False) → bits1 < bits2
+            (True, False) → bits1 < bits2 || bits2 == BitsInf
             (False, True) → False
             _ → bits1 <= bits2
        in if fits then pure () else stackError \_ → "Cannot fit " <> pIdent (identOfBuiltin $ Num d1) <> " into " <> pIdent (identOfBuiltin $ Num d2)
