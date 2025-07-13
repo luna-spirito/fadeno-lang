@@ -19,7 +19,7 @@ import Data.List (find, sortBy)
 import Data.RRBVector (Vector, deleteAt, ifoldr, viewl, (!?), (<|))
 import GHC.Exts (IsList (..))
 import Normalize (Binding, EqRes (..), Resolved, concat, insertBinds, isEq', nested, nestedBy, normalize, numDecDispatch, resolve, resolve', rewrite, runSeqResolve, termQQ, withResolved)
-import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pQuant, pTerm, parse, recordOf, render, rowOf)
+import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pQuant, pTerm, parse, recordOf, render, rowOf, typOf)
 import Prettyprinter (Doc, annotate, group, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, filter, link, local, runReader, toList)
@@ -635,16 +635,10 @@ infer = logAndRunInfer \case
         stackLog \p → "var" <+> pretty i <+> ":" <+> p ty
         pure ty
       _ → stackError \_ → "Unknown var #" <> pretty i
-  -- TODO: Support checks...
-  -- (Quantification _ _name kind ty, Infer) → do
-  --   res ← scopedVar id $ infer (insertBinds (QNorm, Nothing, normalize (annoBinds binds) kind) binds) (unLambda ty) Infer
-  --   ensureIsType res
-  -- (Pi inNameM x y, Check (App (Builtin Type) u)) → do
-  --   infer x $ Check $ typOf u
-  --   (if isJust inNameM then local @BindsT (|> (Nothing, PortableTerm valNesting0 x)) else id)
-  --     $ infer y
-  --     $ Check
-  --     $ typOf u
+  -- TODO: Support dependent...
+  (Pi _q inTy (Right outTy), Check (App (Builtin TypePlus) u)) → runSeqResolve do
+    withResolved \_ → infer inTy $ Check $ typOf u
+    withResolved \exs → infer outTy $ Check $ typOf $ resolve exs u
   (Pi _q inTy (Right outTy), Infer) → runSeqResolve do
     inTyTy ← withResolved \_ → ensureIsType =<< infer inTy Infer
     withResolved \_ →
