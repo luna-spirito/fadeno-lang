@@ -242,7 +242,6 @@ withMono' ∷
 withMono' foralls mapTerm onMeta onOther = go
  where
   go = \case
-    Sorry _ v → go v
     ExVar n i ty → do
       val ← runReader (n, i, ty) onMeta
       runSeqResolve do
@@ -662,6 +661,7 @@ infer = logAndRunInfer \case
       <$> builtinsList
   (UniVar _n _i ty, Infer) → pure ty
   (ExVar _n _i (ExType ty), Infer) → pure ty
+  (Sorry, Check k) → stackLog $ "sorry :" <+> pretty (show k)
   (k, Infer) → stackError $ pretty $ show k
   (term, Check c) → stackScope ("check via infer" <+> pTerm' term <+> ":" <+> pTerm' c) $ runSeqResolve do
     ty ← withResolved \_ → infer term Infer
@@ -710,7 +710,6 @@ instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ Ident → ExVarId → ExType → T
 instMeta = (\f a b c d → stackScope "instMeta" $ f a b c d) \n1 (ExVarId var1) t1 →
   let instMeta' ∷ TermT → m TermT
       instMeta' = \case
-        Sorry _ x → instMeta' x
         ExVar n2 (ExVarId var2) t2 →
           if var2 <= var1
             then pure $ ExVar n2 (ExVarId var2) t2

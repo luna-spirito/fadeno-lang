@@ -89,8 +89,8 @@ isEq' f = curry \case
       $ pure EqYes
   (App{}, _) → pure EqUnknown
   (_, App{}) → pure EqUnknown
-  (Sorry _ a, b) → isEq' f a b
-  (a, Sorry _ b) → isEq' f a b
+  (Sorry, _) → pure EqUnknown
+  (_, Sorry) → pure EqUnknown
   -- Literals
   (Lam QNorm _ bod1, Lam QNorm _ bod2) → local (insertBinds (QNorm, Nothing, Nothing)) $ isEq' f (unLambda bod1) (unLambda bod2)
   (Lam QNorm _ _, _) → pure EqNot
@@ -317,7 +317,7 @@ rewrite onLet onNest rewriter = go
     BoolLit x → pure $ BoolLit x
     ListLit (Vector' vec) → ListLit . Vector' <$> traverse (go via) vec
     RecordLit (Vector' vec) → RecordLit . Vector' <$> traverse (bitraverse (go via) (go via)) vec
-    Sorry n x → Sorry n <$> go via x
+    Sorry → pure Sorry
     Var i → pure $ Var i
     Builtin x → pure $ Builtin x
     BuiltinsVar → pure builtinsVar

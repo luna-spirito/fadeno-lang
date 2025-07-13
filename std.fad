@@ -1,6 +1,7 @@
 unpack fadeno. Type+ Int+ Int Tag List Bool Eq refl Row Record list_length list_indexl if _<_ W wrap unwrap nat_ind Never
 
 _+_ = fadeno.int+_add
+_-_ = fadeno.int+_sub
 
 Kind = Type+ 1
 /: Kind
@@ -25,6 +26,11 @@ Where = \x. Eq x true
 
 /: u : Int+ -@> Acc : Type+ u -@> Acc -> (Int+ -> Acc -> Acc) -> Int+ -> Acc
 nat_fold = \@u @Acc. nat_ind @u @(\_. Acc)
+
+/: i : Int+ -> n : Int+ -> Where (i < n) -> Where (n - i - 1 < n)
+inv_index = \i n prf. nat_ind @0 @(\j. Where (n - j - 1 < n))
+  SORRY!
+  SORRY!
 
 //list-fold
 

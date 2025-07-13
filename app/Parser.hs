@@ -253,11 +253,11 @@ data TermT
     Block !BlockT
   | Lam !Quant !Ident !(Lambda TermT)
   | App !TermT !TermT
-  | AppErased !TermT !TermT
+  | AppErased !TermT !TermT -- TODO: Maybe
   | NumLit !Integer
   | TagLit !Ident
   | BoolLit !Bool
-  | Sorry !Ident !TermT
+  | Sorry
   | Var !Int
   | ListLit !(Vector' TermT)
   | RecordLit !(Vector' (TermT, TermT))
@@ -367,6 +367,7 @@ parsePrim = token do
               pure (ListLit elems)
           )
       <|> (BuiltinsVar <$ (notFollowedBy $(string "fadeno") identSym))
+      <|> (Sorry <$ ($(string "SORRY") <* many ($(char '!'))))
       <|> ( Var <$> do
               -- Variable parsing
               -- TODO: { x = 4 }
@@ -415,33 +416,25 @@ parseApp = parsePrim >>= infxl'
 
 -- 5
 parseTy ∷ Parser' TermT
-parseTy =
-  ( do
-      $(string "sorry/")
-      n ← ident
-      token $ $(char ':')
-      ty ← parseTy
-      pure $ Sorry n ty
-  )
-    <|> do
-      -- Fused: parseApp <|> (->) <|> (-@>) <|> (/\)
-      inNameM ← optional $ (ident <* $(char ':'))
-      inTy ← parseApp
-      ( ( do
-            q ← token $ ($(string "->") $> QNorm) <|> ($(string "-@>") $> QEra)
-            outTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local ((QNorm, name) <|)) inNameM parseTy
-            pure $ Pi q inTy outTy
-        )
-          <|> ( do
-                  token $ $(string "\\/")
-                  rightTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local ((QNorm, name) <|)) inNameM parseTy
-                  pure $ Concat inTy rightTy
-              )
-          <|> ( do
-                  guard $ isNothing inNameM
-                  pure inTy
-              )
-        )
+parseTy = do
+  -- Fused: parseApp <|> (->) <|> (-@>) <|> (/\)
+  inNameM ← optional $ (ident <* $(char ':'))
+  inTy ← parseApp
+  ( ( do
+        q ← token $ ($(string "->") $> QNorm) <|> ($(string "-@>") $> QEra)
+        outTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local ((QNorm, name) <|)) inNameM parseTy
+        pure $ Pi q inTy outTy
+    )
+      <|> ( do
+              token $ $(string "\\/")
+              rightTy ← maybe (Right <$>) (\name → fmap (Left . (name,) . Lambda) . local ((QNorm, name) <|)) inNameM parseTy
+              pure $ Concat inTy rightTy
+          )
+      <|> ( do
+              guard $ isNothing inNameM
+              pure inTy
+          )
+    )
 
 -- 4
 parseInfixOps ∷ Parser' TermT
@@ -571,7 +564,7 @@ isSimple =
         NumLit _ → ping
         TagLit _ → ping
         BoolLit _ → ping
-        Sorry _ _ → ping
+        Sorry → ping
         Var _ → ping
         ListLit vs → ping *> traverse_ complexity vs
         RecordLit fields → ping *> traverse_ (\(k, v) → complexity k *> complexity v) fields
@@ -649,7 +642,7 @@ pTerm (oldPrec, vars) =
           Left (n, b') → pIdent n <+> ":" <+> pTerm (4, vars) a <+> "\\/" <+> pTerm (3, (QNorm, n) <| vars) (unLambda b')
           Right b' → pTerm (4, vars) a <+> "\\/" <+> pTerm (3, vars) b'
       )
-    Sorry x _ → (5, "sorry/" <> pIdent x)
+    Sorry → (5, "SORRY!")
     App (App (Builtin RecordGet) (TagLit tag)) rec →
       (5, pTerm (5, vars) rec <> "." <> pIdent tag)
     App lam arg2 → case lam of
