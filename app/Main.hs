@@ -18,7 +18,7 @@ import Data.ByteString.Char8 (pack)
 import Data.List (find, sortBy)
 import Data.RRBVector (Vector, deleteAt, ifoldr, viewl, (!?), (<|))
 import GHC.Exts (IsList (..))
-import Normalize (Binding, EqRes (..), Resolved, concat, insertBinds, isEq', nested, nestedBy, normalize, numDecDispatch, resolve, resolve', rewrite, runSeqResolve, termQQ, withResolved)
+import Normalize (Binding, EqRes (..), Resolved, concat, insertBinds, isEq', nested, nestedBy, normalize, numDecDispatch, resolve, resolve', rewrite, rewriteTerm, runSeqResolve, termQQ, withResolved)
 import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pQuant, pTerm, parse, recordOf, render, rowOf, typOf)
 import Prettyprinter (Doc, annotate, group, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
@@ -427,7 +427,6 @@ checkDepLam q i bod inT outT =
   scopedVar (const pure) (q, i, Nothing, inT)
     $ infer (unLambda bod)
     $ Check
-    $ normalize [Just $ Var 0]
     $ unLambda outT
 
 checkLam ∷ ∀ sig m. (Has Solve sig m) ⇒ Quant → Ident → Lambda TermT → TermT → Either (Ident, Lambda TermT) TermT → m ()
@@ -507,8 +506,27 @@ infer = logAndRunInfer \case
       withLog
         $ scopedVar (mapTermFor mode) (q, name, Just val', ty)
         $ infer (unLambda into)
-        $ nestMode
-        $ resolveMode exs mode
+        $ resolveMode exs
+        $ nestMode mode
+  (Block (BlockRewrite prf inner), mode) → runSeqResolve do
+    -- Currently: Eq <simple/outer> <complicated/inner>
+    let rewriteTerm' what with x = case rewriteTerm what with x of
+          Just x' → pure x'
+          Nothing → stackError \p → "Rewrite" <+> p what <+> "==>" <+> p with <+> "did not alter" <+> p x
+    prfTy ← withResolved \_ → infer prf Infer
+    withResolved \_ →
+      withMono
+        (mapTermFor mode)
+        (stackError \_ → "Type of rewrite must be known")
+        ( \_ → \case
+            Builtin Eq `App` simple `App` complicated → case mode of
+              Infer → runSeqResolve do
+                innerTy ← withResolved \_ → infer inner Infer
+                withResolved \exs2 → rewriteTerm' (resolve exs2 complicated) (resolve exs2 simple) innerTy
+              Check ty → infer inner . Check =<< rewriteTerm' simple complicated ty
+            x → stackError \p → p x <+> "is invalid rewrite"
+        )
+        prfTy
   -- TODO: (Lam QEra arg bod, Infer)
   (Lam QEra n bod, Check (Pi QEra inT outT)) → checkLam QEra n bod inT outT
   (AppErased f a, Infer) → inferApp QEra f a
@@ -637,9 +655,18 @@ infer = logAndRunInfer \case
         pure ty
       _ → stackError \_ → "Unknown var #" <> pretty i
   -- TODO: Support dependent...
-  (Pi _q inTy (Right outTy), Check (App (Builtin TypePlus) u)) → runSeqResolve do
+  (Pi _q inTy outTyE, Check (App (Builtin TypePlus) u)) → runSeqResolve do
     withResolved \_ → infer inTy $ Check $ typOf u
-    withResolved \exs → infer outTy $ Check $ typOf $ resolve exs u
+    withResolved \exs → case outTyE of
+      Left (n, outTy) → do
+        tb ← termBinds
+        scopedVar (const pure) (QNorm, n, Nothing, resolve exs $ normalize tb inTy)
+          $ infer (unLambda outTy)
+          $ Check
+          $ typOf
+          $ resolve exs
+          $ nested u
+      Right outTy → infer outTy $ Check $ typOf $ resolve exs u
   (Pi _q inTy (Right outTy), Infer) → runSeqResolve do
     inTyTy ← withResolved \_ → ensureIsType =<< infer inTy Infer
     withResolved \_ →
@@ -662,7 +689,7 @@ infer = logAndRunInfer \case
       <$> builtinsList
   (UniVar _n _i ty, Infer) → pure ty
   (ExVar _n _i (ExType ty), Infer) → pure ty
-  (Sorry, Check k) → stackLog \p → "sorry :" <+> p k
+  (Sorry, Check k) → stackLog \p → annotate (color Yellow) $ "sorry :" <+> p k
   (k, Infer) → stackError \p → p k
   (term, Check c) → stackScope (\p → "check via infer" <+> p term <+> ":" <+> p c) $ runSeqResolve do
     ty ← withResolved \_ → infer term Infer
@@ -674,6 +701,7 @@ typOfBuiltin =
     Num _d → [termQQ| Type+ 0 |]
     Add d → opd d
     Sub d → opd d
+    IntNeg → [termQQ| Int -> Int |]
     Tag → [termQQ| Type+ 0 |]
     Bool → [termQQ| Type+ 0 |]
     Row → [termQQ| u : Int+ -@> Type+ u -> Type+ u |]
@@ -693,13 +721,12 @@ typOfBuiltin =
     RecordKeepFields → [termQQ| u : Int+ -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
     RecordDropFields → [termQQ| u : Int+ -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
     ListLength → [termQQ| u : Int+ -@> A : Type+ u -@> List A -> Int+ |]
-    ListIndexL → [termQQ| u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (i < list_length l) -@> A |]
+    ListIndexL → [termQQ| u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (is_>=0 (int_add (list_length l + 1) (int_neg i))) -@> A |]
     NatFold → [termQQ| u : Int+ -@> Acc : (Int+ -> Type+ u) -@> Acc 0 -> (i : Int+ -> Acc i -> Acc (i + 1)) -> n : Int+ -> Acc n |]
-    If → [termQQ| u : Int+ -@> A : Type+ u -@> cond : Bool -> (Eq cond true -> A) -> (Eq cond false -> A) -> A |]
-    ULte → [termQQ| Int -> Int -> Bool |]
-    ULt → [termQQ| Int -> Int -> Bool |]
-    UEq → [termQQ| Int -> Int -> Bool |]
-    UNeq → [termQQ| Int -> Int -> Bool |]
+    If → [termQQ| u : Int+ -@> A : Type+ u -@> cond : Bool -> (Eq true cond -> A) -> (Eq false cond -> A) -> A |]
+    NumGte0 → [termQQ| Int -> Bool |]
+    NumEq → [termQQ| Int -> Int -> Bool |]
+    NumNeq → [termQQ| Int -> Int -> Bool |]
     W → [termQQ| u : Int+ -@> Type+ u -> Type+ u |]
     Wrap → [termQQ| u : Int+ -@> A : Type+ u -@> A -> W A |]
     Unwrap → [termQQ| u : Int+ -@> A : Type+ u -@> W A -> A |]
@@ -738,6 +765,7 @@ instMeta = (\f a b c d → stackScope (\_ → "instMeta") $ f a b c d) \n1 (ExVa
           pure $ Concat a' b'
         Var x → pure $ Var x -- TODO: I hope this is correct, but needs to be rechecked.
         Builtin x → pure $ Builtin x
+        BoolLit x → pure $ BoolLit x
         NumLit x → pure $ NumLit x
         Pi QNorm inT outT → runSeqResolve do
           inT' ← withResolved \_ → instMeta' inT
@@ -842,16 +870,6 @@ subtype = \a b →
       isEqUnify a b >>= \case
         EqYes → pure ()
         _ → stackError \p → "Cannot equate wrapped types" <+> p a <+> "and" <+> p b
-    -- App f1 a1 <: App f2 a2
-    (App f1 a1, App f2 a2) → runSeqResolve do
-      eqF ← withResolved \_ → isEqUnify f1 f2
-      case eqF of
-        EqYes → do
-          eqA ← withResolved \exs → isEqUnify (resolve exs a1) (resolve exs a2)
-          case eqA of
-            EqYes → pure ()
-            _ → stackError \p → "Cannot subtype applications with different arguments:" <+> p a1 <+> "vs" <+> p a2
-        _ → stackError \p → "Cannot subtype applications with different functions:" <+> p f1 <+> "vs" <+> p f2
     (RecordLit (Vector' fields1), RecordLit fields2) →
       let
         fields1Drop fields1' name ty =
@@ -884,8 +902,12 @@ subtype = \a b →
         let body2 = resolve exs $ normalize [Just var] $ unLambda lr2
         subtype body1 body2
 
-    -- Catch-all: if no rule matches, they are not subtypes
-    (t1, t2) → stackError \p → "Subtype check failed, no rule applies for:" <+> p t1 <+> "<:" <+> p t2
+    -- Catch-all: if no rule matches, check equality
+    (t1, t2) → runSeqResolve do
+      eq ← withResolved \_ → isEqUnify t1 t2
+      case eq of
+        EqYes → pure ()
+        _ → withResolved \exs → stackError \p → "Subtype check failed, no rule applies for:" <+> p (resolve exs t1) <+> "<:" <+> p (resolve exs t2)
 
 runSolveM ∷ (Applicative m) ⇒ ReaderC (Vector Binding) (WriterC Resolved (FreshC (ErrorC (Doc AnsiStyle) m))) a → m (Either (Doc AnsiStyle) a)
 runSolveM =

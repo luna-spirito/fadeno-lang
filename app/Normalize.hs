@@ -10,6 +10,7 @@ import Control.Effect.Reader (Reader, local)
 import Control.Effect.State (get, put)
 import Control.Effect.Writer (Writer, listen, tell)
 import Data.ByteString.Char8 (pack)
+import Data.Monoid (Any (..))
 import Data.RRBVector (Vector, deleteAt, ifoldr, splitAt, viewl, (!?), (<|))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId, Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm, parse, parseFile, recordGet, render)
@@ -71,12 +72,12 @@ isEq' f = curry \case
   (_, AppErased{}) → undefined
   (Lam QEra _ _, _) → undefined
   (_, Lam QEra _ _) → undefined
+  (ExVar a b c, t) → f a b c t $> EqYes
+  (t, ExVar a b c) → f a b c t $> EqYes
   (Var a, Var b)
     | a == b → pure EqYes
   (Var _, _) → pure EqUnknown
   (_, Var _) → pure EqUnknown
-  (ExVar a b c, t) → f a b c t $> EqYes
-  (t, ExVar a b c) → f a b c t $> EqYes
   (UniVar _ b1 _, UniVar _ b2 _)
     | b1 == b2 → pure EqYes
   (UniVar{}, _) → pure EqUnknown
@@ -196,7 +197,7 @@ repeat n f = case n of
 -- TODO: Really simple, expand upon.
 unplus ∷ TermT → (Maybe TermT, Integer)
 unplus (NumLit n) | n >= 0 = (Nothing, n)
-unplus (Builtin (Add (NumDesc False BitsInf)) `App` a `App` NumLit n) | n >= 0 = (Just a, n)
+unplus (Builtin (Add (NumDesc True BitsInf)) `App` a `App` NumLit n) = (+ n) <$> unplus a
 unplus x = (Just x, 0)
 
 numDecDispatch ∷ NumDesc → (∀ x. (Integral x, Bounded x) ⇒ Proxy x → a) → (Bool → a) → a
@@ -235,7 +236,7 @@ postApp = curry \case
     let
       (nTM, nV) = unplus n
      in
-      -- TODO: causes constant re-normalization of `nat~fold` args.
+      -- TODO: causes constant re-normalization of `nat_fold` args.
       (if nV > 0 then normalize [] else id)
         $ repeat nV (App step)
         $ case nTM of
@@ -245,20 +246,20 @@ postApp = curry \case
     if cond
       then normalize [Just $ RecordLit []] thenBranch
       else normalize [Just $ RecordLit []] elseBranch
-  (Builtin ULte `App` (NumLit l), NumLit r) → BoolLit $ l <= r
-  (Builtin ULt `App` (NumLit l), NumLit r) → BoolLit $ l < r
-  (Builtin UEq `App` (NumLit l), NumLit r) → BoolLit $ l == r
-  (Builtin UNeq `App` (NumLit l), NumLit r) → BoolLit $ l /= r
+  (Builtin NumGte0, NumLit x) → BoolLit $ x >= 0
+  (Builtin NumEq `App` (NumLit l), NumLit r) → BoolLit $ l == r
+  (Builtin NumNeq `App` (NumLit l), NumLit r) → BoolLit $ l /= r
   (Builtin Wrap `App` _ty, b) → b
   (Builtin Unwrap `App` _ty, b) → b
-  (Builtin (Add d) `App` (NumLit a), NumLit b) →
-    NumLit
-      $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a + fromIntegral b) (\_ → a + b)
-  (Builtin (Sub d) `App` (NumLit a), NumLit b) → NumLit
-    $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a - fromIntegral b)
-    $ \case
-      False → a - b
-      True → if a >= b then a - b else 0
+  -- Add
+  (Builtin (Add d) `App` a, NumLit b)
+    | b == 0 → a
+    | NumLit a' ← a → NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a' + fromIntegral b) (\_ → a' + b)
+  -- Sub
+  (Builtin (Sub d) `App` a, NumLit b)
+    | b == 0 → a
+    | NumLit a' ← a → NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a' + fromIntegral b) \_ → undefined
+  (Builtin IntNeg, NumLit x) → NumLit $ -x
   (f, a) → App f a
  where
   -- Drop `x` from ListLit.
@@ -304,7 +305,7 @@ rewrite onLet onNest rewriter = go
       val' ← go via val
       go (onLet val' via) $ unLambda into
     Block (BlockLet QEra _ _ _ into) → go (onLet undefined via) $ unLambda into
-    Block (BlockRewrite from to) → error "TODO rewrite BlockRewrite"
+    Block (BlockRewrite _ into) → go via into
     Lam QNorm arg bod → Lam QNorm arg . Lambda <$> go (onNest via) (unLambda bod)
     Lam QEra _ bod → go (onLet undefined via) $ unLambda bod
     AppErased f _ → go via f
@@ -372,15 +373,16 @@ normalize origBinds =
       )
       origBinds
 
-rewriteTerm ∷ TermT → TermT → TermT → TermT
+rewriteTerm ∷ TermT → TermT → TermT → Maybe TermT
 rewriteTerm what0 with0 =
   runIdentity
+    . runWriter @Any (\(Any rewrote) final → pure $ guard rewrote *> Just final)
     . rewrite
       (const (bimap nested nested))
       (bimap nested nested)
-      ( \term (what, with) → pure $ case isEq term what of
-          EqYes → Just with
-          _ → Nothing
+      ( \term (what, with) → case isEq term what of
+          EqYes → tell (Any True) $> Just with
+          _ → pure Nothing
       )
       (what0, with0)
 
@@ -394,7 +396,7 @@ termQQ ∷ QuasiQuoter
 termQQ =
   let
     wher = Lam QNorm (Ident "n" False) $ Lambda $ Builtin Eq `App` (Var 0) `App` BoolLit True
-    scope = ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList) <> [(Ident "+" True, Builtin $ Add $ NumDesc False BitsInf), (Ident "Where" False, wher)]
+    scope = ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList) <> [(Ident "+" True, Builtin $ Add $ NumDesc True BitsInf), (Ident "Where" False, wher)]
    in
     QuasiQuoter
       { quoteExp = \s → do

@@ -1,7 +1,14 @@
-unpack fadeno. Type+ Int+ Int Tag List Bool Eq refl Row Record list_length list_indexl if _<_ W wrap unwrap nat_ind Never
+unpack fadeno. Type+ Int+ Int Tag List Bool Eq refl Row Record list_length list_indexl if W is_>=0 wrap unwrap nat_fold~ Never int_neg
 
-_+_ = fadeno.int+_add
-_-_ = fadeno.int+_sub
+_>+_ = fadeno.int+_add
+_+_ = fadeno.int_add
+_-_ = \a b. a + (int_neg b)
+
+/: Int -> Int -> Bool
+_>=_ = \a b. is_>=0 (a - b)
+_>_ = \a b. a >= (b + 1)
+_<=_ = \a b. b >= a
+_<_ = \a b. b > a
 
 Kind = Type+ 1
 /: Kind
@@ -22,17 +29,44 @@ unit = {}
 Not = \a. a -> Never
 
 /: Bool -> Type
-Where = \x. Eq x true
+Where = \x. Eq true x
 
 /: u : Int+ -@> Acc : Type+ u -@> Acc -> (Int+ -> Acc -> Acc) -> Int+ -> Acc
-nat_fold = \@u @Acc. nat_ind @u @(\_. Acc)
+nat_fold = \@u @Acc. nat_fold~ @u @(\_. Acc)
 
-/: i : Int+ -> n : Int+ -> Where (i < n) -> Where (n - i - 1 < n)
-inv_index = \i n prf. nat_ind @0 @(\j. Where (n - j - 1 < n))
-  SORRY!
-  SORRY!
+/: i : Int -> Where (is_>=0 i) -@> Int+
+to_int+ = \i @_.
+  /: Eq Int+ Int
+  e = SORRY
+  in rewrite e in i
 
-//list-fold
+/: n : Int -@> Eq 0 (n + (int_neg n))
+n-n~ = \@_. SORRY
+
+/: u1 : Int+ -@> A : Type+ u1 -@> a : A -@> u2 : Int+ -@> B : Type+ u2 -@> b : B -@> Eq a b -> Eq b a
+sym~ = \@_ @_ @_ @_. SORRY
+
+/: a : Int+ -@> b : Int+ -@> Eq (a + b) (a >+ b)
+add+_eq_add = \@_ @_. SORRY
+
+/: i : Int+ -> n : Int+ -> Where (i < n) -@> Int+
+inv_index = \i n @prf. to_int+ (n - (i + 1)) @prf
+
+/: i : Int+ -@> n : Int+ -@> Where (n - (i + 1) < n)
+inv_index_bounded = \@i @n. SORRY
+
+/: u : Int+ -@> Acc : (Int+ -> Type+ u) -@> n : Int+ -> (i : Int+ -> Where (i < n) -@> Acc (i >+ 1) -> Acc i) -> Acc n -> Acc 0
+nat_unfold~ = \@u @Accf n step final.
+  /: i : Int -@> Eq (n - i) ((n - (i + 1)) + 1)
+  simplify = \@i. SORRY
+  rewrite n-n~ @n
+  in nat_fold~ @u @(\i. prf : Where (i <= n) -@> Accf (to_int+ (n - i) @prf))
+    (\@_. final)
+    (\i rec @~i+1<n.
+      rewrite sym~ (add+_eq_add @i @1) in
+      step (inv_index i n @(rewrite add+_eq_add @i @1 in ~i+1<n)) @(inv_index_bounded @i @n) (rec @SORRY))
+    n
+    @(rewrite sym~ (n-n~ @n) in refl @0)
 
 // /: u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (i < list_length l) -@> A
 // list-indexr =

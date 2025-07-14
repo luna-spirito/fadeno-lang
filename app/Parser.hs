@@ -148,10 +148,9 @@ data BuiltinT
   | ListIndexL
   | NatFold
   | If -- TODO: Make Choice counterpart for Record
-  | ULte
-  | ULt
-  | UEq
-  | UNeq
+  | NumGte0
+  | NumEq
+  | NumNeq
   | W
   | Wrap
   | Unwrap
@@ -159,22 +158,25 @@ data BuiltinT
   | Add !NumDesc
   | Sub !NumDesc
   | Num !NumDesc
+  | IntNeg -- Currently just for the Int.
   deriving (Show, Eq, Lift)
 
 builtinsList ∷ Vector BuiltinT
 builtinsList =
-  [Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, ULte, ULt, UEq, UNeq, W, Wrap, Unwrap, Never]
+  [Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, NumGte0, NumEq, NumNeq, W, Wrap, Unwrap, Never, IntNeg]
     <> (Num <$> nd)
     <> (Add <$> nd)
-    <> (Sub <$> nd)
+    <> (Sub <$> ndSansInf)
  where
-  nd = NumDesc <$> [False, True] <*> [Bits8, Bits16, Bits32, Bits64, BitsInf]
+  ndSansInf = (NumDesc <$> [False, True] <*> [Bits8, Bits16, Bits32, Bits64])
+  nd = ndSansInf <> [NumDesc False BitsInf, NumDesc True BitsInf]
 
 identOfBuiltin ∷ BuiltinT → Ident
 identOfBuiltin = \case
   Add d → r $ numDesc False d <> "_add"
   Sub d → r $ numDesc False d <> "_sub"
   Num d → r $ numDesc True d
+  IntNeg → r "int_neg"
   Tag → r "Tag"
   Bool → r "Bool"
   Row → r "Row"
@@ -188,12 +190,11 @@ identOfBuiltin = \case
   RecordDropFields → r "record_drop_fields"
   ListLength → r "list_length"
   ListIndexL → r "list_indexl"
-  NatFold → r "nat_ind"
+  NatFold → r "nat_fold~"
   If → r "if"
-  ULte → o "<="
-  ULt → o "<"
-  UEq → o "=="
-  UNeq → o "!="
+  NumGte0 → r "is_>=0"
+  NumEq → o "=="
+  NumNeq → o "!="
   W → r "W"
   Wrap → r "wrap"
   Unwrap → r "unwrap"
@@ -303,25 +304,25 @@ eqOf a b = (Builtin Eq) `App` a `App` b
 
 -- If → "if"
 
-infxr ∷ Parser' a → Parser' (a → a → a) → Parser' a
-infxr a oper = do
-  a' ← a
-  ( do
-      oper' ← oper
-      oper' a' <$> infxr a oper
-    )
-    <|> pure a'
-
--- infxl ∷ Parser' a → Parser' (a → a → a) → Parser' a
--- infxl a oper = a >>= infxl'
---  where
---   infxl' prev =
---     ( do
---         oper' ← oper
---         next ← a
---         infxl' $ oper' prev next
+-- infxr ∷ Parser' a → Parser' (a → a → a) → Parser' a
+-- infxr a oper = do
+--   a' ← a
+--   ( do
+--       oper' ← oper
+--       oper' a' <$> infxr a oper
 --     )
---       <|> pure prev
+--     <|> pure a'
+
+infxl ∷ Parser' a → Parser' (a → a → a) → Parser' a
+infxl a oper = a >>= infxl'
+ where
+  infxl' prev =
+    ( do
+        oper' ← oper
+        next ← a
+        infxl' $ oper' prev next
+    )
+      <|> pure prev
 
 sepBy ∷ Parser' () → Parser' a → Parser' [a]
 sepBy with x = ((:) <$> x <*> many (with *> x)) <|> pure []
@@ -367,7 +368,7 @@ parsePrim = token do
               pure (ListLit elems)
           )
       <|> (BuiltinsVar <$ (notFollowedBy $(string "fadeno") identSym))
-      <|> (Sorry <$ ($(string "SORRY") <* many ($(char '!') <|> $(char '1'))))
+      <|> (Sorry <$ notFollowedBy ($(string "SORRY") <* many ($(char '!') <|> $(char '1'))) identSym)
       <|> ( Var <$> do
               -- Variable parsing
               -- TODO: { x = 4 }
@@ -438,7 +439,7 @@ parseTy = do
 
 -- 4
 parseInfixOps ∷ Parser' TermT
-parseInfixOps = infxr parseTy parseOperator'
+parseInfixOps = infxl parseTy parseOperator'
  where
   parseOperator' ∷ Parser' (TermT → TermT → TermT)
   parseOperator' = do
@@ -666,7 +667,7 @@ pTerm (oldPrec, vars) =
           (fmap (\(n, v) → pTerm (5, vars) n <+> annotate (color Cyan) "=" <+> pTerm (0, vars) v) (toList fields))
       )
     ListLit vec → (5, encloseSep "[" "]" " | " $ fmap (\x → pTerm (0, vars) x) (toList vec))
-    Var x → (5, maybe ("#" <> pretty x) (\(q, i) → pQuant q <> pIdent i) $ vars !? x)
+    Var x → (5, maybe ("#" <> pretty x) (\(_, i) → pIdent i) $ vars !? x)
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
