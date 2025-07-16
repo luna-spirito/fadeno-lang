@@ -491,6 +491,7 @@ infer ∷ ∀ sig m a. (Has Solve sig m) ⇒ TermT → InferMode a → m a
 infer = logAndRunInfer \case
   -- Here, we will convert Checks to Infers.
   -- However, converting Infer to a Check when checking a term is hereby declared a deadly sin.
+  (_, Check (Builtin Any')) → pure ()
   (Block (BlockLet q name tyM val into), mode) → runSeqResolve do
     ty ← withResolved \_ → stackScope (\_ → ("let" <+> pQuant q <> pIdent name)) case tyM of
       Nothing → infer val Infer
@@ -710,7 +711,7 @@ typOfBuiltin =
     Record → [termQQ| u : Int+ -@> Row (Type+ u) -> Type+ u |]
     List → [termQQ| u : Int+ -@> Type+ u -> Type+ u |]
     TypePlus → [termQQ| u : Int+ -> Type+ (u + 1) |]
-    Eq → [termQQ| u : Int+ -@> a : Type+ u -@> a -> a -> Type+ u |]
+    Eq → [termQQ| Any -> Any -> Type+ 0 |]
     Refl → [termQQ| u : Int+ -@> a : Type+ u -@> x : a -@> Eq x x |]
     RecordGet →
       [termQQ|
@@ -733,6 +734,7 @@ typOfBuiltin =
     Wrap → [termQQ| u : Int+ -@> A : Type+ u -@> A -> W A |]
     Unwrap → [termQQ| u : Int+ -@> A : Type+ u -@> W A -> A |]
     Never → [termQQ| Type+ 0 |]
+    Any' → [termQQ| Type+ 0 |]
  where
   opd d = Pi QNorm (Builtin $ Num d) $ Right $ Pi QNorm (Builtin $ Num d) $ Right $ Builtin $ Num d
 
@@ -845,6 +847,7 @@ subtype = \a b →
             _ → bits1 <= bits2
        in if fits then pure () else stackError \_ → "Cannot fit " <> pIdent (identOfBuiltin $ Num d1) <> " into " <> pIdent (identOfBuiltin $ Num d2)
     (Builtin Never, _) → pure ()
+    (_, Builtin Any') → pure ()
     -- Builtin Types (must be identical)
     (Builtin a, Builtin b) | a == b → pure ()
     (Var i, Var j) | i == j → pure ()

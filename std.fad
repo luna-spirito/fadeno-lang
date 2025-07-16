@@ -1,4 +1,4 @@
-unpack fadeno. Type+ Int+ Int Tag List Bool Eq refl Row Record list_length list_indexl if W is_>=0 wrap unwrap nat_fold~ Never int_neg
+unpack fadeno. Type+ Int+ Int Tag List Bool Eq refl Row Record list_length list_indexl if W is_>=0 wrap unwrap ~nat_fold Never Any int_neg
 
 _>+_ = fadeno.int+_add
 _+_ = fadeno.int_add
@@ -32,7 +32,7 @@ Not = \a. a -> Never
 Where = \x. Eq true x
 
 /: u : Int+ -@> Acc : Type+ u -@> Acc -> (Int+ -> Acc -> Acc) -> Int+ -> Acc
-nat_fold = \@u @Acc. nat_fold~ @u @(\_. Acc)
+nat_fold = \@u @Acc. ~nat_fold @u @(\_. Acc)
 
 /: i : Int -> Where (is_>=0 i) -@> Int+
 to_int+ = \i @_.
@@ -40,11 +40,14 @@ to_int+ = \i @_.
   e = SORRY
   in rewrite e in i
 
-/: n : Int -@> Eq 0 (n + (int_neg n))
-n-n~ = \@_. SORRY
+/: i : Int+ -@> Where (is_>=0 i)
+int+>=0 = \@_. SORRY
 
-/: u1 : Int+ -@> A : Type+ u1 -@> a : A -@> u2 : Int+ -@> B : Type+ u2 -@> b : B -@> Eq a b -> Eq b a
-sym~ = \@_ @_ @_ @_. SORRY
+/: n : Int -@> Eq 0 (n + (int_neg n))
+~n-n = \@_. SORRY
+
+/: a : Any -@> b : Any -@> Eq a b -> Eq b a
+~sym = \@_ @_. SORRY
 
 /: a : Int+ -@> b : Int+ -@> Eq (a + b) (a >+ b)
 add+_eq_add = \@_ @_. SORRY
@@ -55,24 +58,32 @@ inv_index = \i n @prf. to_int+ (n - (i + 1)) @prf
 /: i : Int+ -@> n : Int+ -@> Where (n - (i + 1) < n)
 inv_index_bounded = \@i @n. SORRY
 
+/: a : Any -@> b : Any -@> f : (a -> b) -@> Eq a b -> Eq (f a) (f b)
+cong = \@_ _. SORRY
+
+// To remake eventually
 /: u : Int+ -@> Acc : (Int+ -> Type+ u) -@> n : Int+ -> (i : Int+ -> Where (i < n) -@> Acc (i >+ 1) -> Acc i) -> Acc n -> Acc 0
-nat_unfold~ = \@u @Accf n step final.
-  /: i : Int -@> Eq (n - i) ((n - (i + 1)) + 1)
-  simplify = \@i. SORRY
-  rewrite n-n~ @n
-  in nat_fold~ @u @(\i. prf : Where (i <= n) -@> Accf (to_int+ (n - i) @prf))
+~nat_unfold = \@u @Accf n step final.
+  rewrite ~n-n @n
+  in ~nat_fold @u @(\i. prf : Where (i <= n) -@> Accf (to_int+ (n - i) @prf))
     (\@_. final)
-    (\i rec @~i+1<n.
-      rewrite sym~ (add+_eq_add @i @1) in
-      step (inv_index i n @(rewrite add+_eq_add @i @1 in ~i+1<n)) @(inv_index_bounded @i @n) (rec @SORRY))
+    (\i rec @~i+1<=n.
+      /: Eq ((n - (i + 1)) >+ 1) (n - i)
+      ~simplify = SORRY
+      index = inv_index i n @(rewrite add+_eq_add @i @1 in ~i+1<=n)
+      /: Where (i <= n)
+      ~i<=n = SORRY
+      rewrite ~sym (add+_eq_add @i @1)
+      in step index @(inv_index_bounded @i @n) (rewrite ~simplify in rec @~i<=n)
+    )
     n
-    @(rewrite sym~ (n-n~ @n) in refl @0)
+    @(rewrite ~sym (~n-n @n) in refl @0)
 
 // /: u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (i < list_length l) -@> A
 // list-indexr =
 
 // /: u : Int+ -@> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
-// find-case = \@u tag l. nat~fold @u @(\i. Where (i < list-length l) -@> Row (Type+ u))
+// find-case = \@u tag l. ~nat_fold @u @(\i. Where (i < list-length l) -@> Row (Type+ u))
 //   (\@_. {})
 //   (\i rec @inrange. rec @inrange)
 //   (list-length l)
@@ -81,7 +92,7 @@ nat_unfold~ = \@u @Accf n step final.
 in {}
 
 // /: u : Int+ -> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
-// find-case = \u tag cases. nat~fold
+// find-case = \u tag cases. ~nat_fold
 //  (\i. Unit -> Row (Type+ u))
 //  (list-length cases)
 //  {} //(forall (row : Row (Type+ u)). row)
@@ -97,7 +108,7 @@ in {}
 // list-findl =
 
 // /: u : Int+ -> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
-// find-case = \u tag cases. nat~fold
+// find-case = \u tag cases. ~nat_fold
 //  (\i. Unit -> Row (Type+ u))
 //  (list-length cases)
 //  {} //(forall (row : Row (Type+ u)). row)

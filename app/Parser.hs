@@ -155,6 +155,7 @@ data BuiltinT
   | Wrap
   | Unwrap
   | Never
+  | Any'
   | Add !NumDesc
   | Sub !NumDesc
   | Num !NumDesc
@@ -163,7 +164,7 @@ data BuiltinT
 
 builtinsList ∷ Vector BuiltinT
 builtinsList =
-  [Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, NumGte0, NumEq, NumNeq, W, Wrap, Unwrap, Never, IntNeg]
+  [Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, NumGte0, NumEq, NumNeq, W, Wrap, Unwrap, Never, Any', IntNeg]
     <> (Num <$> nd)
     <> (Add <$> nd)
     <> (Sub <$> ndSansInf)
@@ -190,7 +191,7 @@ identOfBuiltin = \case
   RecordDropFields → r "record_drop_fields"
   ListLength → r "list_length"
   ListIndexL → r "list_indexl"
-  NatFold → r "nat_fold~"
+  NatFold → r "~nat_fold"
   If → r "if"
   NumGte0 → r "is_>=0"
   NumEq → o "=="
@@ -199,6 +200,7 @@ identOfBuiltin = \case
   Wrap → r "wrap"
   Unwrap → r "unwrap"
   Never → r "Never"
+  Any' → r "Any"
  where
   numDesc upper (NumDesc nonneg bits) =
     (if upper then "I" else "i")
