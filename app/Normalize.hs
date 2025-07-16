@@ -236,7 +236,7 @@ postApp = curry \case
     let
       (nTM, nV) = unplus n
      in
-      -- TODO: causes constant re-normalization of `nat_fold` args.
+      -- TODO: causes constant re-normalization of `int+_fold` args.
       (if nV > 0 then normalize [] else id)
         $ repeat nV (App step)
         $ case nTM of
@@ -246,9 +246,9 @@ postApp = curry \case
     if cond
       then normalize [Just $ RecordLit []] thenBranch
       else normalize [Just $ RecordLit []] elseBranch
-  (Builtin NumGte0, NumLit x) → BoolLit $ x >= 0
-  (Builtin NumEq `App` (NumLit l), NumLit r) → BoolLit $ l == r
-  (Builtin NumNeq `App` (NumLit l), NumLit r) → BoolLit $ l /= r
+  (Builtin IntGte0, NumLit x) → BoolLit $ x >= 0
+  (Builtin IntEq `App` (NumLit l), NumLit r) → BoolLit $ l == r
+  (Builtin IntNeq `App` (NumLit l), NumLit r) → BoolLit $ l /= r
   (Builtin Wrap `App` _ty, b) → b
   (Builtin Unwrap `App` _ty, b) → b
   -- Add
@@ -400,8 +400,10 @@ Just a variation of parseQQ that has all the builtins in scope from the start.
 termQQ ∷ QuasiQuoter
 termQQ =
   let
-    wher = Lam QNorm (Ident "n" False) $ Lambda $ Builtin Eq `App` (Var 0) `App` BoolLit True
-    scope = ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList) <> [(Ident "++" True, Builtin $ Add $ NumDesc True BitsInf), (Ident "Where" False, wher)]
+    wher = Lam QNorm (Ident "n" False) $ Lambda $ Builtin Eq `App` BoolLit True `App` Var 0
+    scope =
+      ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList)
+        <> [(Ident "+" True, Builtin $ Add $ NumDesc False BitsInf), (Ident "++" True, Builtin $ Add $ NumDesc True BitsInf), (Ident "Where" False, wher)]
    in
     QuasiQuoter
       { quoteExp = \s → do

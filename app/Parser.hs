@@ -148,9 +148,10 @@ data BuiltinT
   | ListIndexL
   | NatFold
   | If -- TODO: Make Choice counterpart for Record
-  | NumGte0
-  | NumEq
-  | NumNeq
+  | IntGte0
+  | IntEq
+  | IntNeq
+  | TagEq
   | W
   | Wrap
   | Unwrap
@@ -164,7 +165,7 @@ data BuiltinT
 
 builtinsList ∷ Vector BuiltinT
 builtinsList =
-  [Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, NumGte0, NumEq, NumNeq, W, Wrap, Unwrap, Never, Any', IntNeg]
+  [Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, IntGte0, IntEq, IntNeq, TagEq, W, Wrap, Unwrap, Never, Any', IntNeg]
     <> (Num <$> nd)
     <> (Add <$> nd)
     <> (Sub <$> ndSansInf)
@@ -191,11 +192,12 @@ identOfBuiltin = \case
   RecordDropFields → r "record_drop_fields"
   ListLength → r "list_length"
   ListIndexL → r "list_indexl"
-  NatFold → r "~nat_fold"
+  NatFold → r "~int+_fold"
   If → r "if"
-  NumGte0 → r "is_>=0"
-  NumEq → o "=="
-  NumNeq → o "!="
+  IntGte0 → r "int_>=0"
+  IntEq → r "int_/="
+  IntNeq → r "int_=="
+  TagEq → r "tag_=="
   W → r "W"
   Wrap → r "wrap"
   Unwrap → r "unwrap"

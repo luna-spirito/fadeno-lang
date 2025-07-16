@@ -116,7 +116,7 @@ writeMeta ∷ (Has Solve sig m) ⇒ Ident → ExVarId → ExType → TermT → m
 writeMeta n var ty val = do
   stackLog \p → pIdent n <+> ":=" <+> p val
   case ty of
-    ExType ty' → infer val $ Check ty'
+    ExType ty' → local insideEra $ infer val $ Check ty'
     ExSuperType → void $ ensureIsType =<< infer val Infer
   tell $ HM.singleton var val
 
@@ -384,6 +384,9 @@ ensureIsType t =
  where
   fails = stackError \p → p t <> " is not a type?"
 
+insideEra ∷ Vector Binding → Vector Binding
+insideEra = fmap \(_q, a, b, c) → (QNorm, a, b, c)
+
 data InferMode a where
   Infer ∷ InferMode TermT
   Check ∷ TermT → InferMode ()
@@ -494,7 +497,7 @@ infer = logAndRunInfer \case
   (_, Check (Builtin Any')) → pure ()
   (Block (BlockLet q name tyM val into), mode) → runSeqResolve do
     ty ← withResolved \_ → stackScope (\_ → ("let" <+> pQuant q <> pIdent name))
-      $ (if q == QEra then local @(Vector Binding) (fmap \(_q, a, b, c) → (QNorm, a, b, c)) else id)
+      $ (if q == QEra then local insideEra else id)
       $ case tyM of
         Nothing → infer val Infer
         Just ty → do
@@ -728,12 +731,13 @@ typOfBuiltin =
     RecordKeepFields → [termQQ| u : Int+ -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
     RecordDropFields → [termQQ| u : Int+ -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
     ListLength → [termQQ| u : Int+ -@> A : Type+ u -@> List A -> Int+ |]
-    ListIndexL → [termQQ| u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (is_>=0 (int_add (list_length l ++ 1) (int_neg i))) -@> A |]
+    ListIndexL → [termQQ| u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (int_>=0 (int_add (list_length l) (int_neg (i + 1)))) -@> A |]
     NatFold → [termQQ| u : Int+ -@> Acc : (Int+ -> Type+ u) -@> Acc 0 -> (i : Int+ -> Acc i -> Acc (i ++ 1)) -> n : Int+ -> Acc n |]
     If → [termQQ| u : Int+ -@> A : Type+ u -@> cond : Bool -> (Eq true cond -> A) -> (Eq false cond -> A) -> A |]
-    NumGte0 → [termQQ| Int -> Bool |]
-    NumEq → [termQQ| Int -> Int -> Bool |]
-    NumNeq → [termQQ| Int -> Int -> Bool |]
+    IntGte0 → [termQQ| Int -> Bool |]
+    IntEq → [termQQ| Int -> Int -> Bool |]
+    IntNeq → [termQQ| Int -> Int -> Bool |]
+    TagEq → [termQQ| Tag -> Tag -> Bool |]
     W → [termQQ| u : Int+ -@> Type+ u -> Type+ u |]
     Wrap → [termQQ| u : Int+ -@> A : Type+ u -@> A -> W A |]
     Unwrap → [termQQ| u : Int+ -@> A : Type+ u -@> W A -> A |]
@@ -775,6 +779,7 @@ instMeta = (\f a b c d → stackScope (\_ → "instMeta") $ f a b c d) \n1 (ExVa
         Builtin x → pure $ Builtin x
         BoolLit x → pure $ BoolLit x
         NumLit x → pure $ NumLit x
+        TagLit x → pure $ TagLit x
         Pi QNorm inT outT → runSeqResolve do
           inT' ← withResolved \_ → instMeta' inT
           outT' ←
