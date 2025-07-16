@@ -493,17 +493,19 @@ infer = logAndRunInfer \case
   -- However, converting Infer to a Check when checking a term is hereby declared a deadly sin.
   (_, Check (Builtin Any')) → pure ()
   (Block (BlockLet q name tyM val into), mode) → runSeqResolve do
-    ty ← withResolved \_ → stackScope (\_ → ("let" <+> pQuant q <> pIdent name)) case tyM of
-      Nothing → infer val Infer
-      Just ty → do
-        ab ← annoBinds
-        -- TODO: check ty' to be a type?
-        -- EDIT: typechecking is undecidable... so... uh... no?
-        let ty' = normalize ab ty
-        infer val $ Check ty'
-        pure ty'
+    ty ← withResolved \_ → stackScope (\_ → ("let" <+> pQuant q <> pIdent name))
+      $ (if q == QEra then local @(Vector Binding) (fmap \(_q, a, b, c) → (QNorm, a, b, c)) else id)
+      $ case tyM of
+        Nothing → infer val Infer
+        Just ty → do
+          ab ← annoBinds
+          -- TODO: check ty' to be a type?
+          -- EDIT: typechecking is undecidable... so... uh... no?
+          let ty' = normalize ab ty
+          infer val $ Check ty'
+          pure ty'
     val' ← withResolved \exs → do
-      tb ← termBinds
+      tb ← if q == QEra then annoBinds else termBinds -- TODO: I'm not sure what to do with termBinds overall.
       pure $ resolve exs $ normalize tb val
     withResolved \exs →
       withBlockLog (unLambda into)
@@ -657,12 +659,11 @@ infer = logAndRunInfer \case
         stackLog \p → "var" <+> pretty i <+> ":" <+> p ty
         pure ty
       _ → stackError \_ → "Unknown var #" <> pretty i
-  -- TODO: Support dependent...
   (Pi _q inTy outTyE, Check (App (Builtin TypePlus) u)) → runSeqResolve do
     withResolved \_ → infer inTy $ Check $ typOf u
     withResolved \exs → case outTyE of
       Left (n, outTy) → do
-        tb ← termBinds
+        tb ← annoBinds
         scopedVar (const pure) (QNorm, n, Nothing, resolve exs $ normalize tb inTy)
           $ infer (unLambda outTy)
           $ Check
@@ -670,15 +671,18 @@ infer = logAndRunInfer \case
           $ resolve exs
           $ nested u
       Right outTy → infer outTy $ Check $ typOf $ resolve exs u
-  (Pi _q inTy (Right outTy), Infer) → runSeqResolve do
+  (Pi q inTy outTyE, Infer) → runSeqResolve do
     inTyTy ← withResolved \_ → ensureIsType =<< infer inTy Infer
-    withResolved \_ →
-      -- TODO: recheck
+    withResolved \exs →
       withMono
         id
         (stackError \_ → "impossible")
         ( \_ inTyTy' → runSeqResolve do
-            withResolved \_ → infer outTy $ Check inTyTy'
+            withResolved \_ → case outTyE of
+              Left (n, outTy) → do
+                tb ← annoBinds
+                scopedVar (const pure) (q, n, Nothing, resolve exs $ normalize tb inTy) $ infer (unLambda outTy) $ Check inTyTy'
+              Right outTy → infer outTy $ Check inTyTy'
             withResolved \exs2 → pure $ resolve exs2 inTyTy'
         )
         inTyTy
@@ -710,7 +714,7 @@ typOfBuiltin =
     Row → [termQQ| u : Int+ -@> Type+ u -> Type+ u |]
     Record → [termQQ| u : Int+ -@> Row (Type+ u) -> Type+ u |]
     List → [termQQ| u : Int+ -@> Type+ u -> Type+ u |]
-    TypePlus → [termQQ| u : Int+ -> Type+ (u + 1) |]
+    TypePlus → [termQQ| u : Int+ -> Type+ (u ++ 1) |]
     Eq → [termQQ| Any -> Any -> Type+ 0 |]
     Refl → [termQQ| u : Int+ -@> a : Type+ u -@> x : a -@> Eq x x |]
     RecordGet →
@@ -724,8 +728,8 @@ typOfBuiltin =
     RecordKeepFields → [termQQ| u : Int+ -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
     RecordDropFields → [termQQ| u : Int+ -@> row : Row (Type+ u) -@> List Tag -> Record row -> Record row |]
     ListLength → [termQQ| u : Int+ -@> A : Type+ u -@> List A -> Int+ |]
-    ListIndexL → [termQQ| u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (is_>=0 (int_add (list_length l + 1) (int_neg i))) -@> A |]
-    NatFold → [termQQ| u : Int+ -@> Acc : (Int+ -> Type+ u) -@> Acc 0 -> (i : Int+ -> Acc i -> Acc (i + 1)) -> n : Int+ -> Acc n |]
+    ListIndexL → [termQQ| u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (is_>=0 (int_add (list_length l ++ 1) (int_neg i))) -@> A |]
+    NatFold → [termQQ| u : Int+ -@> Acc : (Int+ -> Type+ u) -@> Acc 0 -> (i : Int+ -> Acc i -> Acc (i ++ 1)) -> n : Int+ -> Acc n |]
     If → [termQQ| u : Int+ -@> A : Type+ u -@> cond : Bool -> (Eq true cond -> A) -> (Eq false cond -> A) -> A |]
     NumGte0 → [termQQ| Int -> Bool |]
     NumEq → [termQQ| Int -> Int -> Bool |]

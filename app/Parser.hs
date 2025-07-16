@@ -332,8 +332,10 @@ sepBy with x = ((:) <$> x <*> many (with *> x)) <|> pure []
 -- Syntax is *a little* ambigious. I'm very sorry.
 
 -- Standalone '='
-parseEq ∷ Parser' ()
-parseEq = token $ notFollowedBy $(char '=') identSym
+parseEq ∷ Parser' Quant
+parseEq = token $ notFollowedBy (q <* $(char '=')) identSym
+ where
+  q = ($(char '@') $> QEra) <|> pure QNorm
 
 findVar ∷ ByteString → Parser' (Maybe (Int, Quant, Bool))
 findVar name = do
@@ -356,7 +358,7 @@ parsePrim = token do
               token $(char '{')
               let parseField = do
                     n ← parsePrim
-                    parseEq
+                    _todo ← parseEq
                     v ← parseTop
                     pure (n, v)
               knownFields ← fromList <$> sepBy (token $(char '|')) parseField
@@ -396,9 +398,7 @@ parsePrim = token do
       accesses
 
 insideEra ∷ ParserContext → ParserContext
-insideEra = fmap $ first \case
-  QEra → QNorm
-  QNorm → QNorm
+insideEra = fmap $ first \_ → QNorm
 
 -- 6
 parseApp ∷ Parser' TermT
@@ -455,8 +455,8 @@ parseInfixOps = infxl parseTy parseOperator'
 
 insideLet ∷ Quant → ParserContext → ParserContext
 insideLet = \case
-  QEra → id
-  QNorm → insideEra
+  QEra → insideEra
+  QNorm → id
 
 -- 1
 parseBlock ∷ Parser' TermT
@@ -465,10 +465,9 @@ parseBlock = do
     binding = do
       ty ← optional do
         token $(string "/:")
-        parseInfixOps
-      q ← ($(char '@') $> QEra) <|> pure QNorm
+        local insideEra parseInfixOps
       name ← ident
-      parseEq
+      q ← parseEq
       expr ← local (insideLet q) $ parseTop
       pure (q, name, ty, expr)
     someEntries =
@@ -611,9 +610,10 @@ pTerm (oldPrec, vars) =
               BlockLet q name tyM val in_ →
                 let entry =
                       ( maybe mempty (\ty → "/:" <+> pTerm (2, vars') ty <> line) tyM -- TODO: split if complicated type
-                          <> pQuant q
                           <> pIdent name
-                          <+> annotate (color Cyan) "=" <> softline <> nest 2 (pTerm (0, insideLet q vars') val)
+                          <+> annotate (color Cyan) (pQuant q <> "=")
+                            <> softline
+                            <> nest 2 (pTerm (0, insideLet q vars') val)
                       )
                     (entries, rest, vars'') = go ((q, name) <| vars') $ unLambda in_
                  in (entry : entries, rest, vars'')

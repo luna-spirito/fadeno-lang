@@ -401,7 +401,7 @@ termQQ ∷ QuasiQuoter
 termQQ =
   let
     wher = Lam QNorm (Ident "n" False) $ Lambda $ Builtin Eq `App` (Var 0) `App` BoolLit True
-    scope = ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList) <> [(Ident "+" True, Builtin $ Add $ NumDesc True BitsInf), (Ident "Where" False, wher)]
+    scope = ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList) <> [(Ident "++" True, Builtin $ Add $ NumDesc True BitsInf), (Ident "Where" False, wher)]
    in
     QuasiQuoter
       { quoteExp = \s → do
