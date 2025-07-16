@@ -355,23 +355,28 @@ nestedBy by =
 nested ∷ TermT → TermT
 nested = nestedBy 1
 
-normalize ∷ Vector (Maybe TermT) → TermT → TermT
-normalize origBinds =
+normalize' ∷ Int → Vector (Maybe TermT) → TermT → TermT
+normalize' origLocals origBinds =
   runIdentity
     . rewrite
-      (\new old → Just new <| (fmap nested <$> old))
-      (\old → Nothing <| (fmap nested <$> old))
-      ( \term binds → case term of
+      (\new (locals, old) → (locals + 1, Just new <| (fmap nested <$> old)))
+      (\(locals, old) → (locals + 1, Nothing <| (fmap nested <$> old)))
+      ( \term (locals, binds) → case term of
           Var i →
             pure
               $ Just
-              $ let (before, after) = splitAt i binds
-                 in case after of
-                      (viewl → Just (Just val, _)) → val
-                      _ → Var $ i - foldl' (\acc x → if isJust x then acc + 1 else acc) 0 before
+              $ case binds !? i of
+                Just (Just val) → val
+                _ →
+                  let (potentiallyErasableBindings, _) = splitAt (min i locals) binds
+                   in Var $ i - foldl' (\acc x → if isJust x then acc + 1 else acc) 0 potentiallyErasableBindings
           _ → pure Nothing
       )
-      origBinds
+      (origLocals, origBinds)
+
+-- | Fully normalize a term inside of the context.
+normalize ∷ Vector (Maybe TermT) → TermT → TermT
+normalize = normalize' 0
 
 rewriteTerm ∷ TermT → TermT → TermT → Maybe TermT
 rewriteTerm what0 with0 =
@@ -387,7 +392,7 @@ rewriteTerm what0 with0 =
       (what0, with0)
 
 applyLambda ∷ Lambda TermT → TermT → TermT
-applyLambda bod val = normalize [Just val] $ unLambda bod
+applyLambda bod val = normalize' 1 [Just val] $ unLambda bod
 
 {- | Parse builtin
 Just a variation of parseQQ that has all the builtins in scope from the start.

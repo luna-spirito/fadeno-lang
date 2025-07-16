@@ -18,7 +18,7 @@ import Data.ByteString.Char8 (pack)
 import Data.List (find, sortBy)
 import Data.RRBVector (Vector, deleteAt, ifoldr, viewl, (!?), (<|))
 import GHC.Exts (IsList (..))
-import Normalize (Binding, EqRes (..), Resolved, concat, insertBinds, isEq', nested, nestedBy, normalize, numDecDispatch, resolve, resolve', rewrite, rewriteTerm, runSeqResolve, termQQ, withResolved)
+import Normalize (Binding, EqRes (..), Resolved, applyLambda, concat, insertBinds, isEq', nested, nestedBy, normalize, numDecDispatch, resolve, resolve', rewrite, rewriteTerm, runSeqResolve, termQQ, withResolved)
 import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pQuant, pTerm, parse, recordOf, render, rowOf, typOf)
 import Prettyprinter (Doc, annotate, group, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
@@ -257,7 +257,7 @@ withMono' foralls mapTerm onMeta onOther = go
     Pi QEra x yE | foralls → stackScope (\_ → "(unwrapped forall)") do
       exId ← fresh
       case yE of
-        Left (n, body) → scopedExVar mapTerm (exId, ExType x) $ go $ normalize [Just $ ExVar n (ExVarId [exId]) $ ExType x] $ unLambda body
+        Left (n, body) → scopedExVar mapTerm (exId, ExType x) $ go $ applyLambda body $ ExVar n (ExVarId [exId]) $ ExType x
         Right body → mapTerm (pure . Pi QEra x . Right) =<< go body
     r → onOther [] r
 
@@ -335,7 +335,7 @@ rowGet mapTerm tag cont = go
                   recordL = select RecordKeepFields
                   recordR = select RecordDropFields
                 r' ← withResolved \exs → case rE of
-                  Left (_, r) → go (normalize [Just recordL] $ resolve exs $ unLambda r) recordR
+                  Left (_, r) → go (resolve exs $ applyLambda r recordL) recordR
                   Right r → go (resolve exs r) $ recordR
                 case r' of
                   LookupMissing visited2 → pure $ LookupMissing $ visited1 <> visited2
@@ -453,7 +453,7 @@ inferApp q f a = runSeqResolve do
             withResolved \exs3 → case outTE of
               Left (_, outT) → do
                 ab ← annoBinds
-                pure $ resolve exs3 $ normalize [Just $ normalize ab a] $ unLambda outT
+                pure $ resolve exs3 $ applyLambda outT (normalize ab a)
               Right outT → pure $ resolve exs3 outT
           t → stackError \p → "inferApp" <+> pretty (show q) <+> p t
       )
@@ -473,6 +473,11 @@ logAndRunInfer f t mode =
         when (t /= BuiltinsVar) $ stackLog \p → p res
         pure res
       Check t' → scope (\p → p t') act
+
+withBlockLog ∷ (Has Solve sig m) ⇒ TermT → m a → m a
+withBlockLog into act = case into of
+  Block{} → act
+  _ → stackScope (\_ → "in") act
 
 numFitsInto ∷ Integer → NumDesc → Bool
 numFitsInto x d =
@@ -496,14 +501,11 @@ infer = logAndRunInfer \case
         let ty' = normalize ab ty
         infer val $ Check ty'
         pure ty'
-    val' ← withResolved \_ → do
+    val' ← withResolved \exs → do
       tb ← termBinds
-      pure $ normalize tb val
-    let withLog act = case (unLambda into) of
-          Block{} → act
-          _ → stackScope (\_ → "in") act
+      pure $ resolve exs $ normalize tb val
     withResolved \exs →
-      withLog
+      withBlockLog (unLambda into)
         $ scopedVar (mapTermFor mode) (q, name, Just val', ty)
         $ infer (unLambda into)
         $ resolveMode exs
@@ -519,7 +521,7 @@ infer = logAndRunInfer \case
         (mapTermFor mode)
         (stackError \_ → "Type of rewrite must be known")
         ( \_ → \case
-            Builtin Eq `App` simple `App` complicated → case mode of
+            Builtin Eq `App` simple `App` complicated → withBlockLog inner $ case mode of
               Infer → runSeqResolve do
                 innerTy ← withResolved \_ → infer inner Infer
                 withResolved \exs2 → rewriteTerm' (resolve exs2 complicated) (resolve exs2 simple) innerTy
@@ -532,7 +534,7 @@ infer = logAndRunInfer \case
   (AppErased f a, Infer) → inferApp QEra f a
   (term, Check (Pi QEra xTy (Left (n, yT)))) → do
     uniId ← fresh
-    scopedUniVar (const pure) uniId $ infer term $ Check $ normalize [Just $ UniVar n uniId xTy] $ unLambda yT
+    scopedUniVar (const pure) uniId $ infer term $ Check $ applyLambda yT $ UniVar n uniId xTy
   (term, Check (Pi QEra _ (Right yT))) → infer term $ Check yT
   (Lam QNorm n bod, Infer) → do
     inT ← fresh
@@ -809,13 +811,13 @@ subtype = \a b →
       uniId ← fresh
       scopedUniVar (const pure) uniId
         $ subtype t
-        $ normalize [Just $ UniVar n uniId k]
-        $ unLambda body
+        $ applyLambda body
+        $ UniVar n uniId k
     -- Pi QEra x:K. Body <: T => Introduce ExVar for x
     (Pi QEra k (Left (n, body)), t) → do
       exId ← fresh
       scopedExVar (\_ _ → stackError \_ → "Unresolved existential" <+> pIdent n) (exId, ExType k)
-        $ subtype (normalize [Just $ ExVar n (ExVarId [exId]) $ ExType k] $ unLambda body) t
+        $ subtype (applyLambda body (ExVar n (ExVarId [exId]) $ ExType k)) t
 
     -- Function Types (Πx:T1.U1 <: Πy:T2.U2)
     (Pi q1 inT1 outT1E, Pi q2 inT2 outT2E) | q1 == q2 → runSeqResolve do
@@ -827,8 +829,8 @@ subtype = \a b →
               uniId ← fresh
               scopedUniVar (const pure) uniId do
                 let var = UniVar name uniId inT2 -- Use common name/type for substitution
-                let body1 = resolve exs $ either id (normalize [Just var] . unLambda) bod1
-                let body2 = resolve exs $ either id (normalize [Just var] . unLambda) bod2
+                let body1 = resolve exs $ either id (`applyLambda` var) bod1
+                let body2 = resolve exs $ either id (`applyLambda` var) bod2
                 subtype body1 body2
          in case (outT1E, outT2E) of
               -- Both non-dependent
@@ -898,8 +900,8 @@ subtype = \a b →
       uniId ← fresh
       withResolved \exs → scopedUniVar (const pure) uniId do
         let var = UniVar n uniId l1
-        let body1 = resolve exs $ normalize [Just var] $ unLambda lr1
-        let body2 = resolve exs $ normalize [Just var] $ unLambda lr2
+        let body1 = resolve exs $ applyLambda lr1 var
+        let body2 = resolve exs $ applyLambda lr2 var
         subtype body1 body2
 
     -- Catch-all: if no rule matches, check equality
