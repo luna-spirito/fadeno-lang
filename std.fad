@@ -1,7 +1,6 @@
 unpack fadeno. Type+ Int+ Int Tag List Bool Eq refl Row Record list_length list_indexl
 if W int_>=0 wrap unwrap ~int+_fold Never Any int_neg tag_==
 
-
 _++_ = fadeno.int+_add
 _+_ = fadeno.int_add
 _-_ = \a b. a + (int_neg b)

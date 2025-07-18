@@ -253,26 +253,28 @@ data BlockT
 
 data TermT
   = -- Term-level
-
-    -- | Annotations only allowed on Block.
-    Block !BlockT
-  | Lam !Quant !Ident !(Lambda TermT)
-  | App !TermT !TermT
-  | AppErased !TermT !TermT -- TODO: Maybe
-  | NumLit !Integer
+    NumLit !Integer
   | TagLit !Ident
   | BoolLit !Bool
-  | Sorry
-  | Var !Int
-  | ListLit !(Vector' TermT)
+  | --
+    ListLit !(Vector' TermT)
   | RecordLit !(Vector' (TermT, TermT))
+  | -- | Annotations only allowed on Block.
+    Lam !Quant !Ident !(Lambda TermT)
+  | App !TermT !TermT
+  | AppErased !TermT !TermT -- TODO: Maybe
+  | Var !Int
+  | --
+    BuiltinsVar
+  | Builtin !BuiltinT
+  | --
+    Block !BlockT
+  | Sorry
   | -- Type-level
 
     -- | Cedille: Π x : T | T' / Fadeno: x : T -> T' or x : T -@> T'
     Pi !Quant !TermT !(Either (Ident, Lambda TermT) TermT)
   | Concat !TermT !(Either (Ident, Lambda TermT) TermT)
-  | Builtin !BuiltinT
-  | BuiltinsVar
   | ExVar !Ident !ExVarId !ExType
   | UniVar !Ident !Int !TermT
   deriving (Show, Eq, Lift)

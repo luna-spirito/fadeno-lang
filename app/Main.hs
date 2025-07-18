@@ -733,7 +733,7 @@ typOfBuiltin =
     ListLength → [termQQ| u : Int+ -@> A : Type+ u -@> List A -> Int+ |]
     ListIndexL → [termQQ| u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (int_>=0 (int_add (list_length l) (int_neg (i + 1)))) -@> A |]
     NatFold → [termQQ| u : Int+ -@> Acc : (Int+ -> Type+ u) -@> Acc 0 -> (i : Int+ -> Acc i -> Acc (i ++ 1)) -> n : Int+ -> Acc n |]
-    If → [termQQ| u : Int+ -@> A : Type+ u -@> cond : Bool -> (Eq true cond -> A) -> (Eq false cond -> A) -> A |]
+    If → [termQQ| u : Int+ -@> A : Type+ u -@> cond : Bool -> (Eq cond true -> A) -> (Eq cond false -> A) -> A |]
     IntGte0 → [termQQ| Int -> Bool |]
     IntEq → [termQQ| Int -> Int -> Bool |]
     IntNeq → [termQQ| Int -> Int -> Bool |]
