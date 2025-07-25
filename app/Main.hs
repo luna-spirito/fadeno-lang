@@ -19,7 +19,7 @@ import Data.List (find, sortBy)
 import Data.RRBVector (Vector, deleteAt, ifoldr, viewl, (!?), (<|))
 import GHC.Exts (IsList (..))
 import Normalize (Binding, EqRes (..), Resolved, applyLambda, concat, insertBinds, isEq', nested, nestedBy, normalize, numDecDispatch, resolve, resolve', rewrite, rewriteTerm, runSeqResolve, termQQ, withResolved)
-import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pIdent, pQuant, pTerm, parse, recordOf, render, rowOf, typOf)
+import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, intercept, pIdent, pQuant, pTerm, parse, recordOf, render, rowOf, typOf)
 import Prettyprinter (Doc, annotate, group, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, filter, link, local, runReader, toList)
@@ -27,10 +27,6 @@ import RIO.HashMap qualified as HM
 
 -- TODO: You currently don't perform `resolve` in terms processed...
 -- This is probably an error.
-
--- censor + listen
-intercept ∷ ∀ w m sig a. (Has (Writer w) sig m, Monoid w) ⇒ m a → m (w, a)
-intercept = censor @w (const mempty) . listen @w
 
 -- | Debug stack
 data StackLog m a where

@@ -417,7 +417,10 @@ termQQ =
       , quoteDec = error "termQQ: No declaration support"
       }
 
-normalizeFile ∷ FilePath → IO ()
-normalizeFile x = do
-  t ← parseFile x
+normalizeSource ∷ ByteString → IO ()
+normalizeSource x = do
+  let t = either (error . show) id $ parse [] x
   render $ pTerm (0, []) $ normalize [] t
+
+normalizeFile ∷ FilePath → IO ()
+normalizeFile x = normalizeSource =<< readFileBinary x

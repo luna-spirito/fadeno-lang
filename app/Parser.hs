@@ -14,11 +14,13 @@ module Parser (
   eqOf,
   formatFile,
   identOfBuiltin,
+  intercept,
   pIdent,
   pQuant,
   pTerm,
   parse,
   parseFile,
+  parseSource,
   recordGet,
   recordOf,
   render,
@@ -27,8 +29,10 @@ module Parser (
   typOf,
 ) where
 
+import Control.Algebra
 import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.State.Church (evalState, get, modify)
+import Control.Carrier.Writer.Church (Writer, censor, listen)
 import Control.Effect.Empty qualified as E
 import Data.ByteString.Char8 qualified as BS
 import Data.Hashable (Hashable (..))
@@ -44,6 +48,10 @@ import RIO hiding (Reader, Vector, ask, local, toList, try)
 
 -- TODO ASAP: assocativity for operators. YeAh, TuRns oUT wE NeEd iT, wHo coUlD hAvE GuESseD?
 -- (6 - 4 - 2 ≠ 6 - (4 - 2))
+
+-- censor + listen
+intercept ∷ ∀ w m sig a. (Has (Writer w) sig m, Monoid w) ⇒ m a → m (w, a)
+intercept = censor @w (const mempty) . listen @w
 
 data Ident = Ident !ByteString !Bool -- raw name, is operator
   deriving (Show, Eq, Ord, Generic, Lift)
@@ -216,8 +224,6 @@ identOfBuiltin = \case
       <> (if nonneg then "+" else mempty)
   -- \| regular
   r x = x `Ident` False
-  -- \| op
-  o x = x `Ident` True
 
 newtype Lambda a = Lambda {unLambda ∷ a}
   deriving (Show, Eq, Lift)
@@ -273,7 +279,7 @@ data TermT
   | -- Type-level
 
     -- | Cedille: Π x : T | T' / Fadeno: x : T -> T' or x : T -@> T'
-    Pi !Quant !TermT !(Either (Ident, Lambda TermT) TermT)
+    Pi !Quant !TermT !(Either (Ident, Lambda TermT) TermT) -- TODO: Demote Pi and Concat to builtins?
   | Concat !TermT !(Either (Ident, Lambda TermT) TermT)
   | ExVar !Ident !ExVarId !ExType
   | UniVar !Ident !Int !TermT
@@ -691,8 +697,11 @@ parse vars inp = case runParser (parseTop <* eof) vars 0 inp of
   Err e → Left $ "Unable to parse at " <> tshow (posLineCols inp [e])
   _ → Left "Internal error: uncaught failure"
 
+parseSource ∷ ByteString → IO TermT
+parseSource x = pure $ either (error . show) id $ parse [] x
+
 parseFile ∷ FilePath → IO TermT
-parseFile x = either (error . show) id . parse [] <$> readFileBinary x
+parseFile x = parseSource =<< readFileBinary x
 
 render ∷ Doc AnsiStyle → IO ()
 render x = renderIO stdout $ layoutSmart defaultLayoutOptions $ x <> line
