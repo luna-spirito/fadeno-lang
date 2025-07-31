@@ -13,7 +13,7 @@ import Data.ByteString.Char8 (pack)
 import Data.Monoid (Any (..))
 import Data.RRBVector (Vector, deleteAt, ifoldr, splitAt, viewl, (!?), (<|))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId, Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm, parse, parseFile, recordGet, render)
+import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId, Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm, parse, recordGet, render)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try)
 import RIO.HashMap qualified as HM
 
