@@ -1,5 +1,5 @@
 -- This is absolutely horrfying and has strict limits which aren't even checked properly
-module Compiler () where
+module Compiler (compileFile) where
 
 import Control.Algebra
 import Control.Carrier.State.Church (State, StateC, get, put, runState)
@@ -7,14 +7,12 @@ import Control.Carrier.Writer.Church (Writer, censor, execWriter, tell)
 import Data.IntMap.Strict (toAscList)
 import Data.IntMap.Strict qualified as IM
 import Data.IntSet (maxView, member)
-import Data.IntSet qualified as IS
 import Data.List (sortBy)
 import Data.RRBVector (Vector, imap, replicate, splitAt, viewr, zip, (<|), (|>))
 import Data.Serialize qualified as S
-import Data.Tuple (swap)
 import GHC.Exts (IsList (..))
 import Normalize (rewrite)
-import Parser (BlockT (..), BuiltinT (..), Ident (..), Lambda (..), Quant (..), TermT (..), Vector' (..), intercept, parseFile)
+import Parser (Bits (..), BlockT (..), BuiltinT (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), parseFile)
 import RIO hiding (Vector, replicate, toList, zip)
 import RIO.ByteString qualified as B
 import RIO.HashMap qualified as HM
@@ -174,8 +172,8 @@ compile' = \case
     instr IPushVar
     compile' $ unLambda body
     instr $ IPopVar 1
-  Block (BlockLet QEra _ _ _ body) → undefined
-  Block (BlockRewrite _ body) → undefined
+  Block (BlockLet QEra _ _ _ _) → undefined
+  Block (BlockRewrite _ _) → undefined
   Sorry → instr $ IPush VPanic
   Pi q inT outT → error "TODO"
   Concat aT bT → error "TODO"
@@ -313,4 +311,4 @@ compileFile file = do
   writeFileBinary (fromMaybe file (stripSuffix ".fad" file) <> ".fadobj") $ S.runPut do
     S.putListOf (\(Ident n op) → putB n *> S.put op) $ registryToList tags
     S.putListOf putTagProfile $ registryToList profiles
-    S.putListOf putInstr merged
+    S.putListOf putInstr $ toList merged
