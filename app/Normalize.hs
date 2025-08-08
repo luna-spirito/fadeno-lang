@@ -13,7 +13,7 @@ import Data.ByteString.Char8 (pack)
 import Data.Monoid (Any (..))
 import Data.RRBVector (Vector, deleteAt, ifoldr, splitAt, viewl, (!?), (<|))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId, Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm, parse, recordGet, render)
+import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId, Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm, parse, recordGet, render)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try)
 import RIO.HashMap qualified as HM
 
@@ -26,7 +26,7 @@ data EqRes
   | EqUnknown
 
 type Resolved = HashMap ExVarId TermT
-type Binding = (Quant, Ident, Maybe TermT, Maybe TermT)
+type Binding = (Quant, Maybe Ident, Maybe TermT, Maybe TermT)
 
 resolve' ∷ Int → Resolved → TermT → TermT
 resolve' _ (HM.null → True) = id
@@ -113,16 +113,12 @@ isEq' f = curry \case
   (_, BuiltinsVar) → pure EqNot
   -- TODO: Handle mixed?
   -- Shame.
-  (Pi q1 inT1 (Left (i, outT1)), Pi q2 inT2 (Left (_, outT2)))
+  (Pi q1 i1 inT1 outT1, Pi q2 i2 inT2 outT2)
     | q1 == q2 → runSeqResolve
         $ force (withResolved \_ → isEq' f inT1 inT2)
         $ withResolved \exs →
-          local (insertBinds (QNorm, i, Nothing, Just $ resolve exs inT1))
+          local (insertBinds (QNorm, i1 <|> i2, Nothing, Just $ resolve exs inT1))
             $ isEq' f (resolve' 1 exs $ unLambda outT1) (resolve' 1 exs $ unLambda outT2)
-  (Pi q1 inT1 (Right outT1), Pi q2 inT2 (Right outT2))
-    | q1 == q2 → runSeqResolve
-        $ force (withResolved \_ → isEq' f inT1 inT2)
-        $ withResolved \exs → isEq' f (resolve exs outT1) (resolve exs outT2)
   (Pi{}, _) → pure EqNot
   (Concat _ _, _) → error "TODO isEq Concat"
   (ListLit (Vector' (viewl → Just (x, xs))), ListLit (Vector' (viewl → Just (y, ys)))) →
@@ -132,21 +128,26 @@ isEq' f = curry \case
   (ListLit (Vector' (null → True)), ListLit (Vector' (null → True))) → pure EqYes
   (ListLit _, _) → pure EqNot
   -- TODO: This is greedy, which is bad. Should uwrap lazily.
-  (RecordLit (Vector' (viewl → Just ((tagx, x), xs))), RecordLit (Vector' origY)) →
-    ifoldr
-      ( \i (tagy, y) rec →
-          runSeqResolve
-            $ (withResolved \_ → isEq' f tagx tagy)
-            >>= \case
-              EqYes → force (withResolved \exs → isEq' f (resolve exs x) (resolve exs y))
-                $ withResolved \exs → isEq' f (RecordLit $ Vector' $ bimap (resolve exs) (resolve exs) <$> xs) (RecordLit $ Vector' $ bimap (resolve exs) (resolve exs) <$> deleteAt i origY)
-              EqNot → lift $ rec
-              EqUnknown → pure EqUnknown
-      )
-      (pure EqNot)
-      origY
-  (RecordLit (Vector' (null → True)), RecordLit (Vector' (null → True))) → pure EqYes
-  (RecordLit _, _) → pure EqNot
+  (FieldsLit f1 (Vector' (viewl → Just ((tagx, x), xs))), FieldsLit f2 (Vector' origY))
+    | f1 == f2 →
+        ifoldr
+          ( \i (tagy, y) rec →
+              runSeqResolve
+                $ (withResolved \_ → isEq' f tagx tagy)
+                >>= \case
+                  EqYes → force (withResolved \exs → isEq' f (resolve exs x) (resolve exs y))
+                    $ withResolved \exs →
+                      isEq'
+                        f
+                        (FieldsLit f1 $ Vector' $ bimap (resolve exs) (resolve exs) <$> xs)
+                        (FieldsLit f1 $ Vector' $ bimap (resolve exs) (resolve exs) <$> deleteAt i origY)
+                  EqNot → lift $ rec
+                  EqUnknown → pure EqUnknown
+          )
+          (pure EqNot)
+          origY
+  (FieldsLit f1 (Vector' (null → True)), FieldsLit f2 (Vector' (null → True))) | f1 == f2 → pure EqYes
+  (FieldsLit{}, _) → pure EqNot
  where
   -- TODO: FRow???
   try act cont =
@@ -165,7 +166,8 @@ isEq a b =
     Nothing → EqNot
 
 builtinsVar ∷ TermT
-builtinsVar = RecordLit $ Vector' $ (\b → (TagLit $ identOfBuiltin b, Builtin b)) <$> builtinsList
+builtinsVar = FieldsLit (FRecord ()) $ Vector' $ (\b → (TagLit $ identOfBuiltin b, Builtin b)) <$> builtinsList
+
 data NormCtx
   = NormBinds !(Vector (Maybe TermT))
   | NormRewrite !TermT !TermT -- on normalized
@@ -175,17 +177,17 @@ data ListDropRes = TDFound !(Vector' TermT) | TDMissing | TDUnknown
 -- | Produces a non-dependent concat.
 concat ∷ TermT → TermT → TermT
 concat = curry \case
-  (RecordLit l, RecordLit r) → RecordLit $ l <> r
-  (l, r) → Concat l $ Right r
+  (FieldsLit (FRecord ()) l, FieldsLit (FRecord ()) r) → FieldsLit (FRecord ()) $ l <> r
+  (l, r) → Concat l $ FRecord r
 
 unconsField ∷ TermT → Maybe ((TermT, TermT), TermT)
 unconsField = \case
-  Concat l (Right (Concat m (Right r))) → unconsField $ concat l $ concat m r
-  Concat (RecordLit (Vector' fi)) (Right r) → case viewl fi of
-    Just (x, xs) → Just (x, concat (RecordLit $ Vector' xs) r)
+  Concat (Concat l (FRecord m)) (FRecord r) → unconsField $ concat l $ concat m r
+  Concat (FieldsLit (FRecord ()) (Vector' fi)) (FRecord r) → case viewl fi of
+    Just (x, xs) → Just (x, concat (FieldsLit (FRecord ()) $ Vector' xs) r)
     Nothing → unconsField r
-  RecordLit (Vector' fi) → case viewl fi of
-    Just (x, xs) → Just (x, RecordLit $ Vector' xs)
+  FieldsLit (FRecord ()) (Vector' fi) → case viewl fi of
+    Just (x, xs) → Just (x, FieldsLit (FRecord ()) $ Vector' xs)
     Nothing → Nothing
   _ → Nothing
 
@@ -226,7 +228,7 @@ postApp = curry \case
           EqUnknown → recordGet name1 a'
      in
       search a
-  (Builtin RecordKeepFields `App` ListLit tags, a) → RecordLit $ (\tag → (tag, recordGet tag a)) <$> tags
+  (Builtin RecordKeepFields `App` ListLit tags, a) → FieldsLit (FRecord ()) $ (\tag → (tag, recordGet tag a)) <$> tags
   (Builtin RecordDropFields `App` ListLit tags, a) → recordDropFields tags a
   (Builtin ListLength, ListLit (Vector' fi)) → NumLit $ fromIntegral $ length fi
   (f@(Builtin ListIndexL `App` ListLit (Vector' vals) `App` NumLit i), a) → case vals !? fromIntegral i of
@@ -244,8 +246,8 @@ postApp = curry \case
           Just nT → Builtin NatFold `App` start `App` step `App` nT
   (Builtin If `App` (BoolLit cond) `App` thenBranch, elseBranch) →
     if cond
-      then normalize [Just $ RecordLit []] thenBranch
-      else normalize [Just $ RecordLit []] elseBranch
+      then normalize [Just $ FieldsLit (FRecord ()) []] thenBranch
+      else normalize [Just $ FieldsLit (FRecord ()) []] elseBranch
   (Builtin IntGte0, NumLit x) → BoolLit $ x >= 0
   (Builtin IntEq `App` (NumLit l), NumLit r) → BoolLit $ l == r
   (Builtin IntNeq `App` (NumLit l), NumLit r) → BoolLit $ l /= r
@@ -276,7 +278,7 @@ postApp = curry \case
 
   recordDropFields ∷ Vector' TermT → TermT → TermT
   recordDropFields tags fields0 = case tags of
-    Vector' (null → True) → RecordLit []
+    Vector' (null → True) → FieldsLit (FRecord ()) []
     _ →
       let
         stuck = App (App (Builtin RecordDropFields) $ ListLit tags) fields0
@@ -286,7 +288,7 @@ postApp = curry \case
           Just ((n, v), fields) → case listLitDrop n tags of
             TDFound tags' → recordDropFields tags' fields
             TDMissing →
-              concat (RecordLit [(n, v)]) $ recordDropFields tags fields
+              concat (FieldsLit (FRecord ()) [(n, v)]) $ recordDropFields tags fields
             TDUnknown → stuck
 
 -- Erases, rewrites & simplifies. In that order. Doesn't rewrite the simplified result.
@@ -317,23 +319,15 @@ rewrite onLet onNest rewriter = go
     TagLit x → pure $ TagLit x
     BoolLit x → pure $ BoolLit x
     ListLit (Vector' vec) → ListLit . Vector' <$> traverse (go via) vec
-    RecordLit (Vector' vec) → RecordLit . Vector' <$> traverse (bitraverse (go via) (go via)) vec
+    FieldsLit fi (Vector' vec) → FieldsLit fi . Vector' <$> traverse (bitraverse (go via) (go via)) vec
     Sorry → pure Sorry
     Var i → pure $ Var i
     Builtin x → pure $ Builtin x
     BuiltinsVar → pure builtinsVar
-    Pi q inT outT → do
-      inT' ← go via inT
-      outT' ← case outT of
-        Left (n, x) → Left . (n,) . Lambda <$> go (onNest via) (unLambda x)
-        Right x → Right <$> go via x
-      pure $ Pi q inT' outT'
-    Concat a b → do
-      a' ← go via a
-      b' ← either (\(n, b') → Left . (n,) . Lambda <$> go (onNest via) (unLambda b')) (fmap Right . go via) b
-      pure $ case (a', b') of
-        (RecordLit a'', Right (RecordLit b'')) → RecordLit $ a'' <> b''
-        _ → Concat a' b'
+    Pi q n inT outT → Pi q n <$> go via inT <*> (Lambda <$> go (onNest via) (unLambda outT))
+    Concat a b → case b of
+      FRecord b' → concat <$> go via a <*> go via b'
+      FRow (i, b') → Concat <$> go via a <*> (FRow . (i,) . Lambda <$> go (onNest via) (unLambda b'))
     ExVar n i t →
       ExVar n i <$> case t of
         ExType t' → ExType <$> go via t'
@@ -400,10 +394,10 @@ Just a variation of parseQQ that has all the builtins in scope from the start.
 termQQ ∷ QuasiQuoter
 termQQ =
   let
-    wher = Lam QNorm (Ident "n" False) $ Lambda $ Builtin Eq `App` BoolLit True `App` Var 0
+    wher = Lam QNorm (Just $ Ident "n" False) $ Lambda $ Builtin Eq `App` BoolLit True `App` Var 0
     scope =
-      ((\b → (identOfBuiltin b, Builtin b)) <$> builtinsList)
-        <> [(Ident "+" True, Builtin $ Add $ NumDesc False BitsInf), (Ident "++" True, Builtin $ Add $ NumDesc True BitsInf), (Ident "Where" False, wher)]
+      ((\b → (Just $ identOfBuiltin b, Builtin b)) <$> builtinsList)
+        <> [(Just $ Ident "+" True, Builtin $ Add $ NumDesc False BitsInf), (Just $ Ident "++" True, Builtin $ Add $ NumDesc True BitsInf), (Just $ Ident "Where" False, wher)]
    in
     QuasiQuoter
       { quoteExp = \s → do
