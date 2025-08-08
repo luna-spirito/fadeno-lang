@@ -25,7 +25,7 @@ data EqRes
   | EqNot -- provably uneq
   | EqUnknown
 
-type Resolved = HashMap ExVarId TermT
+type Resolved = HashMap ExVarId (Int, TermT) -- int for locals
 type Binding = (Quant, Maybe Ident, Maybe TermT, Maybe TermT)
 
 resolve' ∷ Int → Resolved → TermT → TermT
@@ -37,8 +37,8 @@ resolve' nest exs =
       (+ 1)
       ( \term locs → pure $ case term of
           ExVar _ ex2 _
-            | Just val ← ex2 `HM.lookup` exs →
-                Just $ nestedBy locs val
+            | Just (expectedLocs, val) ← ex2 `HM.lookup` exs →
+                Just $ nestedBy (locs - expectedLocs) val
           _ → Nothing
       )
       nest
@@ -64,7 +64,7 @@ insertBinds (i, nQ, nV, nTy) old = (i, nQ, nested <$> nV, nested <$> nTy) <| (bi
 {- | Checks if two normalized terms are intensionally equivalent.
 TODO: η-conversion
 -}
-isEq' ∷ (Has (Reader (Vector Binding) :+: Writer Resolved) sig m) ⇒ (Ident → ExVarId → ExType → TermT → m ()) → TermT → TermT → m EqRes
+isEq' ∷ (Has (Reader (Vector Binding) :+: Writer Resolved) sig m) ⇒ (Maybe Ident → ExVarId → ExType → TermT → m ()) → TermT → TermT → m EqRes
 isEq' f = curry \case
   (Block{}, _) → undefined
   (_, Block{}) → undefined

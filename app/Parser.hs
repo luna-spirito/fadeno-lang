@@ -23,7 +23,6 @@ module Parser (
   parseFile,
   parseSource,
   recordGet,
-  recordOf,
   render,
   rowOf,
   typ,
@@ -145,7 +144,6 @@ data NumDesc = NumDesc !Bool {- ≥ 0 -} !Bits
 data BuiltinT
   = Tag
   | Row
-  | Record
   | List
   | Bool
   | TypePlus -- Type+ 0, Type+ 1, ..., Type+ Aleph
@@ -175,7 +173,7 @@ data BuiltinT
 
 builtinsList ∷ Vector BuiltinT
 builtinsList =
-  [Tag, Row, Record, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, IntGte0, IntEq, IntNeq, TagEq, W, Wrap, Unwrap, Never, Any', IntNeg]
+  [Tag, Row, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, IntGte0, IntEq, IntNeq, TagEq, W, Wrap, Unwrap, Never, Any', IntNeg]
     <> (Num <$> nd)
     <> (Add <$> nd)
     <> (Sub <$> ndSansInf)
@@ -192,7 +190,6 @@ identOfBuiltin = \case
   Tag → r "Tag"
   Bool → r "Bool"
   Row → r "Row"
-  Record → r "Record"
   List → r "List"
   TypePlus → r "Type+"
   Eq → r "Eq"
@@ -286,8 +283,8 @@ data TermT
     -- | Cedille: Π x : T | T' / Fadeno: x : T -> T' or x : T -@> T'
     Pi !Quant !(Maybe Ident) !TermT !(Lambda TermT) -- TODO: Demote Pi and Concat to builtins?
   | Concat !TermT !(Fields TermT (Maybe Ident, Lambda TermT))
-  | ExVar !Ident !ExVarId !ExType
-  | UniVar !Ident !Int !TermT
+  | ExVar !(Maybe Ident) !ExVarId !ExType
+  | UniVar !(Maybe Ident) !Int !TermT
   deriving (Show, Eq, Lift)
 
 -- | Type of existential variable.
@@ -306,9 +303,6 @@ typOf = App $ Builtin TypePlus
 
 rowOf ∷ TermT → TermT
 rowOf = App $ Builtin Row
-
-recordOf ∷ TermT → TermT
-recordOf = App $ Builtin Record
 
 recordGet ∷ TermT → TermT → TermT
 recordGet tag record = (Builtin RecordGet `App` tag) `App` record
@@ -517,7 +511,7 @@ parseBlock = do
                 token $ $(string "unpack")
                 record ← parsePrim
                 token $ $(char '.')
-                fieldNames ← some $ notFollowedBy (maybe failed pure =<< identRightNow) parseEq
+                fieldNames ← some $ notFollowedBy (maybe failed pure =<< ident) parseEq
                 foldr
                   (\name cont → Block . BlockLet QNorm (Just name) Nothing (recordGet (TagLit name) record) . Lambda <$> local ((QNorm, Just name) <|) cont)
                   manyEntries
@@ -541,7 +535,7 @@ parseBlock = do
 parseLam ∷ Parser' TermT
 parseLam = token do
   $(char '\\')
-  idents ← some ((,) <$> (($(char '@') $> QEra) <|> pure QNorm) <*> identRightNow)
+  idents ← some (token $ (,) <$> (($(char '@') $> QEra) <|> pure QNorm) <*> identRightNow)
   $(char '.')
   let
     parseBod = \case
@@ -554,11 +548,10 @@ parseLam = token do
 parseTop ∷ Parser' TermT
 parseTop =
   token
-    $
-    -- parseNode
-    parseBlock
+    $ parseBlock
     <|> parseLam
     <|> parseInfixOps
+    <|> (err =<< getPos)
 
 --
 
@@ -727,8 +720,8 @@ pTerm (oldPrec, vars) =
     -- RecordGet a b -> case b of
     --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
     --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
-    ExVar n l t → (5, "(exi#" <> pretty (show l) <+> pIdent n <+> ":" <+> pExType (0, vars) t <> ")")
-    UniVar x' l t → (5, "(uni#" <> pretty l <+> pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
+    ExVar n (ExVarId l) t → (5, "(exi#" <> (pretty $ show $ toList l) <+> maybe "_" pIdent n <+> ":" <+> pExType (0, vars) t <> ")")
+    UniVar x' l t → (5, "(uni#" <> pretty l <+> maybe "_" pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
 
 pExType ∷ (Int, ParserContext) → ExType → Doc AnsiStyle
 pExType a = \case
