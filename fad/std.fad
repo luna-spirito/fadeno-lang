@@ -1,11 +1,13 @@
-unpack fadeno. Type+ Int+ Int Tag List Bool Eq refl Row Record list_length list_indexl
+unpack fadeno. Type+ Int+ Int Tag List Bool Eq refl Row list_length list_indexl
 if W int_>=0 wrap unwrap ~int+_fold Never Any int_neg tag_==
+
+// TODO: make it so ++ erases to +
 
 _++_ = fadeno.int+_add
 _+_ = fadeno.int_add
 _-_ = \a b. a + (int_neg b)
 
-/: Int -> Int -> Bool
+/: Fun (Int) (Int) -> Bool
 _>=_ = \a b. int_>=0 (a - b)
 _>_ = \a b. a >= (b + 1)
 _<=_ = \a b. b >= a
@@ -15,64 +17,59 @@ Kind = Type+ 1
 /: Kind
 Type = Type+ 0
 
-/: u : Int+ -@> A : Type+ u -@> A -> A
+/: Fun {u : Int+} {A : Type+ u} (A) -> A
 id = \x. x
 
-/: u : Int+ -@> K : Type+ u -@> V : Type+ u -@> K -> V -> Record { .k = K | .v = V }
+/: Fun {u : Int+} {K : Type+ u} {V : Type+ u} (K) (V) -> {( .k = K | .v = V )}
 _=>_ = \k v. { .k = k | .v = v }
 
 /: Type
-Unit = Record {}
+Unit = {()}
 /: Unit
 unit = {}
 
-/: u : Int+ -@> Type+ u -> Type+ u
-Not = \a. a -> Never
+/: Fun {u : Int+} (Type+ u) -> Type+ u
+Not = \A. Fun (A) -> Never
 
-/: Bool -> Type
+/: Fun (Bool) -> Type
 Where = \x. Eq true x
 
-/: u : Int+ -@> Acc : Type+ u -@> Acc -> (Int+ -> Acc -> Acc) -> Int+ -> Acc
+/: Fun {u : Int+} {Acc : Type+ u} (Acc) (Fun (Int+) (Acc) -> Acc) (Int+) -> Acc
 int+_fold = \@u @Acc. ~int+_fold @u @(\_. Acc)
 
-/: i : Int -> Where (int_>=0 i) -@> Int+
+/: Fun (i : Int) {Where (int_>=0 i)} -> Int+
 to_int+ = \i @_.
   /: Eq Int+ Int
   e = SORRY
   in rewrite e in i
 
-/: i : Int+ -@> Where (int_>=0 i)
-~int+>=0 = \@_. SORRY
-
-/: n : Int -@> Eq 0 (n + (int_neg n))
+// All non-proof arguments implicit, all other proofs explicit?
+/: Fun {n : Int+} -> Eq 0 (n + (int_neg n))
 ~n-n = SORRY
 
-/: a : Any -@> b : Any -@> Eq a b -> Eq b a
+/: Fun {a : Any} {b : Any} (Eq a b) -> Eq b a
 ~sym = SORRY
 
-/: a : Int+ -@> b : Int+ -@> Eq (a + b) (a ++ b)
+/: Fun {a : Int+} {b : Int+} -> Eq (a + b) (a ++ b)
 ~+_eq_++ = SORRY
 
-/: i : Int+ -> n : Int+ -> Where (i < n) -@> Int+
+/: Fun (i : Int+) (n : Int+) {Where (i < n)} -> Int+
 inv_index = \i n @prf. to_int+ (n - (i + 1)) @prf
 
-/: i : Int+ -@> n : Int+ -@> Where (n - (i + 1) < n)
+/: Fun {i : Int+} {n : Int+} -> Where (n - (i + 1) < n)
 ~inv_index_bounded = SORRY
 
-// To remake eventually
-/: u : Int+ -@> Acc : (Int+ -> Type+ u) -@> n : Int+ -> (i : Int+ -> Where (i < n) -@> Acc (i ++ 1) -> Acc i) -> Acc n -> Acc 0
+//// To remake eventually
+/: Fun {u : Int+} {Acc : Fun (Int+) -> Type+ u} (n : Int+) (Fun (i : Int+) {Where (i < n)} (Acc (i ++ 1)) -> Acc i) (Acc n) -> Acc 0
 ~int+_unfold = \@u @Accf n step final.
-  /: Int+ -> Type+ u
-  InvAccf @= \i. prf : Where (i <= n) -@> Accf (to_int+ (n - i) @prf)
-
-  /: i : Int -@> Eq ((n - (i + 1)) ++ 1) (n - i)
+  /: Fun {i : Int} -> Eq ((n - (i + 1)) ++ 1) (n - i)
   ~simplify = SORRY
 
-  /: i : Int -@> Where (i + 1 <= n) -> Where (i <= n)
+  /: Fun {i : Int} (Where (i + 1 <= n)) -> Where (i <= n)
   ~smaller = SORRY
 
   rewrite ~n-n @n
-  in ~int+_fold @u @InvAccf
+  in ~int+_fold @u @(\i. Fun {prf : Where (i <= n)} -> Accf (to_int+ (n - i) @prf))
     (\@_. final)
     (\i rec @~i++1<=n.
       ~i+1<=n @= rewrite (~+_eq_++ @i @1) in ~i++1<=n
@@ -82,70 +79,21 @@ inv_index = \i n @prf. to_int+ (n - (i + 1)) @prf
     n
     @(rewrite ~sym (~n-n @n) in refl @0)
 
-/: u : Int+ -@> Acc : Type+ u -@> n : Int+ -> (i : Int+ -> Where (i < n) -@> Acc -> Acc) -> Acc -> Acc
+/: Fun {u : Int+} {Acc : Type+ u} (n : Int+) (Fun (i : Int+) {Where (i < n)} (Acc) -> Acc) (Acc) -> Acc
 int+_unfold = \@u @Acc. ~int+_unfold @u @(\_. Acc)
 
-// /: u : Int+ -@> A : Type+ u -@> i : Int+ -> l : List A -> Where (i < list_length l) -@> A
-// list-indexr =
-
-/: u : Int+ -@> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
+/: Fun {u : Int+} (tag : Tag) (List {( .k = Tag | .v = Row (Type+ u) )}) -> Row (Type+ u)
 find-case = \@u tag l. int+_unfold @(u ++ 1) @(Row (Type+ u))
-  (list_length l)
-  (\i @bounded rec.
+    (list_length l)
+    (\i @bounded rec.
     case = list_indexl i l @bounded
     in if (tag_== tag case.k)
-      (\_. case.v)
-      (\_. rec)
-  )
-  { .never = Never }
+        (case.v)
+        rec
+    )
+    {( .never = Never )}
 
-/: u : Int+ -@> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Type+ u
-Union = \cases. Record (meta : { .tag = Tag } \/ find-case meta.tag cases)
+/: Fun {u : Int+} (List {( .k = Tag | .v = Row (Type+ u) )}) -> Row (Type+ u)
+Union = \cases. {( .tag = Tag )} \meta/ find-case meta.tag cases
 
-
-// /: u : Int+ -@> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
-// find-case = \@u tag l. ~int+_fold @u @(\i. Where (i < list-length l) -@> Row (Type+ u))
-//   (\@_. {})
-//   (\i rec @inrange. rec @inrange)
-//   (list-length l)
-//   @refl
-
-in Union
-
-// /: u : Int+ -> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
-// find-case = \u tag cases. ~int+_fold
-//  (\i. Unit -> Row (Type+ u))
-//  (list-length cases)
-//  {} //(forall (row : Row (Type+ u)). row)
-//  (\i rec. {})
-//  {}
-
-
-// /: forall (u : Int+). Tag -> Row (Type+ u) -> Row (Type+ u)
-// Optional = \tag row. s : { (tag) = Bool } \/ row
-
-// Trash signature. It's way too overcomplicated by itself.
-// /: forall (u : Int+) (a : Type+ u) (b : Type+ u). l : List a -> (a -> Record (Optional .found {.val = b})) -> Record (Optional .found {.val = b})
-// list-findl =
-
-// /: u : Int+ -> Tag -> List (Record { .k = Tag | .v = Row (Type+ u) }) -> Row (Type+ u)
-// find-case = \u tag cases. ~int+_fold
-//  (\i. Unit -> Row (Type+ u))
-//  (list-length cases)
-//  {} //(forall (row : Row (Type+ u)). row)
-//  (\i rec. {})
-//  {}
-
-// // Union = Record (meta : { .tag = Tag } \/ { .val = Int+ })
-// Union = \cases.
-//   Record (meta : { .tag = Tag } \/ fadeno.record-get meta.tag cases)
-
-// First of all, Mendler-style nat-fold. Second of all, IS IT POSSIBLE TO SEPARATE `rec` function by making `acc` indexed, so you don't have to pass `rec` at each step?
-// Most likely not, since continuation is basically a proof. If it's a proof, though... couldn't it be just erased?
-
-//ListC = \A. forall R. (forall Acc. (Acc -> R) -> Union [ .nil = {} | .cons = { .head = A | .tail = Acc } ] -> R) -> R
-
-//list13 = \consumer.
-//  consumer
-//    (consumer (consumer identity))
-//    { .tag = .cons | .head = 1 | .tail = { .tag = .cons | .head = 2 | .tail = { .tag = .nil } } }
+in {}
