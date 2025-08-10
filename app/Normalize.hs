@@ -258,10 +258,7 @@ postApp = curry \case
     | b == 0 → a
     | NumLit a' ← a → NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a' + fromIntegral b) (\_ → a' + b)
   -- Sub
-  (Builtin (Sub d) `App` a, NumLit b)
-    | b == 0 → a
-    | NumLit a' ← a → NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a' + fromIntegral b) \_ → undefined
-  (Builtin IntNeg, NumLit x) → NumLit $ -x
+  (Builtin (IntNeg d), NumLit x) → NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ -fromIntegral x) (\_ → -x)
   (f, a) → App f a
  where
   -- Drop `x` from ListLit.
@@ -397,7 +394,7 @@ termQQ =
     wher = Lam QNorm (Just $ Ident "n" False) $ Lambda $ Builtin Eq `App` BoolLit True `App` Var 0
     scope =
       ((\b → (Just $ identOfBuiltin b, Builtin b)) <$> builtinsList)
-        <> [(Just $ Ident "+" True, Builtin $ Add $ NumDesc False BitsInf), (Just $ Ident "++" True, Builtin $ Add $ NumDesc True BitsInf), (Just $ Ident "Where" False, wher)]
+        <> [(Just $ Ident "+" True, Builtin $ Add $ NumDesc False BitsInf), (Just $ Ident "Where" False, wher)]
    in
     QuasiQuoter
       { quoteExp = \s → do

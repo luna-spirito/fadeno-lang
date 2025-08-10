@@ -1,9 +1,6 @@
 unpack fadeno. Type+ Int+ Int Tag List Bool Eq refl Row list_length list_indexl
 if W int_>=0 wrap unwrap ~int+_fold Never Any int_neg tag_==
 
-// TODO: make it so ++ erases to +
-
-_++_ = fadeno.int+_add
 _+_ = fadeno.int_add
 _-_ = \a b. a + (int_neg b)
 
@@ -32,10 +29,11 @@ unit = {}
 Not = \A. Fun (A) -> Never
 
 /: Fun (Bool) -> Type
-Where = \x. Eq true x
+Where = \x. Eq x true
 
-/: Fun {u : Int+} {Acc : Type+ u} (Acc) (Fun (Int+) (Acc) -> Acc) (Int+) -> Acc
-int+_fold = \@u @Acc. ~int+_fold @u @(\_. Acc)
+// All non-proof arguments erased, all other proofs explicit?
+/: Fun {a : Int+} {b : Int+} -> Where (int_>=0 (a + b))
+~sum_pos = SORRY
 
 /: Fun (i : Int) {Where (int_>=0 i)} -> Int+
 to_int+ = \i @_.
@@ -43,15 +41,17 @@ to_int+ = \i @_.
   e = SORRY
   in rewrite e in i
 
-// All non-proof arguments implicit, all other proofs explicit?
+/: Fun (Int+) (Int+) -> Int+
+_++_ = \a b. to_int+ (a + b) @~sum_pos
+
+/: Fun {u : Int+} {Acc : Type+ u} (Acc) (Fun (Int+) (Acc) -> Acc) (Int+) -> Acc
+int+_fold = \@u @Acc. ~int+_fold @u @(\_. Acc)
+
 /: Fun {n : Int+} -> Eq 0 (n + (int_neg n))
 ~n-n = SORRY
 
 /: Fun {a : Any} {b : Any} (Eq a b) -> Eq b a
 ~sym = SORRY
-
-/: Fun {a : Int+} {b : Int+} -> Eq (a + b) (a ++ b)
-~+_eq_++ = SORRY
 
 /: Fun (i : Int+) (n : Int+) {Where (i < n)} -> Int+
 inv_index = \i n @prf. to_int+ (n - (i + 1)) @prf
@@ -62,7 +62,7 @@ inv_index = \i n @prf. to_int+ (n - (i + 1)) @prf
 //// To remake eventually
 /: Fun {u : Int+} {Acc : Fun (Int+) -> Type+ u} (n : Int+) (Fun (i : Int+) {Where (i < n)} (Acc (i ++ 1)) -> Acc i) (Acc n) -> Acc 0
 ~int+_unfold = \@u @Accf n step final.
-  /: Fun {i : Int} -> Eq ((n - (i + 1)) ++ 1) (n - i)
+  /: Fun {i : Int} -> Eq ((n - (i + 1)) + 1) (n - i)
   ~simplify = SORRY
 
   /: Fun {i : Int} (Where (i + 1 <= n)) -> Where (i <= n)
@@ -71,10 +71,8 @@ inv_index = \i n @prf. to_int+ (n - (i + 1)) @prf
   rewrite ~n-n @n
   in ~int+_fold @u @(\i. Fun {prf : Where (i <= n)} -> Accf (to_int+ (n - i) @prf))
     (\@_. final)
-    (\i rec @~i++1<=n.
-      ~i+1<=n @= rewrite (~+_eq_++ @i @1) in ~i++1<=n
-      rewrite ~sym (~+_eq_++ @i @1)
-      in step (inv_index i n @~i+1<=n) @(~inv_index_bounded @i @n) (rewrite ~simplify @i in rec @(~smaller @i ~i+1<=n))
+    (\i rec @~i+1<=n.
+      step (inv_index i n @~i+1<=n) @(~inv_index_bounded @i @n) (rewrite ~simplify @i in rec @(~smaller @i ~i+1<=n))
     )
     n
     @(rewrite ~sym (~n-n @n) in refl @0)

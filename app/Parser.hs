@@ -166,27 +166,26 @@ data BuiltinT
   | Never
   | Any'
   | Add !NumDesc
-  | Sub !NumDesc
   | Num !NumDesc
-  | IntNeg -- Currently just for the Int.
+  | IntNeg !NumDesc
   deriving (Show, Eq, Lift)
 
 builtinsList ∷ Vector BuiltinT
 builtinsList =
-  [Tag, Row, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, IntGte0, IntEq, IntNeq, TagEq, W, Wrap, Unwrap, Never, Any', IntNeg]
+  [Tag, Row, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, IntGte0, IntEq, TagEq, W, Wrap, Unwrap, Never, Any']
     <> (Num <$> nd)
-    <> (Add <$> nd)
-    <> (Sub <$> ndSansInf)
+    <> (Add <$> ndSansIntP)
+    <> (IntNeg <$> ndSansIntP)
  where
-  ndSansInf = (NumDesc <$> [False, True] <*> [Bits8, Bits16, Bits32, Bits64])
-  nd = ndSansInf <> [NumDesc False BitsInf, NumDesc True BitsInf]
+  ndFins = (NumDesc <$> [False, True] <*> [Bits8, Bits16, Bits32, Bits64])
+  ndSansIntP = ndFins <> [NumDesc False BitsInf]
+  nd = ndSansIntP <> [NumDesc True BitsInf]
 
 identOfBuiltin ∷ BuiltinT → Ident
 identOfBuiltin = \case
   Add d → r $ numDesc False d <> "_add"
-  Sub d → r $ numDesc False d <> "_sub"
+  IntNeg d → r $ numDesc False d <> "_neg"
   Num d → r $ numDesc True d
-  IntNeg → r "int_neg"
   Tag → r "Tag"
   Bool → r "Bool"
   Row → r "Row"

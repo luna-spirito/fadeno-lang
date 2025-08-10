@@ -681,14 +681,13 @@ infer = logAndRunInfer \case
 typOfBuiltin ∷ BuiltinT → TermT
 typOfBuiltin = \case
   Num _d → [termQQ| Type+ 0 |]
-  Add d → opd d
-  Sub d → opd d
-  IntNeg → [termQQ| Fun (Int) -> Int |]
+  Add d → op2d d
+  IntNeg d → opd d
   Tag → [termQQ| Type+ 0 |]
   Bool → [termQQ| Type+ 0 |]
   Row → [termQQ| Fun {u : Int+} (Type+ u) -> Type+ u |]
   List → [termQQ| Fun {u : Int+} (Type+ u) -> Type+ u |]
-  TypePlus → [termQQ| Fun (u : Int+) -> Type+ (u ++ 1) |]
+  TypePlus → [termQQ| Fun (u : Int+) -> Type+ (u + 1) |]
   Eq → [termQQ| Fun (Any) (Any) -> Type+ 0 |]
   Refl → [termQQ| Fun {u : Int+} {a : Type+ u} {x : a} -> Eq x x |]
   RecordGet →
@@ -700,7 +699,7 @@ typOfBuiltin = \case
   RecordDropFields → [termQQ| Fun {u : Int+} {row : Row (Type+ u)} (List Tag) (row) -> Any |]
   ListLength → [termQQ| Fun {u : Int+} {A : Type+ u} (List A) -> Int+ |]
   ListIndexL → [termQQ| Fun {u : Int+} {A : Type+ u} (i : Int+) (l : List A) {Where (int_>=0 (int_add (list_length l) (int_neg (i + 1))))} -> A |]
-  NatFold → [termQQ| Fun {u : Int+} {Acc : Fun (Int+) -> Type+ u} (Acc 0) (Fun (i : Int+) (Acc i) -> Acc (i ++ 1)) (n : Int+) -> Acc n |]
+  NatFold → [termQQ| Fun {u : Int+} {Acc : Fun (Int+) -> Type+ u} (Acc 0) (Fun (i : Int+) (Acc i) -> Acc (i + 1)) (n : Int+) -> Acc n |]
   If → [termQQ| Fun {u : Int+} {A : Type+ u} (cond : Bool) (Fun {Eq cond true} -> A) (Fun {Eq cond false} -> A) -> A |]
   IntGte0 → [termQQ| Fun (Int) -> Bool |]
   IntEq → [termQQ| Fun (Int) (Int) -> Bool |]
@@ -712,7 +711,8 @@ typOfBuiltin = \case
   Never → [termQQ| Type+ 0 |]
   Any' → [termQQ| Type+ 0 |] where
  where
-  opd d = Pi QNorm Nothing (Builtin $ Num d) $ Lambda $ Pi QNorm Nothing (Builtin $ Num d) $ Lambda $ Builtin $ Num d
+  opd d = Pi QNorm Nothing (Builtin $ Num d) $ Lambda $ Builtin $ Num d
+  op2d d = Pi QNorm Nothing (Builtin $ Num d) $ Lambda $ Pi QNorm Nothing (Builtin $ Num d) $ Lambda $ Builtin $ Num d
 
 instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ Maybe Ident → ExVarId → ExType → TermT → m ()
 instMeta = (\f a b c d → stackScope (\_ → "instMeta") $ f a b c d) \n1 (ExVarId var1) t1 →
