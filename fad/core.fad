@@ -1,71 +1,16 @@
+Key = List Int8+
+EventId = List Int32+
+
+// TODO: Enforce event-generator ownership somehow?
 Event =
-  (self : { .archetype = { .tag = Tag | .Ty = SuperType } }
-  \/ { .val = self.archetype.Ty | .sender = })
+  {( .tag = Tag | .Ty = SuperType )}
+  \archetype/ {( .sender = Key | .val = archetype.Ty })
 
-Optionally = \t row. { (t) = Bool } \/ row
+//Gear = \Cfg Out. Record (meta : { Cache : Type+ u } \/ { initial : meta.Cache | step : Cfg -> meta.Cache -> Out })
 
-//list =
-//  { .eq =
-//  }
+Gear = \Cfg Out.
 
-
-// Ideal world:
-
-
-list : Module -> Module
-listInt = list int
-
-listInt.eq [3 | 4 | 5] [3 | 4 | 5]
-
-// Idea: maybe we could write an implementation in either case, but just make Any if the
-// fields is missing from underlying module. Any permits wrong terms, after all!
-
-
-// Let's assume there is Eq and there is `Ord (e : Eq)`.
-// This works alright-y. We can just create such objects for any type, and we can easily make multiple of those.
-// However, it could be cool if we could just declare them once and then use instances implicitly.
-// For example. Let's assume `Int+` has Eq. Then, `List Int+` should also be Eq automatically.
-// Well, literally no issue in an untyped fashion. Though typing this...
-
-// So, a lot of traits are not just applicable to a single object. After all, traits are multi-type-args. So, the module structure you're
-// conceptualizing is not a general case.
-
-// Or ALGEBRAIC EFFECTS?
-
-
-// Event = a SINGULAR user action.
-//events =
-//  { .update_article =
-//    meta : { .new = Bool }
-//    \/ { .title = }
-//  |
-//  }
-
-
-Okay, let's list options.
-1) Haskell type classes
-No. They break the idea of minimalism, this unnecesarily complicates the langauge.
-2) Algebraic effects
-I have a really good feeling about this, yes, but come on, we're talking about properties of objects!
-That's quite a twist that I honestly consider unnecessary.
-3) Scrap your typeclasses!
-3.1) Automatically derive from the scope, "auto" arguments
-I don't like implicity, and it's hard to code, and doesn't always does what intended, and many others "and".
-3.2) Explicitly
-This is pain. Imagine when you have some specific nested structure and you have to, for each of the classes, explicitly re-write the tree for each trait specifically.
-Like, implementing Ord for such structure is no different from implementing Eq, just more annoying.
-3.3) Explicitly with special user-defined "auto" function.
-Doesn't sound too bad, but will break instantly. For example, with dependent types, since you can't reliably pattern match on lambdas.
-3.4) Explicity, but "write structure once, reuse it everywhere". Like, have a way to define the structure once, and then have special functions that extracts
-things like Type, Eq, Ord, etc.
-
-
-manyeq = list.eq (list.eq (list.eq (list.eq int.ord)))
-
-manyord = list.ord (list.ord (list.ord (list.ord int.ord)))
-
-manyany = \any. any list (any list (any list (any int)))
-
-manyanychurch! = \list int. list (list (list (list int)))
-
-Done, problem solved: Church.
+events =
+  [ .from_rufoundation => {( .file = Blob )}
+  | .update_article => {( .prev = Opt EventIdv | .title = Text | .body = Text )}
+  ]

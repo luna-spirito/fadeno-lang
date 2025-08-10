@@ -23,7 +23,7 @@ id = \x. x
 /: Fun {u : Int+} {K : Type+ u} {V : Type+ u} (K) (V) -> {( .k = K | .v = V )}
 _=>_ = \k v. { .k = k | .v = v }
 
-/: Type
+/: Row (Type+ 0)
 Unit = {()}
 /: Unit
 unit = {}
@@ -94,6 +94,9 @@ find-case = \@u tag l. int+_unfold @(u ++ 1) @(Row (Type+ u))
     {( .never = Never )}
 
 /: Fun {u : Int+} (List {( .k = Tag | .v = Row (Type+ u) )}) -> Row (Type+ u)
-Union = \cases. {( .tag = Tag )} \meta/ find-case meta.tag cases
+U = \cases. {( .tag = Tag )} \meta/ find-case meta.tag cases
+
+/: Fun {u : Int+} (A : Type+ u) -> Row (Type+ u)
+Opt = \A. U [ .none => Unit | .some => {( .val = A )} ]
 
 in {}
