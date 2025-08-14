@@ -13,7 +13,7 @@ import Data.ByteString.Char8 (pack)
 import Data.Monoid (Any (..))
 import Data.RRBVector (Vector, deleteAt, ifoldr, splitAt, viewl, (!?), (<|))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockT (..), BuiltinT (..), ExType (..), ExVarId, Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm, parse, recordGet, render)
+import Parser (Bits (..), BlockT (..), BuiltinT (..), ExVarId, Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, pTerm, parse, recordGet, render)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try)
 import RIO.HashMap qualified as HM
 
@@ -64,7 +64,7 @@ insertBinds (i, nQ, nV, nTy) old = (i, nQ, nested <$> nV, nested <$> nTy) <| (bi
 {- | Checks if two normalized terms are intensionally equivalent.
 TODO: η-conversion
 -}
-isEq' ∷ (Has (Reader (Vector Binding) :+: Writer Resolved) sig m) ⇒ (Maybe Ident → ExVarId → ExType → TermT → m ()) → TermT → TermT → m EqRes
+isEq' ∷ (Has (Reader (Vector Binding) :+: Writer Resolved) sig m) ⇒ (Maybe Ident → ExVarId → TermT → TermT → m ()) → TermT → TermT → m EqRes
 isEq' f = curry \case
   (Block{}, _) → undefined
   (_, Block{}) → undefined
@@ -325,10 +325,7 @@ rewrite onLet onNest rewriter = go
     Concat a b → case b of
       FRecord b' → concat <$> go via a <*> go via b'
       FRow (i, b') → Concat <$> go via a <*> (FRow . (i,) . Lambda <$> go (onNest via) (unLambda b'))
-    ExVar n i t →
-      ExVar n i <$> case t of
-        ExType t' → ExType <$> go via t'
-        ExSuperType → pure ExSuperType
+    ExVar n i t → ExVar n i <$> go via t
     UniVar n i t → UniVar n i <$> go via t
 
 nestedBy ∷ Int → TermT → TermT
@@ -391,7 +388,7 @@ Just a variation of parseQQ that has all the builtins in scope from the start.
 termQQ ∷ QuasiQuoter
 termQQ =
   let
-    wher = Lam QNorm (Just $ Ident "n" False) $ Lambda $ Builtin Eq `App` BoolLit True `App` Var 0
+    wher = Lam QNorm (Just $ Ident "n" False) $ Lambda $ Builtin Eq `App` Var 0 `App` BoolLit True
     scope =
       ((\b → (Just $ identOfBuiltin b, Builtin b)) <$> builtinsList)
         <> [(Just $ Ident "+" True, Builtin $ Add $ NumDesc False BitsInf), (Just $ Ident "Where" False, wher)]
@@ -411,7 +408,7 @@ termQQ =
 normalizeSource ∷ ByteString → IO ()
 normalizeSource x = do
   let t = either (error . show) id $ parse [] x
-  render $ pTerm (0, []) $ normalize [] t
+  render $ pTerm [] $ normalize [] t
 
 normalizeFile ∷ FilePath → IO ()
 normalizeFile x = normalizeSource =<< readFileBinary x

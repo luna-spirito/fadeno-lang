@@ -17,7 +17,7 @@ module Parser (
   intercept,
   pIdent,
   pQuant,
-  pTerm',
+  pTerm,
   parse,
   parseFile,
   parseSource,
@@ -428,7 +428,9 @@ parseTy =
           q ← token $ ($(char '(') $> QNorm) <|> ($(char '{') $> QEra)
           (n, t) ←
             ((,) <$> (ident <* token $(char ':')) <*> parseTop)
-              <|> ((Nothing,) <$> parseTop)
+              <|> case q of
+                QNorm → ((Nothing,) <$> parseTop)
+                QEra → ((,Builtin Any') . Just <$> (maybe failed pure =<< ident))
           token $ case q of
             QNorm → $(char ')')
             QEra → $(char '}')
