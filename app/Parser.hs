@@ -2,7 +2,6 @@ module Parser (
   Bits (..),
   BlockT (..),
   BuiltinT (..),
-  ExType (..),
   ExVarId (..),
   Fields (..),
   Ident (..),
@@ -18,7 +17,7 @@ module Parser (
   intercept,
   pIdent,
   pQuant,
-  pTerm,
+  pTerm',
   parse,
   parseFile,
   parseSource,
@@ -42,7 +41,7 @@ import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStri
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Syntax (Lift (..))
 import Language.Haskell.TH.Syntax qualified as TH
-import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, encloseSep, layoutSmart, line, nest, softline, vsep, (<+>))
+import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, encloseSep, layoutSmart, line, nest, softline, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
 import RIO hiding (Reader, Vector, ask, local, toList, try)
 
@@ -282,20 +281,9 @@ data TermT
     -- | Cedille: Π x : T | T' / Fadeno: x : T -> T' or x : T -@> T'
     Pi !Quant !(Maybe Ident) !TermT !(Lambda TermT) -- TODO: Demote Pi and Concat to builtins?
   | Concat !TermT !(Fields TermT (Maybe Ident, Lambda TermT))
-  | ExVar !(Maybe Ident) !ExVarId !ExType
+  | ExVar !(Maybe Ident) !ExVarId !TermT
   | UniVar !(Maybe Ident) !Int !TermT
   deriving (Show, Eq, Lift)
-
--- | Type of existential variable.
-data ExType
-  = ExType !TermT -- Just a normal term.
-  | ExSuperType -- "Type+ ∞", i. e. supertype of all types, i. e. ∀ u. `Type+ u : ExSuperType`
-  deriving (Eq, Lift)
-
-instance Show ExType where
-  show = \case
-    ExType x → show x
-    ExSuperType → "Type+ ∞"
 
 typOf ∷ TermT → TermT
 typOf = App $ Builtin TypePlus
@@ -614,118 +602,110 @@ pQuant = \case
   QEra → "@"
   QNorm → mempty
 
--- TODO: Concise syntax for `\` and `-@>`
-pTerm ∷ (Int, ParserContext) → TermT → Doc AnsiStyle
-pTerm (oldPrec, vars) =
-  withPrec oldPrec . \case
-    Lam q arg x →
-      ( 0
-      , let sep' = case unLambda x of
-              Lam _ _ _ → " "
-              _
-                | isSimple (unLambda x) → " "
-                | otherwise → line
-         in annotate (color Cyan) "\\"
+data Fuse = FNo | FLam | FPi | FBlock !(Maybe TermT) deriving (Eq)
+
+-- TODO: Refactor isSimple, it's frankly stupid.
+-- Refactor the whole system, it's all stupid.
+pTerm' ∷ (Fuse, Int, ParserContext) → TermT → Doc AnsiStyle
+pTerm' (fuse, oldPrec, vars) t0 =
+  let prefixf = case (fuse, t0) of
+        (FNo, _) → id
+        (FLam, Lam{}) → id
+        (FLam, _) → (<>) $ annotate (color Cyan) "." <> if isSimple t0 then " " else line
+        (FPi, Pi{}) → id
+        (FPi, _) → (<>) $ annotate (color Cyan) "->" <> " "
+        (FBlock _, Block{}) → id
+        (FBlock _, _) → \x → line <> annotate (color Cyan) "in" <+> nest 2 x
+   in prefixf $ withPrec oldPrec case t0 of
+        Lam q arg x →
+          ( 0
+          , (if fuse == FLam then " " else annotate (color Cyan) "\\")
               <> pQuant q
               <> maybe "_" pIdent arg
-              <> annotate (color Cyan) "."
-              <> sep'
-              <> pTerm (0, (q, arg) <| vars) (unLambda x)
-      )
-    block@(Block{}) →
-      ( 1
-      , let
-          go ∷ ParserContext → TermT → ([Doc AnsiStyle], TermT, ParserContext)
-          go vars' = \case
-            Block def → case def of
-              BlockLet q name tyM val in_ →
-                let entry =
-                      ( maybe mempty (\ty → "/:" <+> pTerm (2, vars') ty <> line) tyM -- TODO: split if complicated type
-                          <> maybe "_" pIdent name
-                          <+> annotate (color Yellow) (pQuant q <> "=")
-                            <> softline
-                            <> nest 2 (pTerm (0, insideLet q vars') val)
-                      )
-                    (entries, rest, vars'') = go ((q, name) <| vars') $ unLambda in_
-                 in (entry : entries, rest, vars'')
-              BlockRewrite x in_ →
-                let
-                  entry = "rewrite" <+> pTerm (0, vars') x
-                  (entries, rest, vars'') = go vars' in_
-                 in
-                  (entry : entries, rest, vars'')
-            r → ([], r, vars')
-         in
-          let (entries, rest, vars'') = go vars block
-           in vsep entries
-                <> line
-                <> annotate (color Cyan) "in"
-                <+> nest 2 (pTerm (1, vars'') rest)
-      )
-    inp@Pi{} →
-      ( 3
-      , annotate (color Cyan) "Fun"
-          <+> fix
-            ( \rec vars' → \case
-                Pi q name inTy outTy →
-                  let (bL, bR) = case q of
-                        QNorm → ("(", ")")
-                        QEra → ("{", "}")
-                   in bL
-                        <> maybe mempty (\i → pIdent i <+> ": ") name
-                        <> pTerm (4, vars') inTy
-                        <> bR
-                        <+> rec ((QNorm, name) <| vars') (unLambda outTy)
-                out → annotate (color Cyan) "->" <+> pTerm (4, vars') out
-            )
-            vars
-            inp
-      )
-    Concat a b →
-      ( 3
-      , pTerm (4, vars) a
-          <+> annotate (color Cyan) "\\" <> case b of
-            FRecord b' → annotate (color Cyan) "/" <+> pTerm (3, vars) b'
-            FRow (n, b') → maybe "_" pIdent n <> annotate (color Cyan) "/" <+> pTerm (3, (QNorm, n) <| vars) (unLambda b')
-      )
-    Sorry → (5, "SORRY!")
-    App (App (Builtin RecordGet) (TagLit tag)) rec →
-      (5, pTerm (5, vars) rec <> annotate (color Blue) ("." <> pIdent tag))
-    App lam arg2 → case lam of
-      (App (Var opIdx) arg1)
-        | Just (QNorm, Just (Ident opName True)) ← vars !? opIdx →
-            (2, pTerm (3, vars) arg1 <+> pBS opName <+> pTerm (2, vars) arg2)
-      _ →
-        (4, pTerm (4, vars) lam <+> pTerm (5, vars) arg2)
-    AppErased lam arg → (4, pTerm (4, vars) lam <+> "@" <> pTerm (5, vars) arg)
-    Builtin x → (5, "fadeno." <> pIdent (identOfBuiltin x))
-    BuiltinsVar → (5, "fadeno")
-    NumLit x → (5, pretty x)
-    BoolLit x → (5, if x then "true" else "false")
-    TagLit x → (5, annotate (color Blue) $ "." <> pIdent x)
-    FieldsLit fi fields →
-      let (brL, brR) = case fi of
-            FRecord () → ("{", "}")
-            FRow () → ("{(", ")}")
-       in ( 5
-          , encloseSep
-              (annotate (color White) brL)
-              (annotate (color White) brR)
-              (annotate (color White) " | ")
-              (fmap (\(n, v) → pTerm (5, vars) n <+> annotate (color Cyan) "=" <+> pTerm (0, vars) v) (toList fields))
+              <> pTerm' (FLam, 0, (q, arg) <| vars) (unLambda x)
           )
-    ListLit vec → (5, encloseSep "[" "]" " | " $ fmap (\x → pTerm (0, vars) x) (toList vec))
-    Var x → (5, maybe ("#" <> pretty x) (\(_, i) → maybe "_" pIdent i) $ vars !? x)
-    -- RecordGet a b -> case b of
-    --   TagLit b' -> (6, pTerm 6 a <> "." <> pIdent b')
-    --   _ -> (5, "fadeno/get" <+> pTerm 6 a <+> pTerm 6 b)
-    ExVar n (ExVarId l) t → (5, "(exi#" <> (pretty $ show $ toList l) <+> maybe "_" pIdent n <+> ":" <+> pExType (0, vars) t <> ")")
-    UniVar x' l t → (5, "(uni#" <> pretty l <+> maybe "_" pIdent x' <+> ":" <+> pTerm (0, vars) t <> ")")
+        Block block → (1,) $ case block of
+          BlockLet q nameM tyM val in_ →
+            case (tyM, nameM, val) of
+              (Nothing, Just name1, Builtin RecordGet `App` (TagLit name2) `App` record)
+                | name1 == name2 →
+                    (if fuse == FBlock (Just record) then mempty else annotate (color Yellow) "unpack" <+> pTerm' (FNo, 5, vars) record <> annotate (color Cyan) ".")
+                      <+> pIdent name1
+                        <> pTerm' (FBlock $ Just record, 0, (q, Just name1) <| vars) (unLambda in_)
+              _ →
+                ( case fuse of
+                    FBlock{} → line
+                    _ → mempty
+                )
+                  <> maybe
+                    mempty
+                    ( \ty →
+                        ( case fuse of
+                            FBlock{} → line
+                            _ → mempty
+                        )
+                          <> "/:"
+                          <+> nest 2 (pTerm' (FNo, 2, vars) ty) <> line
+                    )
+                    tyM -- TODO: split if complicated type
+                  <> maybe "_" pIdent nameM
+                  <+> annotate (color Yellow) (pQuant q <> "=")
+                    <> softline
+                    <> nest 2 (pTerm' (FNo, 0, insideLet q vars) val)
+                    <> pTerm' (FBlock Nothing, 0, (q, nameM) <| vars) (unLambda in_)
+          BlockRewrite x in_ → line <> "rewrite" <+> pTerm' (FNo, 0, vars) x <> line <> pTerm' (FBlock Nothing, 0, vars) in_
+        Pi q name inTy outTy →
+          ( 3
+          , let (bL, bR) = case q of
+                  QNorm → ("(", ")")
+                  QEra → ("{", "}")
+             in (if fuse == FPi then mempty else annotate (color Cyan) "Fun" <> " ")
+                  <> bL
+                  <> maybe mempty (\i → pIdent i <+> ": ") name
+                  <> pTerm' (FNo, 0, vars) inTy
+                  <> bR
+                  <+> pTerm' (FPi, 3, (QNorm, name) <| vars) (unLambda outTy)
+          )
+        Concat a b →
+          ( 3
+          , pTerm' (FNo, 4, vars) a
+              <+> annotate (color Cyan) "\\" <> case b of
+                FRecord b' → annotate (color Cyan) "/" <+> pTerm' (FNo, 3, vars) b'
+                FRow (n, b') → maybe "_" pIdent n <> annotate (color Cyan) "/" <+> pTerm' (FNo, 3, (QNorm, n) <| vars) (unLambda b')
+          )
+        Sorry → (5, "SORRY!")
+        App (App (Builtin RecordGet) (TagLit tag)) rec →
+          (5, pTerm' (FNo, 5, vars) rec <> annotate (color Blue) ("." <> pIdent tag))
+        App lam arg2 → case lam of
+          (App (Var opIdx) arg1)
+            | Just (QNorm, Just (Ident opName True)) ← vars !? opIdx →
+                (2, pTerm' (FNo, 3, vars) arg1 <+> pBS opName <+> pTerm' (FNo, 2, vars) arg2)
+          _ →
+            (4, pTerm' (FNo, 4, vars) lam <+> pTerm' (FNo, 5, vars) arg2)
+        AppErased lam arg → (4, pTerm' (FNo, 4, vars) lam <+> "@" <> pTerm' (FNo, 5, vars) arg)
+        Builtin x → (5, "fadeno." <> pIdent (identOfBuiltin x))
+        BuiltinsVar → (5, "fadeno")
+        NumLit x → (5, pretty x)
+        BoolLit x → (5, if x then "true" else "false")
+        TagLit x → (5, annotate (color Blue) $ "." <> pIdent x)
+        FieldsLit fi fields →
+          let (brL, brR) = case fi of
+                FRecord () → ("{", "}")
+                FRow () → ("{(", ")}")
+           in ( 5
+              , encloseSep
+                  (annotate (color White) brL)
+                  (annotate (color White) brR)
+                  (annotate (color White) " | ")
+                  (fmap (\(n, v) → pTerm' (FNo, 5, vars) n <+> annotate (color Cyan) "=" <+> pTerm' (FNo, 0, vars) v) (toList fields))
+              )
+        ListLit vec → (5, encloseSep "[" "]" " | " $ fmap (\x → pTerm' (FNo, 0, vars) x) (toList vec))
+        Var x → (5, maybe ("#" <> pretty x) (\(_, i) → maybe "_" pIdent i) $ vars !? x)
+        ExVar n (ExVarId l) t → (5, "(exi#" <> (pretty $ show $ toList l) <+> maybe "_" pIdent n <+> ":" <+> pTerm' (FNo, 0, vars) t <> ")")
+        UniVar x' l t → (5, "(uni#" <> pretty l <+> maybe "_" pIdent x' <+> ":" <+> pTerm' (FNo, 0, vars) t <> ")")
 
-pExType ∷ (Int, ParserContext) → ExType → Doc AnsiStyle
-pExType a = \case
-  ExType x → pTerm a x
-  ExSuperType → "Type+ ∞"
+pTerm ∷ ParserContext → TermT → Doc AnsiStyle
+pTerm = pTerm' . (FNo,0,)
 
 parse ∷ ParserContext → ByteString → Either Text TermT
 parse vars inp = case runParser (parseTop <* eof) vars 0 inp of
@@ -743,7 +723,7 @@ render ∷ Doc AnsiStyle → IO ()
 render x = renderIO stdout $ layoutSmart defaultLayoutOptions $ x <> line
 
 formatSource ∷ ByteString → IO ()
-formatSource = render . pTerm (0, []) <=< parseSource
+formatSource = render . pTerm [] <=< parseSource
 
 formatFile ∷ FilePath → IO ()
 formatFile = formatSource <=< readFileBinary
