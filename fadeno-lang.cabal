@@ -24,7 +24,7 @@ executable fadeno-lang
     default-extensions:
         LambdaCase, UnicodeSyntax, BlockArguments, TemplateHaskell,
         OverloadedStrings, NoImplicitPrelude, DataKinds, OverloadedLists,
-        TypeFamilies, ViewPatterns, QuasiQuotes, MultiWayIf
+        TypeFamilies, ViewPatterns, QuasiQuotes, MultiWayIf, UndecidableInstances
     build-depends:
         base ^>=4.20.0.0,
         rio >= 0.1,
