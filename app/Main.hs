@@ -11,11 +11,11 @@ import Control.Effect.Error (Error, throwError)
 import Control.Effect.Fresh (Fresh, fresh)
 import Control.Effect.Lift (Lift, sendIO)
 import Control.Effect.Reader (Reader, ask, local)
-import Control.Effect.State (get, put)
+import Control.Effect.State (get, modify, put)
 import Control.Effect.Writer (Writer, censor, listen, tell)
 import Data.ByteString.Char8 (pack)
 import Data.List (find, sortBy)
-import Data.RRBVector (Vector, adjust, deleteAt, findIndexL, ifoldl', ifoldr, viewl, (!?), (<|))
+import Data.RRBVector (Vector, adjust, deleteAt, findIndexL, ifoldl', ifoldr, viewl, (!?), (<|), (|>))
 import GHC.Exts (IsList (..))
 import Normalize (Context, EqRes (..), applyLambda, isEq', normalize, numDecDispatch, termQQ, unwrapM, withEntry)
 import Parser (Binding, Bits (..), BuiltinT (..), ContextEntry (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, intercept, nestedBy', pIdent, pQuant, pTerm, parse, render, rowOf, traverseTermF, typOf)
@@ -120,12 +120,13 @@ writeMeta ex valNow = do
     ifoldl'
       ( \i rec entry depth → case entry of
           ContextBinding _ → rec (depth + 1)
-          ContextExVar (ex2, valty) → _
+          ContextMarker → rec depth
+          ContextExVar ex2 valty
+            | ex == ex2 → case valty of
+                Left _ → stackError \_ → "Internal: Meta already instantiated?"
+                Right ty → pure (ty, i, depth)
+            | otherwise → rec depth
       )
-      -- \| ex == ex2 → case valty of
-      --   Left _ → stackError \_ → "Internal: Meta already instantiated?"
-      --   Right ty → pure (ty, i, depth)
-      -- \| otherwise → rec depth
       (\_ → stackError \_ → "Internal: Meta not found in the context")
       ctx0
       (0 ∷ Int)
@@ -156,8 +157,18 @@ freshIdent = (`Ident` False) . ("/" <>) . pack . show <$> fresh
 scopedExVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → Term → (TermF Term → m a) → m a
 scopedExVar mapTerm ty act = do
   f ← fresh
-  let exVarTerm = ExVar (f, [])
-  modify (|> ContextExVar _)
+  modify (\x → x |> ContextMarker |> ContextExVar f (Right ty))
+  res ← act $ ExVar f
+  ctx1 ← get @(Vector ContextEntry)
+  let (ctxFinal, unresolveds) =
+        ifoldl'
+          ( \i rec e → case e of
+              ContextExVar u valty → case valty of {}
+              Left e → _
+          )
+          (error "marker not found")
+          ctx1
+  _
 
 -- scopedExVar ∷ (Has Solve sig m) ⇒ ((Term → m Term) → a → m a) → (Int, Term) → m a → m a
 -- scopedExVar mapTerm (ex1, ex1ty) act = do

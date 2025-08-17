@@ -221,7 +221,7 @@ data TermF a
   | -- Type-level
     Pi !Quant !(Maybe Ident) !a !(Lambda a) -- TODO: Demote Pi and Concat to builtins?
   | Concat !a !(Fields a (Maybe Ident, Lambda a))
-  | ExVar !(Int, Vector' Int)
+  | ExVar !Int
   | UniVar !Int
   deriving (Show, Eq, Lift)
 
@@ -546,8 +546,7 @@ parseTop =
 newtype N a = N {unN ∷ a}
 
 type Binding = (Quant, Maybe Ident, Maybe Term, Term)
-data ExVar = ExVarResolved !Term !(Vector ExVar) | ExVarUnresolved !Term
-data ContextEntry = ContextBinding !Binding | ContextExVar !(Int, ExVar) -- (value/type)
+data ContextEntry = ContextBinding !Binding | ContextMarker | ContextExVar !Int !(Either Term Term) -- (value/type)
 
 traverseTermF ∷ (Applicative m) ⇒ (Term → m Term) → (Lambda Term → m (Lambda Term)) → TermF Term → m (TermF Term)
 traverseTermF c cNest = \case
@@ -597,38 +596,22 @@ nestedBy' t00 by =
 nestedByP ∷ Term → Int → Term
 nestedByP t by = fromMaybe (error "Expected positive nesting") $ nestedBy' t by
 
-ctxLookupEx ∷ (Int, Vector' Int) → Vector ContextEntry → Maybe (ExVar, Int)
-ctxLookupEx i v = _
-
 -- Side note: sounds like a good function to design effect system around?
--- TODO: Rewrite this hell
--- ctxFindEx :: (Int, Vector' Int) → Vector ContextEntry → (Term, Int)
--- ctxFindEx =
---   let
---     inner :: (Int → a → Maybe (Int, ExVar)) → ((Int, Vector Int) → Maybe (Term, Int)) → Vector a → (Int, Vector Int) → Maybe (Term, Int)
---     inner unwr cont l = ifoldl'
---       (\ind rec a (i, subiis) → case unwr ind a of
---         Nothing → fmap (+1) <$> rec (i, subiis)
---         Just (i2, ex)
---           | i == i2 → case viewl subiis of
---             Nothing → -- found it
---               case ex of
---                 ExVarUnresolved _ → Nothing
---                 ExVarResolved (Term (ExVar (j, Vector' subjs))) subs →
---                   inner (curry Just) rec subs (j, subjs) <|> Just (Term (ExVar (j, Vector' subjs)), 0)
---                 ExVarResolved val _ → Just (val, 0)
---             Just (subii, subis) → case ex of
---               ExVarUnresolved _ → Nothing
---               ExVarResolved _ subs → inner (curry Just) rec subs (subii, subis)
---           | otherwise → rec (i, subiis)
---       ) cont l
---   in \(i0, Vector' subis) entries → fromMaybe (Term (ExVar (i0, Vector' subis)), 0) $ inner
---    (\_ → \case
---      ContextBinding _ → Nothing
---      ContextExVar e → Just e
---    ) (\_ → Nothing) entries (i0, subis)
+ctxFindEx ∷ Int → Vector ContextEntry → (Term, Int)
+ctxFindEx =
+  flip
+    $ foldl'
+      ( \rec entry i → case entry of
+          ContextBinding _ → fmap (+ 1) $ rec i
+          ContextExVar i2 valty | i == i2 → case valty of
+            Left (Term (ExVar j)) → rec j
+            Left val → (val, 0)
+            Right _ → (Term $ ExVar i, 0)
+          _ → rec i
+      )
+      (\i → (Term $ ExVar i, 0))
 
-ctxResolveEx ∷ (Int, Vector' Int) → Vector ContextEntry → TermF Term
+ctxResolveEx ∷ Int → Vector ContextEntry → TermF Term
 ctxResolveEx i0 ctx =
   let (resolved, depth) = ctxFindEx i0 ctx
    in unTerm $ resolved `nestedByP` depth
@@ -644,7 +627,7 @@ ctxFindBinding i0 ctx0 =
   foldl'
     ( \rec entry i → case entry of
         ContextBinding b → if i == 0 then Just b else rec $ i - 1
-        ContextExVar{} → rec i
+        _ → rec i
     )
     (\_ → Nothing)
     ctx0
