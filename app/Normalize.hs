@@ -2,44 +2,37 @@ module Normalize where
 
 import Control.Algebra
 import Control.Carrier.Empty.Church (runEmpty)
+import Control.Carrier.Error.Church (ErrorC, runError)
 import Control.Carrier.State.Church (StateC, evalState)
 import Control.Effect.Empty (empty)
 import Control.Effect.State (State, get, modify)
+import Control.Effect.Throw (Throw, throwError)
 import Data.ByteString.Char8 (pack)
-import Data.RRBVector (Vector, deleteAt, ifoldr, splitAt, viewl, viewr, (!?), (|>))
+import Data.RRBVector (Vector, deleteAt, findIndexL, ifoldr, splitAt, viewl, viewr, (!?), (|>))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockF (..), BuiltinT (..), ContextEntry (..), Fields (..), Ident (..), Lambda (..), N (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, ctxFindBinding, ctxFindEx, identOfBuiltin, nestedByP, parse, recordGet, traverseTermF, unwrap)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, nestedByP, parse, recordGet, traverseTermF)
+import Prettyprinter (Doc)
+import Prettyprinter.Render.Terminal (AnsiStyle)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try)
 
 -- TODO: Erasure is wrong... Verify for \f. f @4
 
-type Context = State (Vector ContextEntry)
+type Binding = (Quant, Maybe Ident, Maybe Term, Term)
+type Exs = Vector (Vector (Int, Either Term Term)) -- for each scope, list of exs
+type EarliestResolved = Maybe (Int, Int)
+type Context = State (Vector Binding) :+: State Exs :+: State EarliestResolved :+: Throw (Doc AnsiStyle)
 
-unwrapM ∷ (Has Context sig m) ⇒ Term → m (TermF Term)
-unwrapM t = (\ctx → unwrap ctx t) <$> get
+runContext ∷ StateC (Vector Binding) (StateC Exs (StateC EarliestResolved (ErrorC (Doc AnsiStyle) Identity))) a → a
+runContext = run . runError (error . show) pure . evalState Nothing . evalState [[]] . evalState []
 
-withEntry ∷ (Has Context sig m) ⇒ ContextEntry → m a → m a
-withEntry e act = do
-  modify (|> e)
-  r ← act
-  modify (maybe (error "impossible") fst . viewr @ContextEntry)
-  pure r
-
-runContext ∷ StateC (Vector ContextEntry) Identity a → a
-runContext = runIdentity . evalState []
-
--- data Context m a where
---   WithBinding :: Binding → m a → Context m a
---   GetBinding :: Int → Context m (Maybe Binding)
---   GetMeta :: Int → Context m (Maybe Term)
-
--- -- | Context that just contains bindings
--- data ContextBindsC m a = ContextBindsC { unContextBindsC :: ReaderC ParserContext m a }
-
--- instance Algebra sig m ⇒ Algebra (Context :+: sig) (ContextBindsC m) where
---   alg hdl sig ctx = ContextBindsC case sig of
---     L (WithBinding b act) → local (|> b)
---     R other → alg (unContextBindsC . hdl) (R other) ctx
+withBinding ∷ (Has Context sig m) ⇒ Binding → m a → m a
+withBinding b act = do
+  modify (|> b)
+  modify @Exs (|> [])
+  res ← act
+  modify @(Vector Binding) $ maybe (error "Missing binding") fst . viewr
+  modify @Exs $ maybe (error "Missing ex scope") fst . viewr
+  pure res
 
 -- | Intensional equality.
 data EqRes
@@ -47,83 +40,90 @@ data EqRes
   | EqNot -- provably uneq
   | EqUnknown
 
-isEq' ∷ (Has Context sig m) ⇒ ((Int, Vector' Int) → TermF Term → m ()) → Term → Term → m EqRes
-isEq' f l0 r0 =
-  ((,) <$> unwrapM l0 <*> unwrapM r0) >>= \case
-    (Block{}, _) → undefined
-    (_, Block{}) → undefined
-    (AppErased{}, _) → undefined
-    (_, AppErased{}) → undefined
-    (Lam QEra _ _, _) → undefined
-    (_, Lam QEra _ _) → undefined
-    (ExVar i, t) → f i t $> EqYes
-    (t, ExVar i) → f i t $> EqYes
-    (Var a, Var b)
-      | a == b → pure EqYes
-    (Var _, _) → pure EqUnknown
-    (_, Var _) → pure EqUnknown
-    (UniVar i1, UniVar i2)
-      | i1 == i2 → pure EqYes
-    (UniVar{}, _) → pure EqUnknown
-    (_, UniVar{}) → pure EqUnknown
-    (App f1 a1, App f2 a2) →
-      try (isEq' f f1 f2)
-        $ try (isEq' f a1 a2)
-        $ pure EqYes
-    (App{}, _) → pure EqUnknown
-    (_, App{}) → pure EqUnknown
-    (Sorry, _) → pure EqUnknown
-    (_, Sorry) → pure EqUnknown
-    -- Literals
-    (Lam QNorm i bod1, Lam QNorm _ bod2) → withEntry (ContextBinding (QNorm, i, Nothing, Term $ Builtin Any')) $ isEq' f (unLambda bod1) (unLambda bod2)
-    (Lam QNorm _ _, _) → pure EqNot
-    (NumLit a, NumLit b)
-      | a == b → pure EqYes
-    (NumLit _, _) → pure EqNot
-    (TagLit a, TagLit b)
-      | a == b → pure EqYes
-    (TagLit _, _) → pure EqNot
-    (BoolLit a, BoolLit b)
-      | a == b → pure EqYes
-    (BoolLit _, _) → pure EqNot
-    (Builtin a, Builtin b)
-      | a == b → pure EqYes
-    (Builtin _, _) → pure EqNot
-    (_, Builtin _) → pure EqNot
-    (BuiltinsVar, BuiltinsVar) → pure EqYes
-    (BuiltinsVar, _) → pure EqNot
-    (_, BuiltinsVar) → pure EqNot
-    (Pi q1 i1 inT1 outT1, Pi q2 i2 inT2 outT2)
-      | q1 == q2 →
-          force (isEq' f inT1 inT2)
-            $ withEntry (ContextBinding (QNorm, i1 <|> i2, Nothing, inT1))
-            $ isEq' f (unLambda outT1) (unLambda outT2)
-    (Pi{}, _) → pure EqNot
-    (Concat _ _, _) → error "TODO isEq Concat"
-    (ListLit (Vector' (viewl → Just (x, xs))), ListLit (Vector' (viewl → Just (y, ys)))) →
-      force (isEq' f x y) $ isEq' f (Term $ ListLit $ Vector' xs) (Term $ ListLit $ Vector' $ ys)
-    (ListLit (Vector' (null → True)), ListLit (Vector' (null → True))) → pure EqYes
-    (ListLit _, _) → pure EqNot
-    -- TODO: This is greedy, which is bad. Should uwrap lazily.
-    (FieldsLit f1 (Vector' (viewl → Just ((tagx, x), xs))), FieldsLit f2 (Vector' origY))
-      | f1 == f2 →
-          ifoldr
-            ( \i (tagy, y) rec →
-                isEq' f tagx tagy
-                  >>= \case
-                    EqYes →
-                      force (isEq' f x y)
-                        $ isEq'
-                          f
-                          (Term $ FieldsLit f1 $ Vector' xs)
-                          (Term $ FieldsLit f1 $ Vector' $ deleteAt i origY)
-                    EqNot → rec
-                    EqUnknown → pure EqUnknown
-            )
-            (pure EqNot)
-            origY
-    (FieldsLit f1 (Vector' (null → True)), FieldsLit f2 (Vector' (null → True))) | f1 == f2 → pure EqYes
-    (FieldsLit{}, _) → pure EqNot
+-- | Unwraps a term that contains existentials
+unwrap ∷ (Has Context sig m) ⇒ Term → m (TermF Term)
+unwrap x = do
+  earliest ← get @(Maybe (Int, Int))
+  if isNothing earliest
+    then pure $ unTerm x
+    else unTerm <$> normalize x
+
+isEq' ∷ (Has Context sig m) ⇒ ((Int, Int) → TermF Term → m ()) → Term → Term → m EqRes
+isEq' f l0 r0 = case (unTerm l0, unTerm r0) of
+  (Block{}, _) → undefined
+  (_, Block{}) → undefined
+  (AppErased{}, _) → undefined
+  (_, AppErased{}) → undefined
+  (Lam QEra _ _, _) → undefined
+  (_, Lam QEra _ _) → undefined
+  (ExVar i, t) → f i t $> EqYes
+  (t, ExVar i) → f i t $> EqYes
+  (Var a, Var b)
+    | a == b → pure EqYes
+  (Var _, _) → pure EqUnknown
+  (_, Var _) → pure EqUnknown
+  (UniVar i1, UniVar i2)
+    | i1 == i2 → pure EqYes
+  (UniVar{}, _) → pure EqUnknown
+  (_, UniVar{}) → pure EqUnknown
+  (App f1 a1, App f2 a2) →
+    try (isEq' f f1 f2)
+      $ try (isEq' f a1 a2)
+      $ pure EqYes
+  (App{}, _) → pure EqUnknown
+  (_, App{}) → pure EqUnknown
+  (Sorry, _) → pure EqUnknown
+  (_, Sorry) → pure EqUnknown
+  -- Literals
+  (Lam QNorm i bod1, Lam QNorm _ bod2) → withBinding (QNorm, i, Nothing, Term $ Builtin Any') $ isEq' f (unLambda bod1) (unLambda bod2)
+  (Lam QNorm _ _, _) → pure EqNot
+  (NumLit a, NumLit b)
+    | a == b → pure EqYes
+  (NumLit _, _) → pure EqNot
+  (TagLit a, TagLit b)
+    | a == b → pure EqYes
+  (TagLit _, _) → pure EqNot
+  (BoolLit a, BoolLit b)
+    | a == b → pure EqYes
+  (BoolLit _, _) → pure EqNot
+  (Builtin a, Builtin b)
+    | a == b → pure EqYes
+  (Builtin _, _) → pure EqNot
+  (_, Builtin _) → pure EqNot
+  (BuiltinsVar, BuiltinsVar) → pure EqYes
+  (BuiltinsVar, _) → pure EqNot
+  (_, BuiltinsVar) → pure EqNot
+  (Pi q1 i1 inT1 outT1, Pi q2 i2 inT2 outT2)
+    | q1 == q2 →
+        force (isEq' f inT1 inT2)
+          $ withBinding (QNorm, i1 <|> i2, Nothing, inT1)
+          $ isEq' f (unLambda outT1) (unLambda outT2)
+  (Pi{}, _) → pure EqNot
+  (Concat _ _, _) → error "TODO isEq Concat"
+  (ListLit (Vector' (viewl → Just (x, xs))), ListLit (Vector' (viewl → Just (y, ys)))) →
+    force (isEq' f x y) $ isEq' f (Term $ ListLit $ Vector' xs) (Term $ ListLit $ Vector' $ ys)
+  (ListLit (Vector' (null → True)), ListLit (Vector' (null → True))) → pure EqYes
+  (ListLit _, _) → pure EqNot
+  -- TODO: This is greedy, which is bad. Should uwrap lazily.
+  (FieldsLit f1 (Vector' (viewl → Just ((tagx, x), xs))), FieldsLit f2 (Vector' origY))
+    | f1 == f2 →
+        ifoldr
+          ( \i (tagy, y) rec →
+              isEq' f tagx tagy
+                >>= \case
+                  EqYes →
+                    force (isEq' f x y)
+                      $ isEq'
+                        f
+                        (Term $ FieldsLit f1 $ Vector' xs)
+                        (Term $ FieldsLit f1 $ Vector' $ deleteAt i origY)
+                  EqNot → rec
+                  EqUnknown → pure EqUnknown
+          )
+          (pure EqNot)
+          origY
+  (FieldsLit f1 (Vector' (null → True)), FieldsLit f2 (Vector' (null → True))) | f1 == f2 → pure EqYes
+  (FieldsLit{}, _) → pure EqNot
  where
   -- TODO: FRow???
   try act cont =
@@ -135,24 +135,24 @@ isEq' f l0 r0 =
       EqYes → cont
       x → pure x
 
-isEq ∷ N Term → N Term → EqRes
-isEq a b = runContext $ runEmpty (pure EqUnknown) pure $ isEq' (\_ _ → empty) (unN a) (unN b)
+isEq ∷ Term → Term → EqRes
+isEq a b = runContext $ runEmpty (pure EqUnknown) pure $ isEq' (\_ _ → empty) a b
 
--- | Produces a non-dependent concat.
-concat ∷ N Term → N Term → N (TermF Term)
-concat l0 r0 = N $ case (unN l0, unN r0) of
-  (Term (FieldsLit (FRecord ()) l), Term (FieldsLit (FRecord ()) r)) → FieldsLit (FRecord ()) $ l <> r
-  (l, r) → Concat l $ FRecord r
+-- | Produces a non-dependent concat (of normalized terms)
+concat ∷ Term → Term → Term
+concat = curry \case
+  (unTerm → FieldsLit (FRecord ()) l, unTerm → FieldsLit (FRecord ()) r) → Term $ FieldsLit (FRecord ()) $ l <> r
+  (l, r) → Term $ Concat l $ FRecord r
 
-unconsField ∷ N Term → Maybe ((N Term, N Term), N Term)
+unconsField ∷ Term → Maybe ((Term, Term), Term)
 unconsField =
-  unTerm . unN >>> \case
-    Concat (Term (Concat l (FRecord m))) (FRecord r) → unconsField $ N $ Term $ unN $ concat (N l) $ N $ Term $ unN $ concat (N m) (N r)
-    Concat (Term (FieldsLit (FRecord ()) (Vector' fi))) (FRecord r) → case viewl fi of
-      Just (x, xs) → Just (bimap N N $ x, N $ Term $ unN $ concat (N $ Term $ FieldsLit (FRecord ()) $ Vector' xs) $ N r)
-      Nothing → unconsField $ N r
+  unTerm >>> \case
+    Concat (unTerm → Concat l (FRecord m)) (FRecord r) → unconsField $ concat l $ concat m r
+    Concat (unTerm → FieldsLit (FRecord ()) (Vector' fi)) (FRecord r) → case viewl fi of
+      Just (x, xs) → Just (x, concat (Term $ FieldsLit (FRecord ()) $ Vector' xs) r)
+      Nothing → unconsField r
     FieldsLit (FRecord ()) (Vector' fi) → case viewl fi of
-      Just (x, xs) → Just (bimap N N x, N $ Term $ FieldsLit (FRecord ()) $ Vector' xs)
+      Just (x, xs) → Just (x, Term $ FieldsLit (FRecord ()) $ Vector' xs)
       Nothing → Nothing
     _ → Nothing
 
@@ -162,9 +162,9 @@ repeat n f = case n of
   _ → f . repeat (n - 1) f
 
 -- TODO: Really simple, expand upon.
-unplus ∷ N Term → (Maybe (N Term), Integer)
-unplus (N (Term (NumLit n))) | n >= 0 = (Nothing, n)
-unplus (N (Term (Term (Term (Builtin (Add (NumDesc True BitsInf))) `App` a) `App` Term (NumLit n)))) = (+ n) <$> unplus (N a)
+unplus ∷ Term → (Maybe Term, Integer)
+unplus (unTerm → NumLit n) | n >= 0 = (Nothing, n)
+unplus (unTerm → (Term (Term (Builtin (Add (NumDesc True BitsInf))) `App` a) `App` Term (NumLit n))) = (+ n) <$> unplus a
 unplus x = (Just x, 0)
 
 numDecDispatch ∷ NumDesc → (∀ x. (Integral x, Bounded x) ⇒ Proxy x → a) → (Bool → a) → a
@@ -182,56 +182,55 @@ numDecDispatch (NumDesc signed bits) f inf = case (signed, bits) of
 data ListDropRes = TDFound !(Vector' Term) | TDMissing | TDUnknown
 
 -- | Processes application of `f` onto `a`.
-postApp ∷ N Term → N Term → N (TermF Term)
-postApp f00 a00 = N $ case (unTerm $ unN f00, unN a00) of
-  (Lam QNorm _ bod, a) → unTerm $ unN $ applyLambda (N bod) (N a)
+postApp ∷ Term → Term → Term
+postApp f0 a0 = case (unTerm f0, a0) of
+  (Lam QNorm _ bod, a) → applyLambda bod a
   (App (Term (Builtin RecordGet)) name1, a) →
     let
       search a' = case unconsField a' of
-        Nothing → recordGet name1 $ unN a'
-        Just ((name2, v), rest) → case isEq (N name1) name2 of
-          EqYes → unN v
+        Nothing → recordGet name1 a'
+        Just ((name2, v), rest) → case isEq name1 name2 of
+          EqYes → v
           EqNot → search rest
-          EqUnknown → recordGet name1 $ unN a'
+          EqUnknown → recordGet name1 a'
      in
-      unTerm $ search $ N a
-  (Term (Builtin RecordKeepFields) `App` Term (ListLit tags), a) → FieldsLit (FRecord ()) $ (\tag → (tag, recordGet tag a)) <$> tags
-  (Term (Builtin RecordDropFields) `App` Term (ListLit tags), a) → unTerm $ recordDropFields tags a
-  (Builtin ListLength, Term (ListLit (Vector' fi))) → NumLit $ fromIntegral $ length fi
+      search a
+  (Term (Builtin RecordKeepFields) `App` Term (ListLit tags), a) → Term . FieldsLit (FRecord ()) $ (\tag → (tag, recordGet tag a)) <$> tags
+  (Term (Builtin RecordDropFields) `App` Term (ListLit tags), a) → recordDropFields tags a
+  (Builtin ListLength, Term (ListLit (Vector' fi))) → Term $ NumLit $ fromIntegral $ length fi
   (f@(Term (Term (Builtin ListIndexL) `App` Term (ListLit (Vector' vals))) `App` Term (NumLit i)), a) → case vals !? fromIntegral i of
-    Just v → unTerm v
-    Nothing → App (Term f) a
+    Just v → v
+    Nothing → Term $ App (Term f) a
   (Term (Term (Builtin NatFold) `App` start) `App` step, n) →
     let
-      (nTM, nV) = unplus (N n)
+      (nTM, nV) = unplus n
      in
       -- TODO: causes constant re-normalization of `int+_fold` args.
-      unTerm
-        $ (if nV > 0 then unN . runContext . normalize else id)
+      (if nV > 0 then runContext . normalize else id)
         $ repeat nV (Term . App step)
         $ case nTM of
           Nothing → start
-          Just (N nT) → Term $ Term (Term (Term (Builtin NatFold) `App` start) `App` step) `App` nT
+          Just nT → Term $ Term (Term (Term (Builtin NatFold) `App` start) `App` step) `App` nT
   (Term (Term (Builtin If) `App` (Term (BoolLit cond))) `App` thenBranch, elseBranch) →
-    if cond then unTerm thenBranch else unTerm elseBranch
-  (Builtin IntGte0, Term (NumLit x)) → BoolLit $ x >= 0
-  (Term (Builtin IntEq) `App` Term (NumLit l), Term (NumLit r)) → BoolLit $ l == r
-  (Term (Builtin IntNeq) `App` Term (NumLit l), Term (NumLit r)) → BoolLit $ l /= r
-  (Term (Builtin Wrap) `App` _ty, b) → unTerm b
-  (Term (Builtin Unwrap) `App` _ty, b) → unTerm b
+    if cond then thenBranch else elseBranch
+  (Builtin IntGte0, Term (NumLit x)) → Term $ BoolLit $ x >= 0
+  (Term (Builtin IntEq) `App` Term (NumLit l), Term (NumLit r)) → Term $ BoolLit $ l == r
+  (Term (Builtin IntNeq) `App` Term (NumLit l), Term (NumLit r)) → Term $ BoolLit $ l /= r
+  (Term (Builtin Wrap) `App` _ty, b) → b
+  (Term (Builtin Unwrap) `App` _ty, b) → b
   -- Add
   (Term (Builtin (Add d)) `App` a, Term (NumLit b))
-    | b == 0 → unTerm a
-    | Term (NumLit a') ← a → NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a' + fromIntegral b) (\_ → a' + b)
+    | b == 0 → a
+    | Term (NumLit a') ← a → Term $ NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a' + fromIntegral b) (\_ → a' + b)
   -- Sub
-  (Builtin (IntNeg d), Term (NumLit x)) → NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ -fromIntegral x) (\_ → -x)
-  (f, a) → App (Term f) a
+  (Builtin (IntNeg d), Term (NumLit x)) → Term $ NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ -fromIntegral x) (\_ → -x)
+  (f, a) → Term $ App (Term f) a
  where
   -- Drop `x` from ListLit.
   listLitDrop ∷ Term → Vector' Term → ListDropRes
   listLitDrop x (Vector' fi) =
     ifoldr
-      ( \i n rec → case isEq (N x) (N n) of
+      ( \i n rec → case isEq x n of
           EqYes → TDFound $ Vector' $ deleteAt i fi
           EqNot → rec
           EqUnknown → TDUnknown
@@ -246,71 +245,78 @@ postApp f00 a00 = N $ case (unTerm $ unN f00, unN a00) of
       let
         stuck = Term $ App (Term $ App (Term $ Builtin RecordDropFields) $ Term $ ListLit tags) fields0
        in
-        case unconsField (N fields0) of
+        case unconsField fields0 of
           Nothing → stuck
-          Just ((N n, N v), fields) → case listLitDrop n tags of
-            TDFound tags' → recordDropFields tags' $ unN fields
+          Just ((n, v), fields) → case listLitDrop n tags of
+            TDFound tags' → recordDropFields tags' fields
             TDMissing →
-              Term $ unN $ concat (N $ Term $ FieldsLit (FRecord ()) [(n, v)]) $ N $ recordDropFields tags (unN fields)
+              concat (Term $ FieldsLit (FRecord ()) [(n, v)]) $ recordDropFields tags fields
             TDUnknown → stuck
 
-traverseNormTermF ∷ (Has Context sig m) ⇒ (Vector (Maybe (N Term)) → Term → m (N Term)) → Vector (Maybe (N Term)) → TermF Term → m (N (TermF Term))
+splitAt3 ∷ Int → Vector a → (Vector a, Maybe a, Vector a)
+splitAt3 i v =
+  let
+    (bef, viewl → aft) = splitAt i v
+   in
+    (bef, fst <$> aft, maybe [] snd aft)
+
+traverseNormTermF ∷ (Has Context sig m) ⇒ (Vector (Maybe Term) → Term → m Term) → Vector (Maybe Term) → TermF Term → m Term
 traverseNormTermF c locals t0 =
-  N <$> case t0 of
+  case t0 of
     App f a → do
       f' ← c locals f
       a' ← c locals a
-      pure $ unN $ postApp f' a'
+      pure $ postApp f' a'
     Var globalI →
       if globalI < length locals
         then
           pure
             $ let (_, b, potentiallyErasable) = splitAt3 (length locals - 1 - globalI) locals
                in case b of
-                    Just (Just v) → unTerm $ unN v
-                    _ → Var $ globalI - countErased potentiallyErasable
+                    Just (Just v) → v
+                    _ → Term $ Var $ globalI - countErased potentiallyErasable
         else do
-          ctx ← get
+          globals ← get @(Vector Binding)
           let globalAfterErased = globalI - countErased locals
-          pure case ctxFindBinding (globalI - length locals) ctx of
-            Just (_, _, Just raw, _) → unTerm $ nestedByP raw globalAfterErased
-            _ → Var globalAfterErased
-    AppErased f _a → unTerm . unN <$> c locals f
+          pure case globals !? (length globals - 1 - (globalI - length locals)) of
+            Just (_, _, Just raw, _) → nestedByP raw globalAfterErased
+            _ → Term $ Var globalAfterErased
+    AppErased f _a → c locals f
     Block (BlockLet _q _name _ty val into) → do
       val' ← c locals val
-      unTerm . unN <$> (c (locals |> Just val') $ unLambda into)
-    Block (BlockRewrite _prf into) → unTerm . unN <$> c locals into
+      c (locals |> Just val') $ unLambda into
+    Block (BlockRewrite _prf into) → c locals into
     Concat a b → case b of
-      FRecord b' → unN <$> (concat <$> c locals a <*> c locals b')
-      FRow (name, b') → Concat <$> (unN <$> c locals a) <*> (FRow . (name,) . Lambda . unN <$> (c (locals |> Nothing) $ unLambda b'))
-    _ → traverseTermF (fmap unN . c locals) (\l → fmap (Lambda . unN) $ c (locals |> Nothing) $ unLambda l) t0
+      FRecord b' → concat <$> c locals a <*> c locals b'
+      FRow (name, b') → Term <$> (Concat <$> c locals a <*> (FRow . (name,) . Lambda <$> (c (locals |> Nothing) $ unLambda b')))
+    ExVar (i, subi) → do
+      globals ← get @(Vector Binding)
+      exs ← get @Exs
+      (_, valty) ← maybe (throwError @(Doc AnsiStyle) "Existential not found in context") pure do
+        scope ← exs !? i
+        ind ← findIndexL ((== subi) . fst) scope
+        scope !? ind
+      case valty of
+        Left val → pure $ nestedByP val $ length locals + (length globals - i) -- no -1 because of ridiculous scope counting
+        Right _ → pure $ Term $ ExVar (i, subi)
+    _ → Term <$> traverseTermF (c locals) (\l → fmap Lambda $ c (locals |> Nothing) $ unLambda l) t0
  where
-  splitAt3 i v =
-    let
-      (bef, viewl → aft) = splitAt i v
-     in
-      (bef, fst <$> aft, maybe [] snd aft)
   countErased = foldl' (\acc e → if isJust e then acc + 1 else acc) 0
 
-normalize' ∷ (Has Context sig m) ⇒ Vector (Maybe (N Term)) → Term → m (N Term)
-normalize' locals0 t0 = do
-  ctx ← get
-  fix
-    ( \rec locals →
-        unTerm >>> fmap (N . Term . unN) . \case
-          ExVar i →
-            let (j, depth) = ctxFindEx i ctx
-             in traverseNormTermF rec locals (unTerm $ nestedByP j $ depth + length locals)
-          x → traverseNormTermF rec locals x
-    )
-    locals0
-    t0
+rewrite ∷ (Has Context sig m) ⇒ (Int → Term → m (Maybe Term)) → Vector (Maybe Term) → Term → m Term
+rewrite rewriter = fix \rec locals t →
+  rewriter (length locals) t >>= \case
+    Just u → pure u
+    Nothing → traverseNormTermF rec locals $ unTerm t
 
-normalize ∷ (Has Context sig m) ⇒ Term → m (N Term)
+normalize' ∷ (Has Context sig m) ⇒ Vector (Maybe Term) → Term → m Term
+normalize' = rewrite (\_ _ → pure Nothing)
+
+normalize ∷ (Has Context sig m) ⇒ Term → m Term
 normalize = normalize' []
 
-applyLambda ∷ N (Lambda Term) → N Term → N Term
-applyLambda bod val = runContext $ normalize' [Just val] $ unLambda $ unN bod
+applyLambda ∷ Lambda Term → Term → Term
+applyLambda bod val = runContext $ normalize' [Just val] $ unLambda bod
 
 -- Rewrites and then simplifies.
 -- rewrite :: ∀ m. (Monad m) ⇒ (Term → m (Maybe (N Term))) → Term → m (N Term)
@@ -558,19 +564,19 @@ applyLambda bod val = runContext $ normalize' [Just val] $ unLambda $ unN bod
 termQQ ∷ QuasiQuoter
 termQQ =
   let
-    wher ∷ N Term
-    wher = N $ Term $ Lam QNorm (Just $ Ident "n" False) $ Lambda $ Term $ Term (Term (Builtin Eq) `App` Term (Var 0)) `App` Term (BoolLit True)
-    scope ∷ Vector (Maybe Ident, N Term)
+    wher ∷ Term
+    wher = Term $ Lam QNorm (Just $ Ident "n" False) $ Lambda $ Term $ Term (Term (Builtin Eq) `App` Term (Var 0)) `App` Term (BoolLit True)
+    scope ∷ Vector (Maybe Ident, Term)
     scope =
-      ((\b → (Just $ identOfBuiltin b, N $ Term $ Builtin b)) <$> builtinsList)
-        <> [(Just $ Ident "+" True, N $ Term $ Builtin $ Add $ NumDesc False BitsInf), (Just $ Ident "Where" False, wher)]
+      ((\b → (Just $ identOfBuiltin b, Term $ Builtin b)) <$> builtinsList)
+        <> [(Just $ Ident "+" True, Term $ Builtin $ Add $ NumDesc False BitsInf), (Just $ Ident "Where" False, wher)]
    in
     QuasiQuoter
       { quoteExp = \s → do
           term ← case parse ((QNorm,) . fst <$> scope) (pack s) of
             Left e → fail $ "termQQ: Parse error: " ++ show e
             Right t → pure t
-          let normed = unN $ runContext $ normalize' (Just . snd <$> scope) term
+          let normed = runContext $ normalize' (Just . snd <$> scope) term
           ⟦normed⟧
       , quotePat = error "termQQ: No pattern support"
       , quoteType = error "termQQ: No type support"

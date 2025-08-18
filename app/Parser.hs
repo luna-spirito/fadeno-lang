@@ -1,21 +1,16 @@
 module Parser (
-  Binding,
   Bits (..),
   BlockF (..),
   BuiltinT (..),
-  ContextEntry (..),
   Fields (..),
   Ident (..),
   Lambda (..),
-  N (..),
   NumDesc (..),
   Quant (..),
   Term (..),
   TermF (..),
   Vector' (..),
   builtinsList,
-  ctxFindBinding,
-  ctxFindEx,
   eqOf,
   formatFile,
   identOfBuiltin,
@@ -34,7 +29,6 @@ module Parser (
   typ,
   typOf,
   traverseTermF,
-  unwrap,
 ) where
 
 import Control.Algebra
@@ -46,7 +40,7 @@ import Control.Effect.Empty qualified as E
 import Control.Effect.Reader qualified as R
 import Data.ByteString.Char8 qualified as BS
 import Data.Kind (Type)
-import Data.RRBVector (Vector, findIndexR, ifoldl', viewl, (!?), (|>))
+import Data.RRBVector (Vector, findIndexR, (!?), (|>))
 import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string, try)
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Syntax (Lift (..))
@@ -176,7 +170,7 @@ instance (Lift a) ⇒ Lift (Vector' a) where
     [||Vector' (fromList $$(liftTyped (toList v)))||]
 
 data BlockF f
-  = BlockLet !Quant !(Maybe Ident) !(Maybe f) !Term !(Lambda f)
+  = BlockLet !Quant !(Maybe Ident) !(Maybe f) !f !(Lambda f)
   | BlockRewrite !f !f
   deriving (Show, Eq, Lift)
 
@@ -221,7 +215,7 @@ data TermF a
   | -- Type-level
     Pi !Quant !(Maybe Ident) !a !(Lambda a) -- TODO: Demote Pi and Concat to builtins?
   | Concat !a !(Fields a (Maybe Ident, Lambda a))
-  | ExVar !Int
+  | ExVar !(Int, Int)
   | UniVar !Int
   deriving (Show, Eq, Lift)
 
@@ -540,15 +534,9 @@ parseTop =
     <|> parseInfixOps
     <|> (err =<< getPos)
 
--- context
+-- traversing
 
--- A value normalized IN THE CURRENT CONTEXT. Unsafe, obviously
-newtype N a = N {unN ∷ a}
-
-type Binding = (Quant, Maybe Ident, Maybe Term, Term)
-data ContextEntry = ContextBinding !Binding | ContextMarker | ContextExVar !Int !(Either Term Term) -- (value/type)
-
-traverseTermF ∷ (Applicative m) ⇒ (Term → m Term) → (Lambda Term → m (Lambda Term)) → TermF Term → m (TermF Term)
+traverseTermF ∷ (Applicative m) ⇒ (a → m b) → (Lambda a → m (Lambda b)) → TermF a → m (TermF b)
 traverseTermF c cNest = \case
   NumLit x → pure $ NumLit x
   TagLit x → pure $ TagLit x
@@ -596,43 +584,6 @@ nestedBy' t00 by =
 nestedByP ∷ Term → Int → Term
 nestedByP t by = fromMaybe (error "Expected positive nesting") $ nestedBy' t by
 
--- Side note: sounds like a good function to design effect system around?
-ctxFindEx ∷ Int → Vector ContextEntry → (Term, Int)
-ctxFindEx =
-  flip
-    $ foldl'
-      ( \rec entry i → case entry of
-          ContextBinding _ → fmap (+ 1) $ rec i
-          ContextExVar i2 valty | i == i2 → case valty of
-            Left (Term (ExVar j)) → rec j
-            Left val → (val, 0)
-            Right _ → (Term $ ExVar i, 0)
-          _ → rec i
-      )
-      (\i → (Term $ ExVar i, 0))
-
-ctxResolveEx ∷ Int → Vector ContextEntry → TermF Term
-ctxResolveEx i0 ctx =
-  let (resolved, depth) = ctxFindEx i0 ctx
-   in unTerm $ resolved `nestedByP` depth
-
-unwrap ∷ Vector ContextEntry → Term → TermF Term
-unwrap ctx =
-  unTerm >>> \case
-    ExVar i → ctxResolveEx i ctx
-    x → x
-
-ctxFindBinding ∷ Int → Vector ContextEntry → Maybe Binding
-ctxFindBinding i0 ctx0 =
-  foldl'
-    ( \rec entry i → case entry of
-        ContextBinding b → if i == 0 then Just b else rec $ i - 1
-        _ → rec i
-    )
-    (\_ → Nothing)
-    ctx0
-    i0
-
 -- printing
 
 pBS ∷ ByteString → Doc AnsiStyle
@@ -653,8 +604,8 @@ withPrec oldPrec (newPrec, bod) =
 complexThreshold ∷ Int → Bool
 complexThreshold = (>= 5)
 
-isSimple ∷ Vector ContextEntry → Term → Bool
-isSimple ctx0 =
+isSimple ∷ Term → Bool
+isSimple =
   let ping = do
         modify @Int (+ 1)
         curr ← get
@@ -686,9 +637,7 @@ isSimple ctx0 =
               FRow (_, b') → unLambda b'
           Builtin _ → ping
           BuiltinsVar → ping
-          ExVar i → case unTerm $ fst $ ctxFindEx i ctx0 of
-            ExVar _ → ping
-            x → complexity $ Term x
+          ExVar _ → ping
           UniVar _ → ping
    in runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
 
@@ -701,21 +650,19 @@ data Fuse = FNo | FLam | FPi | FBlock !(Maybe Term) deriving (Eq)
 
 -- TODO: Refactor isSimple, it's frankly stupid.
 -- Refactor the whole system, it's all stupid.
-pTerm' ∷ (Fuse, Int, Vector ContextEntry) → Term → Doc AnsiStyle
+pTerm' ∷ (Fuse, Int, ParserContext) → Term → Doc AnsiStyle
 pTerm' (fuse, oldPrec, vars) t0 =
   let
-    newBind arg = ContextBinding (QNorm, arg, Nothing, Term $ Builtin Any') -- don't care about the specifics
-    tf0 = unwrap vars t0
-    prefixf = case (fuse, tf0) of
+    prefixf = case (fuse, unTerm t0) of
       (FNo, _) → id
       (FLam, Lam{}) → id
-      (FLam, _) → (<>) $ annotate (color Cyan) "." <> if isSimple vars (Term tf0) then " " else line
+      (FLam, _) → (<>) $ annotate (color Cyan) "." <> if isSimple t0 then " " else line
       (FPi, Pi{}) → id
       (FPi, _) → (<>) $ annotate (color Cyan) "->" <> " "
       (FBlock _, Block{}) → id
       (FBlock _, _) → \x → line <> annotate (color Cyan) "in" <+> nest 2 x
    in
-    prefixf $ withPrec oldPrec case tf0 of
+    prefixf $ withPrec oldPrec case unTerm t0 of
       Lam q arg x →
         ( 0
         , (if fuse == FLam then " " else annotate (color Cyan) "\\")
@@ -726,11 +673,11 @@ pTerm' (fuse, oldPrec, vars) t0 =
       Block block → (1,) $ case block of
         BlockLet q nameM tyM val in_ →
           case (tyM, nameM, val) of
-            (Nothing, Just name1, unwrap vars → (unwrap vars → (unwrap vars → Builtin RecordGet) `App` (unwrap vars → TagLit name2)) `App` record)
+            (Nothing, Just name1, unTerm → (unTerm → (unTerm → Builtin RecordGet) `App` (unTerm → TagLit name2)) `App` record)
               | name1 == name2 →
                   (if fuse == FBlock (Just record) then mempty else annotate (color Yellow) "unpack" <+> pTerm' (FNo, 5, vars) record <> annotate (color Cyan) ".")
                     <+> pIdent name1
-                      <> pTerm' (FBlock $ Just record, 0, vars |> newBind (Just name1)) (unLambda in_)
+                      <> pTerm' (FBlock $ Just record, 0, vars |> (QNorm, Just name1)) (unLambda in_)
             _ →
               ( case fuse of
                   FBlock{} → line
@@ -751,7 +698,7 @@ pTerm' (fuse, oldPrec, vars) t0 =
                 <+> annotate (color Yellow) (pQuant q <> "=")
                   <> softline
                   <> nest 2 (pTerm' (FNo, 0, vars) val)
-                  <> pTerm' (FBlock Nothing, 0, vars |> newBind nameM) (unLambda in_)
+                  <> pTerm' (FBlock Nothing, 0, vars |> (q, nameM)) (unLambda in_)
         BlockRewrite x in_ → line <> "rewrite" <+> pTerm' (FNo, 0, vars) x <> line <> pTerm' (FBlock Nothing, 0, vars) in_
       Pi q name inTy outTy →
         ( 3
@@ -763,21 +710,21 @@ pTerm' (fuse, oldPrec, vars) t0 =
                 <> maybe mempty (\i → pIdent i <+> ": ") name
                 <> pTerm' (FNo, 0, vars) inTy
                 <> bR
-                <+> pTerm' (FPi, 3, vars |> newBind name) (unLambda outTy)
+                <+> pTerm' (FPi, 3, vars |> (q, name)) (unLambda outTy)
         )
       Concat a b →
         ( 3
         , pTerm' (FNo, 4, vars) a
             <+> annotate (color Cyan) "\\" <> case b of
               FRecord b' → annotate (color Cyan) "/" <+> pTerm' (FNo, 3, vars) b'
-              FRow (n, b') → maybe "_" pIdent n <> annotate (color Cyan) "/" <+> pTerm' (FNo, 3, vars |> newBind n) (unLambda b')
+              FRow (n, b') → maybe "_" pIdent n <> annotate (color Cyan) "/" <+> pTerm' (FNo, 3, vars |> (QNorm, n)) (unLambda b')
         )
       Sorry → (5, "SORRY!")
-      App (unwrap vars → App (unwrap vars → Builtin RecordGet) (unwrap vars → TagLit tag)) rec →
+      App (unTerm → App (unTerm → Builtin RecordGet) (unTerm → TagLit tag)) rec →
         (5, pTerm' (FNo, 5, vars) rec <> annotate (color Blue) ("." <> pIdent tag))
       App lam arg2 → case lam of
-        (unwrap vars → App (unwrap vars → Var opIdx) arg1)
-          | Just (_, Just (Ident opName True), _, _) ← ctxFindBinding opIdx vars →
+        (unTerm → App (unTerm → Var opIdx) arg1)
+          | Just (_, Just (Ident opName True)) ← vars !? opIdx →
               (2, pTerm' (FNo, 3, vars) arg1 <+> pBS opName <+> pTerm' (FNo, 2, vars) arg2)
         _ →
           (4, pTerm' (FNo, 4, vars) lam <+> pTerm' (FNo, 5, vars) arg2)
@@ -799,11 +746,11 @@ pTerm' (fuse, oldPrec, vars) t0 =
                 (fmap (\(n, v) → pTerm' (FNo, 5, vars) n <+> annotate (color Cyan) "=" <+> pTerm' (FNo, 0, vars) v) (toList fields))
             )
       ListLit vec → (5, encloseSep "[" "]" " | " $ fmap (\x → pTerm' (FNo, 0, vars) x) (toList vec))
-      Var x → (5, maybe ("#" <> pretty x) (\(_, i, _, _) → maybe "_" pIdent i) $ ctxFindBinding x vars)
-      ExVar (a, b) → (5, "(exi#" <> pretty a <> "/" <> pretty (toList b) <> ")")
+      Var x → (5, maybe ("#" <> pretty x) (\(_, i) → maybe "_" pIdent i) $ vars !? x)
+      ExVar i → (5, "(exi#" <> pretty i <> ")")
       UniVar i → (5, "(uni#" <> pretty i <> ")")
 
-pTerm ∷ Vector ContextEntry → Term → Doc AnsiStyle
+pTerm ∷ ParserContext → Term → Doc AnsiStyle
 pTerm = pTerm' . (FNo,0,)
 
 parse ∷ ParserContext → ByteString → Either Text Term

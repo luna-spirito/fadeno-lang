@@ -13,15 +13,16 @@ import Control.Effect.Lift (Lift, sendIO)
 import Control.Effect.Reader (Reader, ask, local)
 import Control.Effect.State (get, modify, put)
 import Control.Effect.Writer (Writer, censor, listen, tell)
+import Data.Bitraversable (bimapM)
 import Data.ByteString.Char8 (pack)
 import Data.List (find, sortBy)
-import Data.RRBVector (Vector, adjust, deleteAt, findIndexL, ifoldl', ifoldr, viewl, (!?), (<|), (|>))
+import Data.RRBVector (Vector, adjust, adjust', deleteAt, drop, findIndexL, ifoldl', ifoldr, splitAt, viewl, zip, (!?), (<|), (|>))
 import GHC.Exts (IsList (..))
-import Normalize (Context, EqRes (..), applyLambda, isEq', normalize, numDecDispatch, termQQ, unwrapM, withEntry)
-import Parser (Binding, Bits (..), BuiltinT (..), ContextEntry (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, intercept, nestedBy', pIdent, pQuant, pTerm, parse, render, rowOf, traverseTermF, typOf)
+import Normalize (Binding, Context, EarliestResolved, EqRes (..), Exs, applyLambda, isEq', normalize, numDecDispatch, rewrite, splitAt3, termQQ)
+import Parser (Bits (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, intercept, nestedBy', pIdent, pQuant, pTerm, parse, render, rowOf, traverseTermF, typOf)
 import Prettyprinter (Doc, annotate, group, indent, line, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
-import RIO hiding (Reader, Vector, ask, concat, filter, link, local, runReader, toList)
+import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, runReader, toList, zip)
 import RIO.HashMap qualified as HM
 
 main ∷ IO ()
@@ -34,7 +35,7 @@ main = pure ()
 -- TODO: Recheck the whole file.
 -- TODO: Concat uncomfortably replicate Pi.
 
-type Checker = Context :+: Fresh :+: StackLog :+: Error (Doc AnsiStyle)
+type Checker = Context :+: Fresh :+: StackLog
 
 -- | Debug stack
 data StackLog m a where
@@ -59,7 +60,7 @@ instance (Algebra sig m) ⇒ Algebra (StackLog :+: sig) (StackAccC m) where
     R other → alg (unStackAccC . hdl) (R other) ctx
 
 termLoggerM ∷ (Has Context sig m) ⇒ m (Term → Doc AnsiStyle)
-termLoggerM = (\ctx → pTerm ctx) <$> get
+termLoggerM = (\ctx → pTerm $ (\(q, n, _, _) → (q, n)) <$> ctx) <$> get @(Vector Binding)
 
 stackLog ∷ (Has (Context :+: StackLog) sig m) ⇒ ((Term → Doc AnsiStyle) → Doc AnsiStyle) → m ()
 stackLog f = send . StackLog . f =<< termLoggerM
@@ -112,63 +113,113 @@ runStackPrintC = runReader 0 . unStackPrintC
 
 -- Check
 
-writeMeta ∷ (Has Checker sig m) ⇒ Int → Term → m ()
-writeMeta ex valNow = do
-  stackLog \p → "exi# " <> pretty ex <+> ":=" <+> p valNow
-  ctx0 ∷ Vector ContextEntry ← get
-  (ty, ind, depth) ←
-    ifoldl'
-      ( \i rec entry depth → case entry of
-          ContextBinding _ → rec (depth + 1)
-          ContextMarker → rec depth
-          ContextExVar ex2 valty
-            | ex == ex2 → case valty of
-                Left _ → stackError \_ → "Internal: Meta already instantiated?"
-                Right ty → pure (ty, i, depth)
-            | otherwise → rec depth
-      )
-      (\_ → stackError \_ → "Internal: Meta not found in the context")
-      ctx0
-      (0 ∷ Int)
-  val ← maybe (stackError \_ → "") pure $ nestedBy' valNow $ -depth
-  put $ adjust ind (\_ → ContextExVar ex $ Left val) ctx0
-  infer val $ Check ty
+writeMeta' ∷ ∀ sig m. (Has Checker sig m) ⇒ (Int, Int) → Term → m ()
+writeMeta' = \(scope, subi) f → do
+  exs0 ← get @Exs
+  let (exsBefore, exsMiddleM, exsAfter) = splitAt3 scope exs0
+  (exsMiddleBef, exsMiddleAft) ← maybe (stackError \_ → "Internal error: ex not found in context") pure do
+    middle ← exsMiddleM
+    i ← findIndexL ((== subi) . fst) middle
+    pure $ splitAt i middle
+  (bindsBefore, bindsAfter) ← splitAt scope <$> get @(Vector Binding)
+  put $ exsBefore |> exsMiddleBef
+  put bindsBefore
+  let
+    fe ∷ (Int, Either Term Term) → m ()
+    fe (exId, valty) = do
+      valty' ← bimapM f f valty
+      modify @Exs \exs → adjust' (length exs - 1) (|> (exId, valty')) exs
+    fb (q, n, val, ty) = do
+      ty' ← f ty
+      modify @(Vector Binding) (|> (q, n, val, ty'))
+  for_ exsMiddleAft fe
+  for_ (zip bindsAfter exsAfter) \(b, e) → do
+    fb b
+    modify @Exs (|> [])
+    for_ e fe
 
--- TODO: Dependent.
+-- let proc s fe fb = \case
+--       (viewl → Just (e, es), viewl → Just (b, bs)) → fe s e *> fb b *> proc (s+1) fe fb (es, bs)
+--       ([], [b]) → fb b
+--       _ → error "Internal error: exs/binds mismatch"
+-- proc
+--   (length exsBefore)
+--   (\scope → traverse_ \(exId, valty0) → do
+--     valty ← bimapM f f valty0
+--     modify _)
+--   _
+--   (exsMiddleAft <| exsAfter, bindsAfter)
+-- for_ (zip(exsStart : toList exsAfter) bindsAfter) _
+-- _
+-- traverse start and traverse intermediate bindings! And also update context! Always!
 
--- | Introduce new variable/binding.
-scopedVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → (Quant, Maybe Ident, Maybe Term, Term) → m a → m a
-scopedVar mapTerm (bindQ, bindI, bindT, bindTy) act =
-  withEntry (ContextBinding (bindQ, bindI, bindT, bindTy)) act
-    >>= mapTerm (\t → maybe (stackError \p → "Var leaked in" <+> p t) pure $ nestedBy' t $ -1)
+writeMeta ∷ (Has Checker sig m) ⇒ (Int, Int) → Term → m ()
+writeMeta exId@(scope, sub) valNow = do
+  stackLog \p → "exi# " <> pretty exId <+> ":=" <+> p valNow
+  modify @EarliestResolved $ Just . maybe exId (min exId)
+  binds ← get @(Vector Binding)
+  let depth = length binds - scope -- no -1 due to scope being ridiculous
+  -- val ← maybe (stackError \_ → "Leak") pure $ nestedBy' valNow $ -depth
+  -- modify @Exs $ adjust' scope ()
+  -- traverseAfter (scope, sub) normalize
 
-scopedUniVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → (TermF Term → m a) → m a
-scopedUniVar mapTerm act = do
-  uni1 ← fresh
-  let ensureNotOcc = fix \rec t0 →
-        fmap Term $ unwrapM t0 >>= \case
-          UniVar uni2 | uni1 == uni2 → empty
-          x → traverseTermF rec (fmap Lambda . rec . unLambda) x
-  act (UniVar uni1) >>= mapTerm ensureNotOcc
+-- writeMeta ∷ (Has Checker sig m) ⇒ Int → Term → m ()
+-- writeMeta ex valNow = do
+--   stackLog \p → "exi# " <> pretty ex <+> ":=" <+> p valNow
+--   ctx0 ∷ Vector ContextEntry ← get
+--   (ty, ind, depth) ←
+--     ifoldl'
+--       ( \i rec entry depth → case entry of
+--           ContextBinding _ → rec (depth + 1)
+--           ContextMarker → rec depth
+--           ContextExVar ex2 valty
+--             | ex == ex2 → case valty of
+--                 Left _ → stackError \_ → "Internal: Meta already instantiated?"
+--                 Right ty → pure (ty, i, depth)
+--             | otherwise → rec depth
+--       )
+--       (\_ → stackError \_ → "Internal: Meta not found in the context")
+--       ctx0
+--       (0 ∷ Int)
+--   val ← maybe (stackError \_ → "") pure $ nestedBy' valNow $ -depth
+--   put $ adjust ind (\_ → ContextExVar ex $ Left val) ctx0
+--   infer val $ Check ty
 
-freshIdent ∷ (Has Fresh sig m) ⇒ m Ident
-freshIdent = (`Ident` False) . ("/" <>) . pack . show <$> fresh
+-- -- TODO: Dependent.
 
-scopedExVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → Term → (TermF Term → m a) → m a
-scopedExVar mapTerm ty act = do
-  f ← fresh
-  modify (\x → x |> ContextMarker |> ContextExVar f (Right ty))
-  res ← act $ ExVar f
-  ctx1 ← get @(Vector ContextEntry)
-  let (ctxFinal, unresolveds) =
-        ifoldl'
-          ( \i rec e → case e of
-              ContextExVar u valty → case valty of {}
-              Left e → _
-          )
-          (error "marker not found")
-          ctx1
-  _
+-- -- | Introduce new variable/binding.
+-- scopedVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → (Quant, Maybe Ident, Maybe Term, Term) → m a → m a
+-- scopedVar mapTerm (bindQ, bindI, bindT, bindTy) act =
+--   withEntry (ContextBinding (bindQ, bindI, bindT, bindTy)) act
+--     >>= mapTerm (\t → maybe (stackError \p → "Var leaked in" <+> p t) pure $ nestedBy' t $ -1)
+
+-- scopedUniVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → (TermF Term → m a) → m a
+-- scopedUniVar mapTerm act = do
+--   uni1 ← fresh
+--   let ensureNotOcc = fix \rec t0 →
+--         fmap Term $ unwrapM t0 >>= \case
+--           UniVar uni2 | uni1 == uni2 → empty
+--           x → traverseTermF rec (fmap Lambda . rec . unLambda) x
+--   act (UniVar uni1) >>= mapTerm ensureNotOcc
+
+-- freshIdent ∷ (Has Fresh sig m) ⇒ m Ident
+-- freshIdent = (`Ident` False) . ("/" <>) . pack . show <$> fresh
+
+-- scopedExVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → Term → (TermF Term → m a) → m a
+-- scopedExVar mapTerm ty act = do
+--   f ← fresh
+--   modify (\x → x |> ContextMarker |> ContextExVar f (Right ty))
+--   res ← act $ ExVar f
+--   ctx1 ← get @(Vector ContextEntry)
+--   let (ctxFinal, unresolveds) =
+--         ifoldl'
+--           ( \i rec e → case e of
+--               ContextExVar u valty → case valty of {}
+--               Left e → _
+--           )
+--           (error "marker not found")
+--           ctx1
+--   _
 
 -- scopedExVar ∷ (Has Solve sig m) ⇒ ((Term → m Term) → a → m a) → (Int, Term) → m a → m a
 -- scopedExVar mapTerm (ex1, ex1ty) act = do
