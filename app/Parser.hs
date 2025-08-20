@@ -15,6 +15,7 @@ module Parser (
   formatFile,
   identOfBuiltin,
   intercept,
+  nested,
   nestedBy',
   nestedByP,
   pIdent,
@@ -335,7 +336,7 @@ findVar name = do
     )
     vars of
     Just n →
-      let (q, Ident _ eOp) = fmap (fromMaybe (error "impossible")) $ fromMaybe (error "impossible") $ vars !? n
+      let (q, Ident _ eOp) = fmap (fromMaybe (error "impossible")) $ fromMaybe (error "impossible") $ vars !? (length vars - n - 1)
        in pure $ Just (n, q, eOp)
     Nothing → pure Nothing
 
@@ -584,6 +585,9 @@ nestedBy' t00 by =
 nestedByP ∷ Term → Int → Term
 nestedByP t by = fromMaybe (error "Expected positive nesting") $ nestedBy' t by
 
+nested ∷ Term → Term
+nested = (`nestedByP` 1)
+
 -- printing
 
 pBS ∷ ByteString → Doc AnsiStyle
@@ -724,7 +728,7 @@ pTerm' (fuse, oldPrec, vars) t0 =
         (5, pTerm' (FNo, 5, vars) rec <> annotate (color Blue) ("." <> pIdent tag))
       App lam arg2 → case lam of
         (unTerm → App (unTerm → Var opIdx) arg1)
-          | Just (_, Just (Ident opName True)) ← vars !? opIdx →
+          | Just (_, Just (Ident opName True)) ← vars !? (length vars - opIdx - 1) →
               (2, pTerm' (FNo, 3, vars) arg1 <+> pBS opName <+> pTerm' (FNo, 2, vars) arg2)
         _ →
           (4, pTerm' (FNo, 4, vars) lam <+> pTerm' (FNo, 5, vars) arg2)
@@ -746,7 +750,7 @@ pTerm' (fuse, oldPrec, vars) t0 =
                 (fmap (\(n, v) → pTerm' (FNo, 5, vars) n <+> annotate (color Cyan) "=" <+> pTerm' (FNo, 0, vars) v) (toList fields))
             )
       ListLit vec → (5, encloseSep "[" "]" " | " $ fmap (\x → pTerm' (FNo, 0, vars) x) (toList vec))
-      Var x → (5, maybe ("#" <> pretty x) (\(_, i) → maybe "_" pIdent i) $ vars !? x)
+      Var x → (5, maybe ("#" <> pretty x) (\(_, i) → maybe "_" pIdent i) $ vars !? (length vars - x - 1))
       ExVar i → (5, "(exi#" <> pretty i <> ")")
       UniVar i → (5, "(uni#" <> pretty i <> ")")
 

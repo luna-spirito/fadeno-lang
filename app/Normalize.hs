@@ -6,7 +6,6 @@ import Control.Carrier.Error.Church (ErrorC, runError)
 import Control.Carrier.State.Church (StateC, evalState)
 import Control.Effect.Empty (empty)
 import Control.Effect.State (State, get, modify)
-import Control.Effect.Throw (Throw, throwError)
 import Data.ByteString.Char8 (pack)
 import Data.RRBVector (Vector, deleteAt, findIndexL, ifoldr, splitAt, viewl, viewr, (!?), (|>))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
@@ -18,17 +17,19 @@ import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replic
 -- TODO: Erasure is wrong... Verify for \f. f @4
 
 type Binding = (Quant, Maybe Ident, Maybe Term, Term)
-type Exs = Vector (Vector (Int, Either Term Term)) -- for each scope, list of exs
-type EarliestResolved = Maybe (Int, Int)
-type Context = State (Vector Binding) :+: State Exs :+: State EarliestResolved :+: Throw (Doc AnsiStyle)
+newtype Epoch = Epoch Int deriving (Show, Eq)
+data Dyn = Dyn !Epoch !Term
+data EEntry = EMarker | EVar !Int !(Either Term Term)
+type Exs = Vector (Epoch, Vector EEntry) -- for each scope, poch and list of exs
+type Context = State (Vector Binding) :+: State Exs
 
-runContext ∷ StateC (Vector Binding) (StateC Exs (StateC EarliestResolved (ErrorC (Doc AnsiStyle) Identity))) a → a
-runContext = run . runError (error . show) pure . evalState Nothing . evalState [[]] . evalState []
+runContext ∷ (Applicative m) ⇒ StateC (Vector Binding) (StateC Exs (ErrorC (Doc AnsiStyle) m)) a → m a
+runContext = runError (error . show) pure . evalState [(Epoch 0, [])] . evalState []
 
 withBinding ∷ (Has Context sig m) ⇒ Binding → m a → m a
 withBinding b act = do
   modify (|> b)
-  modify @Exs (|> [])
+  modify @Exs (|> (Epoch 0, []))
   res ← act
   modify @(Vector Binding) $ maybe (error "Missing binding") fst . viewr
   modify @Exs $ maybe (error "Missing ex scope") fst . viewr
@@ -40,13 +41,26 @@ data EqRes
   | EqNot -- provably uneq
   | EqUnknown
 
+getEpoch ∷ (Has Context sig m) ⇒ m Epoch
+getEpoch = maybe (error "Missing ex scope") (fst . snd) . viewr <$> get @Exs
+
+-- unwrap :: (Has Context sig m) ⇒ Term → m (TermF Dyn)
+-- unwrap = traverseTermF dyn (fmap Lambda . dyn . unLambda) . unTerm
+
 -- | Unwraps a term that contains existentials
-unwrap ∷ (Has Context sig m) ⇒ Term → m (TermF Term)
-unwrap x = do
-  earliest ← get @(Maybe (Int, Int))
-  if isNothing earliest
-    then pure $ unTerm x
-    else unTerm <$> normalize x
+fetchWith ∷ (Has Context sig m) ⇒ (Term → m Term) → Dyn → m Term
+fetchWith f (Dyn objEpoch x) = do
+  epoch ← getEpoch
+  if epoch == objEpoch
+    then pure x
+    else f x
+
+--
+fetchT ∷ (Has Context sig m) ⇒ Dyn → m Term
+fetchT = fetchWith normalize
+
+fetchLambda ∷ (Has Context sig m) ⇒ Lambda Dyn → m (Lambda Term)
+fetchLambda = fmap Lambda . fetchWith (normalize' [Nothing]) . unLambda
 
 isEq' ∷ (Has Context sig m) ⇒ ((Int, Int) → TermF Term → m ()) → Term → Term → m EqRes
 isEq' f l0 r0 = case (unTerm l0, unTerm r0) of
@@ -94,10 +108,10 @@ isEq' f l0 r0 = case (unTerm l0, unTerm r0) of
   (BuiltinsVar, _) → pure EqNot
   (_, BuiltinsVar) → pure EqNot
   (Pi q1 i1 inT1 outT1, Pi q2 i2 inT2 outT2)
-    | q1 == q2 →
-        force (isEq' f inT1 inT2)
-          $ withBinding (QNorm, i1 <|> i2, Nothing, inT1)
-          $ isEq' f (unLambda outT1) (unLambda outT2)
+    | q1 == q2 → error "dyn aaargh"
+  -- force (isEq' f inT1 inT2)
+  --   $ withBinding (QNorm, i1 <|> i2, Nothing, inT1)
+  --   $ isEq' f (unLambda outT1) (unLambda outT2)
   (Pi{}, _) → pure EqNot
   (Concat _ _, _) → error "TODO isEq Concat"
   (ListLit (Vector' (viewl → Just (x, xs))), ListLit (Vector' (viewl → Just (y, ys)))) →
@@ -136,7 +150,7 @@ isEq' f l0 r0 = case (unTerm l0, unTerm r0) of
       x → pure x
 
 isEq ∷ Term → Term → EqRes
-isEq a b = runContext $ runEmpty (pure EqUnknown) pure $ isEq' (\_ _ → empty) a b
+isEq a b = run $ runContext $ runEmpty (pure EqUnknown) pure $ isEq' (\_ _ → empty) a b
 
 -- | Produces a non-dependent concat (of normalized terms)
 concat ∷ Term → Term → Term
@@ -206,7 +220,7 @@ postApp f0 a0 = case (unTerm f0, a0) of
       (nTM, nV) = unplus n
      in
       -- TODO: causes constant re-normalization of `int+_fold` args.
-      (if nV > 0 then runContext . normalize else id)
+      (if nV > 0 then run . runContext . normalize else id)
         $ repeat nV (Term . App step)
         $ case nTM of
           Nothing → start
@@ -292,10 +306,17 @@ traverseNormTermF c locals t0 =
     ExVar (i, subi) → do
       globals ← get @(Vector Binding)
       exs ← get @Exs
-      (_, valty) ← maybe (throwError @(Doc AnsiStyle) "Existential not found in context") pure do
-        scope ← exs !? i
-        ind ← findIndexL ((== subi) . fst) scope
-        scope !? ind
+      let valty = fromMaybe (error "Existential not found in context") do
+            (_, scope) ← exs !? i
+            ind ←
+              findIndexL
+                ( \case
+                    EVar subi2 _ → subi == subi2
+                    EMarker → False
+                )
+                scope
+            EVar _ valty0 ← scope !? ind
+            pure valty0
       case valty of
         Left val → pure $ nestedByP val $ length locals + (length globals - i) -- no -1 because of ridiculous scope counting
         Right _ → pure $ Term $ ExVar (i, subi)
@@ -316,7 +337,7 @@ normalize ∷ (Has Context sig m) ⇒ Term → m Term
 normalize = normalize' []
 
 applyLambda ∷ Lambda Term → Term → Term
-applyLambda bod val = runContext $ normalize' [Just val] $ unLambda bod
+applyLambda bod val = run $ runContext $ normalize' [Just val] $ unLambda bod
 
 -- Rewrites and then simplifies.
 -- rewrite :: ∀ m. (Monad m) ⇒ (Term → m (Maybe (N Term))) → Term → m (N Term)
@@ -576,7 +597,7 @@ termQQ =
           term ← case parse ((QNorm,) . fst <$> scope) (pack s) of
             Left e → fail $ "termQQ: Parse error: " ++ show e
             Right t → pure t
-          let normed = runContext $ normalize' (Just . snd <$> scope) term
+          let normed = run $ runContext $ normalize' (Just . snd <$> scope) term
           ⟦normed⟧
       , quotePat = error "termQQ: No pattern support"
       , quoteType = error "termQQ: No type support"
