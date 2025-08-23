@@ -2,29 +2,49 @@ module Normalize where
 
 import Control.Algebra
 import Control.Carrier.Empty.Church (runEmpty)
-import Control.Carrier.Error.Church (ErrorC, runError)
 import Control.Carrier.State.Church (StateC, evalState)
+import Control.Carrier.Writer.Church (WriterC, runWriter)
 import Control.Effect.Empty (empty)
 import Control.Effect.State (State, get, modify)
+import Control.Effect.Writer (tell)
 import Data.ByteString.Char8 (pack)
-import Data.RRBVector (Vector, deleteAt, findIndexL, ifoldr, splitAt, viewl, viewr, (!?), (|>))
+import Data.Monoid (Any (..))
+import Data.RRBVector (Vector, deleteAt, findIndexL, ifoldr, splitAt, viewl, viewr, zip, (!?), (|>))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, nestedByP, parse, recordGet, traverseTermF)
-import Prettyprinter (Doc)
-import Prettyprinter.Render.Terminal (AnsiStyle)
-import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, intercept, nestedByP, nestedByP', parse, recordGet, traverseTermF)
+import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try, zip)
 
 -- TODO: Erasure is wrong... Verify for \f. f @4
+
+-- Like Throw/Catch, but doesn't abort the computation.
+-- More of crutch I guess...
+data Isolate m a where
+  Isolate ∷ m a → m a → Isolate m a
+  Infect ∷ Isolate m ()
+newtype IsolateC m a = IsolateC {unIsolateC ∷ WriterC Any m a}
+  deriving (Functor, Applicative, Monad)
+runIsolate ∷ (Applicative m) ⇒ IsolateC m a → m a
+runIsolate (IsolateC act) = runWriter (\_ → pure) act
+
+instance (Algebra sig m) ⇒ Algebra (Isolate :+: sig) (IsolateC m) where
+  alg hdl sig ctx = IsolateC case sig of
+    L (Isolate act err) → do
+      (Any infected, res) ← intercept @Any $ unIsolateC $ hdl $ act <$ ctx
+      if infected
+        then unIsolateC $ hdl $ err <$ ctx
+        else pure res
+    L Infect → tell (Any True) $> ctx
+    R other → alg (unIsolateC . hdl) (R other) ctx
 
 type Binding = (Quant, Maybe Ident, Maybe Term, Term)
 newtype Epoch = Epoch Int deriving (Show, Eq)
 data Dyn = Dyn !Epoch !Term
-data EEntry = EMarker | EVar !Int !(Either Term Term)
+data EEntry = EMarker | EVar !Int !(Either (Int, Term) Term) | EUniVar !Int
 type Exs = Vector (Epoch, Vector EEntry) -- for each scope, poch and list of exs
-type Context = State (Vector Binding) :+: State Exs
+type Context = State (Vector Binding) :+: State Exs :+: Isolate
 
-runContext ∷ (Applicative m) ⇒ StateC (Vector Binding) (StateC Exs (ErrorC (Doc AnsiStyle) m)) a → m a
-runContext = runError (error . show) pure . evalState [(Epoch 0, [])] . evalState []
+runContext' ∷ (Applicative m) ⇒ StateC (Vector Binding) (StateC Exs m) a → m a
+runContext' = evalState [(Epoch 0, [])] . evalState []
 
 withBinding ∷ (Has Context sig m) ⇒ Binding → m a → m a
 withBinding b act = do
@@ -46,6 +66,11 @@ getEpoch = maybe (error "Missing ex scope") (fst . snd) . viewr <$> get @Exs
 
 -- unwrap :: (Has Context sig m) ⇒ Term → m (TermF Dyn)
 -- unwrap = traverseTermF dyn (fmap Lambda . dyn . unLambda) . unTerm
+dyn ∷ (Has Context sig m) ⇒ Term → m Dyn
+dyn x = (`Dyn` x) <$> getEpoch
+
+fDyn ∷ Epoch → Term → TermF Dyn
+fDyn e = run . traverseTermF (pure . Dyn e) (pure . Lambda . Dyn e . unLambda) . unTerm
 
 -- | Unwraps a term that contains existentials
 fetchWith ∷ (Has Context sig m) ⇒ (Term → m Term) → Dyn → m Term
@@ -62,83 +87,97 @@ fetchT = fetchWith normalize
 fetchLambda ∷ (Has Context sig m) ⇒ Lambda Dyn → m (Lambda Term)
 fetchLambda = fmap Lambda . fetchWith (normalize' [Nothing]) . unLambda
 
-isEq' ∷ (Has Context sig m) ⇒ ((Int, Int) → TermF Term → m ()) → Term → Term → m EqRes
-isEq' f l0 r0 = case (unTerm l0, unTerm r0) of
-  (Block{}, _) → undefined
-  (_, Block{}) → undefined
-  (AppErased{}, _) → undefined
-  (_, AppErased{}) → undefined
-  (Lam QEra _ _, _) → undefined
-  (_, Lam QEra _ _) → undefined
-  (ExVar i, t) → f i t $> EqYes
-  (t, ExVar i) → f i t $> EqYes
-  (Var a, Var b)
-    | a == b → pure EqYes
-  (Var _, _) → pure EqUnknown
-  (_, Var _) → pure EqUnknown
-  (UniVar i1, UniVar i2)
-    | i1 == i2 → pure EqYes
-  (UniVar{}, _) → pure EqUnknown
-  (_, UniVar{}) → pure EqUnknown
-  (App f1 a1, App f2 a2) →
-    try (isEq' f f1 f2)
-      $ try (isEq' f a1 a2)
-      $ pure EqYes
-  (App{}, _) → pure EqUnknown
-  (_, App{}) → pure EqUnknown
-  (Sorry, _) → pure EqUnknown
-  (_, Sorry) → pure EqUnknown
-  -- Literals
-  (Lam QNorm i bod1, Lam QNorm _ bod2) → withBinding (QNorm, i, Nothing, Term $ Builtin Any') $ isEq' f (unLambda bod1) (unLambda bod2)
-  (Lam QNorm _ _, _) → pure EqNot
-  (NumLit a, NumLit b)
-    | a == b → pure EqYes
-  (NumLit _, _) → pure EqNot
-  (TagLit a, TagLit b)
-    | a == b → pure EqYes
-  (TagLit _, _) → pure EqNot
-  (BoolLit a, BoolLit b)
-    | a == b → pure EqYes
-  (BoolLit _, _) → pure EqNot
-  (Builtin a, Builtin b)
-    | a == b → pure EqYes
-  (Builtin _, _) → pure EqNot
-  (_, Builtin _) → pure EqNot
-  (BuiltinsVar, BuiltinsVar) → pure EqYes
-  (BuiltinsVar, _) → pure EqNot
-  (_, BuiltinsVar) → pure EqNot
-  (Pi q1 i1 inT1 outT1, Pi q2 i2 inT2 outT2)
-    | q1 == q2 → error "dyn aaargh"
-  -- force (isEq' f inT1 inT2)
-  --   $ withBinding (QNorm, i1 <|> i2, Nothing, inT1)
-  --   $ isEq' f (unLambda outT1) (unLambda outT2)
-  (Pi{}, _) → pure EqNot
-  (Concat _ _, _) → error "TODO isEq Concat"
-  (ListLit (Vector' (viewl → Just (x, xs))), ListLit (Vector' (viewl → Just (y, ys)))) →
-    force (isEq' f x y) $ isEq' f (Term $ ListLit $ Vector' xs) (Term $ ListLit $ Vector' $ ys)
-  (ListLit (Vector' (null → True)), ListLit (Vector' (null → True))) → pure EqYes
-  (ListLit _, _) → pure EqNot
-  -- TODO: This is greedy, which is bad. Should uwrap lazily.
-  (FieldsLit f1 (Vector' (viewl → Just ((tagx, x), xs))), FieldsLit f2 (Vector' origY))
-    | f1 == f2 →
-        ifoldr
-          ( \i (tagy, y) rec →
-              isEq' f tagx tagy
-                >>= \case
-                  EqYes →
-                    force (isEq' f x y)
-                      $ isEq'
-                        f
-                        (Term $ FieldsLit f1 $ Vector' xs)
-                        (Term $ FieldsLit f1 $ Vector' $ deleteAt i origY)
-                  EqNot → rec
-                  EqUnknown → pure EqUnknown
-          )
-          (pure EqNot)
-          origY
-  (FieldsLit f1 (Vector' (null → True)), FieldsLit f2 (Vector' (null → True))) | f1 == f2 → pure EqYes
-  (FieldsLit{}, _) → pure EqNot
+isEq' ∷ (Has Context sig m) ⇒ ((Int, Int) → Term → m ()) → Term → Term → m EqRes
+isEq' f = \l0 r0 →
+  send
+    $ Isolate
+      ( go l0 r0 >>= \case
+          EqYes → pure EqYes
+          x → send Infect *> pure x
+      )
+      (pure EqNot)
  where
+  go l0 r0 =
+    getEpoch >>= \e0 → case (fDyn e0 l0, fDyn e0 r0) of
+      (Block{}, _) → undefined
+      (_, Block{}) → undefined
+      (AppErased{}, _) → undefined
+      (_, AppErased{}) → undefined
+      (Lam QEra _ _, _) → undefined
+      (_, Lam QEra _ _) → undefined
+      (ExVar i, _) → f i r0 $> EqYes
+      (_, ExVar i) → f i l0 $> EqYes
+      (Var a, Var b)
+        | a == b → pure EqYes
+      (Var _, _) → pure EqUnknown
+      (_, Var _) → pure EqUnknown
+      (UniVar i1 _, UniVar i2 _)
+        | i1 == i2 → pure EqYes
+      (UniVar{}, _) → pure EqUnknown
+      (_, UniVar{}) → pure EqUnknown
+      (App f1 a1, App f2 a2) →
+        try (isEqD (fetchT f1) (fetchT f2))
+          $ try (isEqD (fetchT a1) (fetchT a2))
+          $ pure EqYes
+      (App{}, _) → pure EqUnknown
+      (_, App{}) → pure EqUnknown
+      (Sorry, _) → pure EqUnknown
+      (_, Sorry) → pure EqUnknown
+      -- Literals
+      (Lam QNorm i bod1, Lam QNorm _ bod2) →
+        withBinding (QNorm, i, Nothing, Term $ Builtin Any')
+          $ isEqD (unLambda <$> fetchLambda bod1) (unLambda <$> fetchLambda bod2)
+      (Lam QNorm _ _, _) → pure EqNot
+      (NumLit a, NumLit b)
+        | a == b → pure EqYes
+      (NumLit _, _) → pure EqNot
+      (TagLit a, TagLit b)
+        | a == b → pure EqYes
+      (TagLit _, _) → pure EqNot
+      (BoolLit a, BoolLit b)
+        | a == b → pure EqYes
+      (BoolLit _, _) → pure EqNot
+      (Builtin a, Builtin b)
+        | a == b → pure EqYes
+      (Builtin _, _) → pure EqNot
+      (_, Builtin _) → pure EqNot
+      (BuiltinsVar, BuiltinsVar) → pure EqYes
+      (BuiltinsVar, _) → pure EqNot
+      (_, BuiltinsVar) → pure EqNot
+      (Pi q1 i1 inT1 outT1, Pi q2 i2 inT2 outT2)
+        | q1 == q2 →
+            force (isEqD (fetchT inT1) (fetchT inT2)) do
+              inT1' ← fetchT inT1
+              withBinding (QNorm, i1 <|> i2, Nothing, inT1') $ isEqD (unLambda <$> fetchLambda outT1) (unLambda <$> fetchLambda outT2)
+      (Pi{}, _) → pure EqNot
+      (Concat _ _, _) → error "TODO isEq Concat"
+      (ListLit (Vector' as), ListLit (Vector' bs)) →
+        if length as /= length bs
+          then pure EqNot
+          else foldr (\(a, b) next → force (isEqD (fetchT a) (fetchT b)) next) (pure EqYes) (zip as bs)
+      (ListLit _, _) → pure EqNot
+      (FieldsLit f1 (Vector' as0), FieldsLit f2 (Vector' bs0))
+        | f1 == f2 →
+            if length as0 /= length bs0
+              then pure EqNot
+              else
+                foldr
+                  ( \(tag1, val1) recO bs →
+                      ifoldr
+                        ( \i (tag2, val2) recI →
+                            isEqD (fetchT tag1) (fetchT tag2) >>= \case
+                              EqYes → force (isEqD (fetchT val1) (fetchT val2)) $ recO $ deleteAt i bs
+                              EqNot → recI
+                              EqUnknown → pure EqUnknown
+                        )
+                        (pure EqNot)
+                        bs
+                  )
+                  (\_ → pure EqYes)
+                  as0
+                  bs0
+      (FieldsLit{}, _) → pure EqNot
+  isEqD a b = uncurry go =<< ((,) <$> a <*> b)
   -- TODO: FRow???
   try act cont =
     act >>= \case
@@ -150,7 +189,7 @@ isEq' f l0 r0 = case (unTerm l0, unTerm r0) of
       x → pure x
 
 isEq ∷ Term → Term → EqRes
-isEq a b = run $ runContext $ runEmpty (pure EqUnknown) pure $ isEq' (\_ _ → empty) a b
+isEq a b = run $ runIsolate $ runContext' $ runEmpty (pure EqUnknown) pure $ isEq' (\_ _ → empty) a b
 
 -- | Produces a non-dependent concat (of normalized terms)
 concat ∷ Term → Term → Term
@@ -220,7 +259,7 @@ postApp f0 a0 = case (unTerm f0, a0) of
       (nTM, nV) = unplus n
      in
       -- TODO: causes constant re-normalization of `int+_fold` args.
-      (if nV > 0 then run . runContext . normalize else id)
+      (if nV > 0 then run . runIsolate . runContext' . normalize else id)
         $ repeat nV (Term . App step)
         $ case nTM of
           Nothing → start
@@ -306,19 +345,19 @@ traverseNormTermF c locals t0 =
     ExVar (i, subi) → do
       globals ← get @(Vector Binding)
       exs ← get @Exs
-      let valty = fromMaybe (error "Existential not found in context") do
+      let valty = fromMaybe (error "Ex not found in context") do
             (_, scope) ← exs !? i
             ind ←
               findIndexL
                 ( \case
                     EVar subi2 _ → subi == subi2
-                    EMarker → False
+                    _ → False
                 )
                 scope
             EVar _ valty0 ← scope !? ind
             pure valty0
       case valty of
-        Left val → pure $ nestedByP val $ length locals + (length globals - i) -- no -1 because of ridiculous scope counting
+        Left val → pure $ uncurry nestedByP' val $ length locals + (length globals - i) -- no -1 because of ridiculous scope counting
         Right _ → pure $ Term $ ExVar (i, subi)
     _ → Term <$> traverseTermF (c locals) (\l → fmap Lambda $ c (locals |> Nothing) $ unLambda l) t0
  where
@@ -337,7 +376,7 @@ normalize ∷ (Has Context sig m) ⇒ Term → m Term
 normalize = normalize' []
 
 applyLambda ∷ Lambda Term → Term → Term
-applyLambda bod val = run $ runContext $ normalize' [Just val] $ unLambda bod
+applyLambda bod val = run $ runContext' $ runIsolate $ normalize' [Just val] $ unLambda bod
 
 -- Rewrites and then simplifies.
 -- rewrite :: ∀ m. (Monad m) ⇒ (Term → m (Maybe (N Term))) → Term → m (N Term)
@@ -566,18 +605,15 @@ applyLambda bod val = run $ runContext $ normalize' [Just val] $ unLambda bod
 -- normalize ∷ Vector (Maybe Term) → Term → Term
 -- normalize = normalize' 0
 
--- rewriteTerm ∷ Term → Term → Term → Maybe Term
--- rewriteTerm what0 with0 =
---   runIdentity
---     . runWriter @Any (\(Any rewrote) final → pure $ guard rewrote *> Just final)
---     . rewrite
---       (const (bimap nested nested))
---       (bimap nested nested)
---       ( \term (what, with) → case isEq term what of
---           EqYes → tell (Any True) $> Just with
---           _ → pure Nothing
---       )
---       (what0, with0)
+rewriteTerm ∷ (Has Context sig m) ⇒ Term → Term → Term → m (Maybe Term)
+rewriteTerm what0 with0 =
+  runWriter @Any (\(Any rewrote) final → pure $ guard rewrote *> Just final)
+    . rewrite
+      ( \locs term → case isEq term (nestedByP what0 locs) of
+          EqYes → tell (Any True) $> Just (nestedByP with0 locs)
+          _ → pure Nothing
+      )
+      []
 
 -- {- | Parse builtin
 -- Just a variation of parseQQ that has all the builtins in scope from the start.
@@ -597,7 +633,7 @@ termQQ =
           term ← case parse ((QNorm,) . fst <$> scope) (pack s) of
             Left e → fail $ "termQQ: Parse error: " ++ show e
             Right t → pure t
-          let normed = run $ runContext $ normalize' (Just . snd <$> scope) term
+          let normed = run $ runIsolate $ runContext' $ normalize' (Just . snd <$> scope) term
           ⟦normed⟧
       , quotePat = error "termQQ: No pattern support"
       , quoteType = error "termQQ: No type support"

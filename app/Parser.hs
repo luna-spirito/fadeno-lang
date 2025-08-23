@@ -18,6 +18,7 @@ module Parser (
   nested,
   nestedBy',
   nestedByP,
+  nestedByP',
   pIdent,
   pQuant,
   pTerm,
@@ -217,7 +218,7 @@ data TermF a
     Pi !Quant !(Maybe Ident) !a !(Lambda a) -- TODO: Demote Pi and Concat to builtins?
   | Concat !a !(Fields a (Maybe Ident, Lambda a))
   | ExVar !(Int, Int)
-  | UniVar !Int
+  | UniVar !(Int, Int) !a
   deriving (Show, Eq, Lift)
 
 newtype Term = Term {unTerm ∷ TermF Term}
@@ -335,9 +336,9 @@ findVar name = do
         _ → False
     )
     vars of
-    Just n →
-      let (q, Ident _ eOp) = fmap (fromMaybe (error "impossible")) $ fromMaybe (error "impossible") $ vars !? (length vars - n - 1)
-       in pure $ Just (n, q, eOp)
+    Just ind →
+      let (q, Ident _ eOp) = fmap (fromMaybe (error "impossible")) $ fromMaybe (error "impossible") $ vars !? ind
+       in pure $ Just (length vars - ind - 1, q, eOp)
     Nothing → pure Nothing
 
 -- 7
@@ -559,13 +560,13 @@ traverseTermF c cNest = \case
       FRecord b' → FRecord <$> c b'
       FRow (i, b') → FRow . (i,) <$> cNest b'
   ExVar i → pure $ ExVar i
-  UniVar i → pure $ UniVar i
+  UniVar i t → UniVar i <$> c t
 
-nestedBy' ∷ Term → Int → Maybe Term
-nestedBy' t00 0 = Just t00 -- optimization
-nestedBy' t00 by =
+nestedBy' ∷ Int → Term → Int → Maybe Term
+nestedBy' _ t00 0 = Just t00 -- optimization
+nestedBy' locs0 t00 by =
   runIdentity
-    $ runReader @Int 0
+    $ runReader @Int locs0
     $ runEmpty (pure Nothing) (pure . Just)
     $ fix
       ( \rec t0 →
@@ -582,8 +583,11 @@ nestedBy' t00 by =
       )
       t00
 
+nestedByP' ∷ Int → Term → Int → Term
+nestedByP' locs t by = fromMaybe (error "Expected positive nesting") $ nestedBy' locs t by
+
 nestedByP ∷ Term → Int → Term
-nestedByP t by = fromMaybe (error "Expected positive nesting") $ nestedBy' t by
+nestedByP = nestedByP' 0
 
 nested ∷ Term → Term
 nested = (`nestedByP` 1)
@@ -642,7 +646,7 @@ isSimple =
           Builtin _ → ping
           BuiltinsVar → ping
           ExVar _ → ping
-          UniVar _ → ping
+          UniVar _ t → ping *> complexity t
    in runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
 
 pQuant ∷ Quant → Doc AnsiStyle
@@ -752,7 +756,7 @@ pTerm' (fuse, oldPrec, vars) t0 =
       ListLit vec → (5, encloseSep "[" "]" " | " $ fmap (\x → pTerm' (FNo, 0, vars) x) (toList vec))
       Var x → (5, maybe ("#" <> pretty x) (\(_, i) → maybe "_" pIdent i) $ vars !? (length vars - x - 1))
       ExVar i → (5, "(exi#" <> pretty i <> ")")
-      UniVar i → (5, "(uni#" <> pretty i <> ")")
+      UniVar i t → (5, "(uni#" <> pretty i <+> ":" <+> pTerm' (FNo, 0, vars) t <> ")")
 
 pTerm ∷ ParserContext → Term → Doc AnsiStyle
 pTerm = pTerm' . (FNo,0,)
