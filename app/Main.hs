@@ -21,7 +21,7 @@ import Data.RRBVector (Vector, adjust, adjust', deleteAt, drop, findIndexL, ifol
 import Data.Type.Equality (type (~))
 import GHC.Exts (IsList (..))
 import Normalize (Binding, Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, numDecDispatch, rewrite, rewriteTerm, runContext', runIsolate, splitAt3, termQQ, withBinding)
-import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, intercept, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parse, render, rowOf, traverseTermF, typOf)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, intercept, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parse, render, rowOf, traverseTermF, typ, typOf)
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, runReader, toList, zip)
@@ -35,8 +35,7 @@ import RIO.HashMap qualified as HM
 -- TODO: Permit inference of dependent Pis?
 -- TODO: Recheck the whole file.
 -- TODO: Concat uncomfortably replicate Pi.
--- TODO: errors. Probably all impossibles as `error` or `undefined`
--- TODO: Row (Type+ u) -> Row u?
+-- TODO: There are few deadly sins (Infer → Check conversions) that should be removed. Infer should never invoke check! (Pi/inferList/???)
 
 type Checker = Context :+: Fresh :+: StackLog :+: Throw (Doc AnsiStyle)
 
@@ -531,9 +530,9 @@ rowGet mapTerm tag cont = go -- tag is source term
           LookupUnknown → pure LookupUnknown
       )
       ( do
-          t ← subExVar $ Term $ Builtin Any'
-          head ← subExVar t
-          tail ← subExVar $ rowOf t
+          u ← subExVar $ Term $ Builtin Any'
+          head ← subExVar $ typOf u
+          tail ← subExVar $ rowOf u
           pure $ Term $ Concat (Term $ FieldsLit (FRow ()) [(tag, head)]) (FRow (Nothing, Lambda tail))
       )
       ( \t →
@@ -575,6 +574,21 @@ inferList tts = for (viewl tts) \(t, ts) → do
   tT ← dyn =<< infer t Infer
   checkList ts tT
   fetchT tT
+
+-- match Row+ and Type+, since any Row+ is Type+
+isTypePlus ∷ Term → Bool
+isTypePlus =
+  unTerm >>> \case
+    Builtin TypePlus → True
+    Builtin RowPlus → True
+    _ → False
+
+-- | If input is a kind, returns universe level.
+withMonoUniverse ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → (Term → m a) → Term → m a
+withMonoUniverse mapTerm f =
+  withMono mapTerm (typOf <$> subExVar (Term $ Builtin Any')) $ unTerm >>> \case
+    App (isTypePlus → True) u → f u
+    t → stackError \p → p (Term t) <+> "is not a kind"
 
 -- | Either infers a normalized type for the value and context, or checks a value against the normalized type.
 infer ∷ ∀ sig m a. (Has Checker sig m) ⇒ Term → InferMode a → m a
@@ -660,7 +674,10 @@ infer = logAndRunInfer $ \case
         record
     case res of
       LookupFound x → pure x
-      _ → stackError \_ → "App RecordGet"
+      LookupMissing d →
+        for d fetchT >>= \d' → stackError \p →
+          "Couldn't find field" <+> p tag' <+> "among" <+> list (p <$> toList d')
+      LookupUnknown → stackError \_ → "Can't check if tag is equal"
   (App f a, InferL) → inferApp QNorm f a
   (FieldsLit (FRecord ()) flds, InferL) → do
     rowFields ← for flds \(n, v) → do
@@ -703,22 +720,21 @@ infer = logAndRunInfer $ \case
   -- Type-level
   (FieldsLit (FRow ()) (Vector' flds), InferL) → do
     for_ flds \(n, _) → infer n $ Check $ Term $ Builtin Tag
-    rowOf . fromMaybe (Term $ Builtin Never) <$> inferList (snd <$> flds)
-  (FieldsLit (FRow ()) (Vector' flds), (e, Check (unTerm → App (unTerm → Builtin Row) (Dyn e → ty)))) → do
+    (fromMaybe typ <$> inferList (snd <$> flds))
+      >>= withMonoUniverse id (pure . rowOf)
+  (FieldsLit (FRow ()) (Vector' flds), (e, Check (unTerm → App (isTypePlus → True) (Dyn e . typOf → ty)))) → do
     for_ flds \(n, _) → infer n $ Check $ Term $ Builtin Tag
     checkList (snd <$> flds) ty
-  (inp@(FieldsLit (FRow ()) _), (_, Check (unTerm → App (unTerm → Builtin TypePlus) u))) → infer (Term inp) $ Check $ rowOf $ typOf u -- Lazy redirect
   -- TODO Ctrl+C & Ctrl+V hell, rewrite somehow..
-  (Concat l (FRow (i, r)), (e, Check (unTerm → App (unTerm → Builtin Row) (Dyn e → ty)))) → do
-    infer l . Check . rowOf =<< fetchT ty
+  (Concat l (FRow (i, r)), (e, Check (unTerm → App (isTypePlus → True) (Dyn e → u)))) → do
+    infer l . Check . rowOf =<< fetchT u
     l' ← normalize l
-    fetchT ty
+    fetchT u
       >>= scopedVar (const pure) (QNorm, i, Nothing, l')
       . infer (unLambda r)
       . Check
       . rowOf
       . nested
-  (inp@(Concat _ (FRow _)), (_, Check (unTerm → App (unTerm → Builtin TypePlus) u))) → infer (Term inp) $ Check $ rowOf $ typOf u -- Lazy redirect
   (Concat l (FRow (i, r)), InferL) → do
     infer l Infer
       >>= withMono
@@ -726,13 +742,13 @@ infer = logAndRunInfer $ \case
         (rowOf <$> subExVar (Term $ Builtin Any'))
         ( \t0 →
             getEpoch >>= \e → case unTerm t0 of
-              App (unTerm → Builtin Row) (Dyn e → lT) → do
+              App (unTerm → Builtin RowPlus) (Dyn e → lT) → do
                 l' ← normalize l
                 fetchT lT >>= scopedVar (const pure) (QNorm, i, Nothing, l') . infer (unLambda r) . Check . rowOf . nested
                 rowOf <$> fetchT lT
               _ → stackError \p → p l <+> "is not a row"
         )
-  (Pi _q i inTy outTy, (e, Check (unTerm → App (unTerm → Builtin TypePlus) (Dyn e → u)))) → do
+  (Pi _q i inTy outTy, (e, Check (unTerm → App (isTypePlus → True) (Dyn e → u)))) → do
     infer inTy . Check . typOf =<< fetchT u
     inTy' ← normalize inTy
     fetchT u
@@ -743,16 +759,12 @@ infer = logAndRunInfer $ \case
       . nested
   (Pi _q i inTy outTy, InferL) → do
     infer inTy Infer
-      >>= withMono
+      >>= withMonoUniverse
         id
-        (typOf <$> subExVar (Term $ Builtin $ Num $ NumDesc True BitsInf))
-        ( \t0 →
-            getEpoch >>= \e → case unTerm t0 of
-              App (unTerm → Builtin TypePlus) (Dyn e → u) → do
-                inTy' ← normalize inTy
-                fetchT u >>= scopedVar (const pure) (QNorm, i, Nothing, inTy') . infer (unLambda outTy) . Check . typOf . nested
-                typOf <$> fetchT u
-              _ → stackError \p → p inTy <+> "is not a type"
+        ( dyn >=> \u → do
+            inTy' ← normalize inTy
+            fetchT u >>= scopedVar (const pure) (QNorm, i, Nothing, inTy') . infer (unLambda outTy) . Check . typOf . nested
+            typOf <$> fetchT u
         )
   (Builtin x, InferL) → pure $ typOfBuiltin x
   (BuiltinsVar, InferL) →
@@ -789,18 +801,18 @@ typOfBuiltin = \case
   IntNeg d → opd d
   Tag → [termQQ| Type+ 0 |]
   Bool → [termQQ| Type+ 0 |]
-  Row → [termQQ| Fun {u} (Type+ u) -> Type+ u |]
+  RowPlus → [termQQ| Fun (u : Int+) -> Type+ u |]
   List → [termQQ| Fun {u} (Type+ u) -> Type+ u |]
   TypePlus → [termQQ| Fun (u : Int+) -> Type+ (u + 1) |]
   Eq → [termQQ| Fun (Any) (Any) -> Type+ 0 |]
   Refl → [termQQ| Fun {x} -> Eq x x |]
   RecordGet →
     [termQQ|
-      Fun {K} {row : Row K} {T : K} (tag : Tag) (record : {( (tag) = T )} \/ row) -> T
+      Fun {u : Int+} {row : Row+ u} {T : Type+ u} (tag : Tag) (record : {( (tag) = T )} \/ row) -> T
     |]
   -- TODO: Better type
-  RecordKeepFields → [termQQ| Fun {K} {row : Row K} (List Tag) (row) -> Any |]
-  RecordDropFields → [termQQ| Fun {K} {row : Row K} (List Tag) (row) -> Any |]
+  RecordKeepFields → [termQQ| Fun {u : Int+} {row : Row+ u} (List Tag) (row) -> Any |]
+  RecordDropFields → [termQQ| Fun {u : Int+} {row : Row+ u} (List Tag) (row) -> Any |]
   ListLength → [termQQ| Fun {A} (List A) -> Int+ |]
   ListIndexL → [termQQ| Fun {A} (i : Int+) (l : List A) {_ : Where (int_>=0 (int_add (list_length l) (int_neg (i + 1))))} -> A |]
   NatFold → [termQQ| Fun {Acc : Fun (Int+) -> Any} (Acc 0) (Fun (i : Int+) (Acc i) -> Acc (i + 1)) (n : Int+) -> Acc n |]
@@ -957,8 +969,8 @@ subtype = \a b →
         isEqUnify a b >>= \case
           EqYes → pure ()
           _ → stackError \p → "Cannot equate wrapped types" <+> p a <+> "and" <+> p b
-      (Term (App (fDyn e → Builtin Row) a), Term (App (fDyn e → Builtin Row) b)) → subtype a b
-      (Term (App (fDyn e → Builtin Row) a), Term (App (fDyn e → Builtin TypePlus) u)) → subtype a $ typOf u
+      (Term (App (fDyn e → Builtin RowPlus) a), Term (App (fDyn e → Builtin RowPlus) b)) → subtype (typOf a) (typOf b)
+      (Term (App (fDyn e → Builtin RowPlus) a), Term (App (fDyn e → Builtin TypePlus) u)) → subtype (typOf a) (typOf u)
       (fDyn e → FieldsLit (FRow ()) (Vector' fields1), fDyn e → FieldsLit (FRow ()) fields2) →
         foldM_
           ( \fields1' (tag, ty) →

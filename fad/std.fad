@@ -1,4 +1,4 @@
-unpack fadeno. Type+ Int+ Int Tag List Bool Eq refl Row list_length list_indexl
+unpack fadeno. Type+ Int+ Int Tag List Bool Eq refl Row+ list_length list_indexl
 if W int_>=0 wrap unwrap ~int+_fold Never Any int_neg tag_==
 
 _+_ = fadeno.int_add
@@ -13,6 +13,8 @@ _<_ = \a b. b > a
 Kind = Type+ 1
 /: Kind
 Type = Type+ 0
+/: Kind
+Row = Row+ 0
 
 /: Fun {A} (A) -> A
 id = \x. x
@@ -20,7 +22,7 @@ id = \x. x
 /: Fun {K} {V} (K) (V) -> {( .k = K | .v = V )}
 _=>_ = \k v. { .k = k | .v = v }
 
-/: Row (Type+ 0)
+/: Row
 Unit = {()}
 /: Unit
 unit = {}
@@ -80,8 +82,8 @@ inv_index = \i n @prf. to_int+ (n - (i + 1)) @prf
 /: Fun {Acc} (n : Int+) (Fun (i : Int+) {_ : Where (i < n)} (Acc) -> Acc) (Acc) -> Acc
 int+_unfold = \@Acc. ~int+_unfold @(\_. Acc)
 
-/: Fun {u} (tag : Tag) (List {( .k = Tag | .v = Row (Type+ u) )}) -> Row (Type+ u)
-find-case = \@u tag l. int+_unfold @(Row (Type+ u))
+/: Fun {u} (tag : Tag) (List {( .k = Tag | .v = Row+ u )}) -> Row+ u
+find-case = \@u tag l. int+_unfold @(Row+ u)
     (list_length l)
     (\i @bounded rec.
     case = list_indexl i l @bounded
@@ -91,10 +93,10 @@ find-case = \@u tag l. int+_unfold @(Row (Type+ u))
     )
     {( .never = Never )}
 
-/: Fun {u : Int+} (List {( .k = Tag | .v = Row (Type+ u) )}) -> Row (Type+ u)
+/: Fun {u : Int+} (List {( .k = Tag | .v = Row+ u )}) -> Row+ u
 U = \cases. {( .tag = Tag )} \meta/ find-case meta.tag cases
 
-/: Fun {u : Int+} (A : Type+ u) -> Row (Type+ u)
+/: Fun {u : Int+} (A : Type+ u) -> Row+ u
 Opt = \A. U [ .none => Unit | .some => {( .val = A )} ]
 
 in {}

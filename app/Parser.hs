@@ -73,7 +73,7 @@ data NumDesc = NumDesc !Bool {- ≥ 0 -} !Bits
 
 data BuiltinT
   = Tag
-  | Row
+  | RowPlus
   | List
   | Bool
   | TypePlus -- Type+ 0, Type+ 1, ..., Type+ Aleph
@@ -102,7 +102,7 @@ data BuiltinT
 
 builtinsList ∷ Vector BuiltinT
 builtinsList =
-  [Tag, Row, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, IntGte0, IntEq, TagEq, W, Wrap, Unwrap, Never, Any']
+  [Tag, RowPlus, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, IntGte0, IntEq, TagEq, W, Wrap, Unwrap, Never, Any']
     <> (Num <$> nd)
     <> (Add <$> ndSansIntP)
     <> (IntNeg <$> ndSansIntP)
@@ -118,7 +118,7 @@ identOfBuiltin = \case
   Num d → r $ numDesc True d
   Tag → r "Tag"
   Bool → r "Bool"
-  Row → r "Row"
+  RowPlus → r "Row+"
   List → r "List"
   TypePlus → r "Type+"
   Eq → r "Eq"
@@ -228,7 +228,7 @@ typOf ∷ Term → Term
 typOf = Term . App (Term $ Builtin TypePlus)
 
 rowOf ∷ Term → Term
-rowOf = Term . App (Term $ Builtin Row)
+rowOf u = Term $ App (Term $ Builtin RowPlus) u
 
 recordGet ∷ Term → Term → Term
 recordGet tag record = Term $ (Term $ (Term $ Builtin RecordGet) `App` tag) `App` record
