@@ -755,8 +755,8 @@ pTerm' (fuse, oldPrec, vars) t0 =
             )
       ListLit vec → (5, encloseSep "[" "]" " | " $ fmap (\x → pTerm' (FNo, 0, vars) x) (toList vec))
       Var x → (5, maybe ("#" <> pretty x) (\(_, i) → maybe "_" pIdent i) (vars !? (length vars - x - 1)))
-      ExVar i → (5, "(exi#" <> pretty i <> ")")
-      UniVar i t → (5, "(uni#" <> pretty i <+> ":" <+> pTerm' (FNo, 0, vars) t <> ")")
+      ExVar (s, i) → (5, "(exi#" <> pretty s <> "/" <> pretty i <> ")")
+      UniVar (s, i) t → (5, "(uni#" <> pretty s <> "/" <> pretty i <+> ":" <+> pTerm' (FNo, 0, vars) t <> ")")
 
 pTerm ∷ ParserContext → Term → Doc AnsiStyle
 pTerm = pTerm' . (FNo,0,)

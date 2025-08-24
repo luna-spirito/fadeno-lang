@@ -20,7 +20,7 @@ import Data.List (find, sortBy)
 import Data.RRBVector (Vector, adjust, adjust', deleteAt, drop, findIndexL, ifoldl', ifoldr, splitAt, unzip, viewl, viewr, zip, (!?), (<|), (|>))
 import Data.Type.Equality (type (~))
 import GHC.Exts (IsList (..))
-import Normalize (Binding, Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Exs, applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, isEq', normalize, numDecDispatch, rewrite, rewriteTerm, runContext', runIsolate, splitAt3, termQQ, withBinding)
+import Normalize (Binding, Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, numDecDispatch, rewrite, rewriteTerm, runContext', runIsolate, splitAt3, termQQ, withBinding)
 import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, intercept, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parse, render, rowOf, traverseTermF, typOf)
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
@@ -36,6 +36,7 @@ import RIO.HashMap qualified as HM
 -- TODO: Recheck the whole file.
 -- TODO: Concat uncomfortably replicate Pi.
 -- TODO: errors. Probably all impossibles as `error` or `undefined`
+-- TODO: Row (Type+ u) -> Row u?
 
 type Checker = Context :+: Fresh :+: StackLog :+: Throw (Doc AnsiStyle)
 
@@ -62,7 +63,7 @@ instance (Algebra sig m) ⇒ Algebra (StackLog :+: sig) (StackAccC m) where
     R other → alg (unStackAccC . hdl) (R other) ctx
 
 termLoggerM ∷ (Has Context sig m) ⇒ m (Term → Doc AnsiStyle)
-termLoggerM = (\ctx → pTerm $ (\(q, n, _, _) → (q, n)) <$> ctx) <$> get @(Vector Binding)
+termLoggerM = (\(Scopes ctx _) → pTerm $ (\(q, n, _, _) → (q, n)) <$> ctx) <$> get @Scopes
 
 stackLog ∷ (Has (Context :+: StackLog) sig m) ⇒ ((Term → Doc AnsiStyle) → Doc AnsiStyle) → m ()
 stackLog f = send . StackLog . f =<< termLoggerM
@@ -144,18 +145,10 @@ runStackPrintC = runReader 0 . unStackPrintC
 
 writeMeta ∷ ∀ sig m. (Has Checker sig m) ⇒ (Int, Int) → (Int, Term) → m ()
 writeMeta exId0@(scope0, subi0) (valLocals0, valNow0) = do
-  zzz ← get @Exs
-  www ← get @(Vector Binding)
-  stackLog \_ → pretty (show $ www) <> "\n" <> pretty (show zzz)
-  when (length zzz /= length www + 1) $ error "YEP"
-
   stackLog \p → "exi# " <> pretty exId0 <+> ":=" <+> p valNow0
-  depth ← (\binds → length binds - scope0) <$> get @(Vector Binding) -- no -1 due to scope being ridiculous
+  depth ← (\scope → scope - scope0) <$> getScopeId -- no -1 due to scope being ridiculous
   val0 ← maybe (stackError \_ → "Leak") pure $ nestedBy' valLocals0 valNow0 $ -depth
-  exs0 ← get @Exs
-  binds0 ← get @(Vector Binding)
-  stackLog \_ → pretty (show $ binds0) <> "\n" <> pretty (show exs0)
-  (exsBefore, exsMiddleM, exsAfter) ← splitAt3 scope0 <$> get @Exs
+  Scopes (splitAt scope0 → (bindsBefore, bindsAfter)) (splitAt3 scope0 → (exsBefore, exsMiddleM, exsAfter)) ← get @Scopes
   (Epoch exsMiddleEpoch, (exsMiddleBef, exsMiddleMiddle, exsMiddleAft)) ← maybe (stackError \_ → "ex not found in context") pure do
     middle ← exsMiddleM
     i ←
@@ -166,36 +159,26 @@ writeMeta exId0@(scope0, subi0) (valLocals0, valNow0) = do
         )
         $ snd middle
     pure $ splitAt3 i <$> middle
-  put $ exsBefore |> (Epoch exsMiddleEpoch, exsMiddleBef)
+  put $ Scopes bindsBefore $ exsBefore |> (Epoch exsMiddleEpoch, exsMiddleBef)
   case exsMiddleMiddle of
     Just (EVar _ (Right ty)) → infer val0 $ Check ty
     _ → stackError \_ → "Internal error: existential already instantiated"
-  (bindsBefore, bindsAfter) ← splitAt scope0 <$> get @(Vector Binding)
-  modify @Exs $ adjust' scope0 $ bimap (\(Epoch i) → Epoch $ i + 1) (|> EVar subi0 (Left (valLocals0, val0)))
-  put bindsBefore
-  stackLog \_ → "Removed" <> pretty (length bindsAfter)
+  modify @Scopes \(Scopes bs es) → Scopes bs $ adjust' scope0 (bimap (\(Epoch i) → Epoch $ i + 1) (|> EVar subi0 (Left (valLocals0, val0)))) es
   let
     fe ∷ EEntry → m ()
-    fe = \case
-      EVar exId valty → do
-        valty' ← bimapM (traverse normalize) normalize valty
-        modify @Exs \exs → adjust' (length exs - 1) (fmap (|> EVar exId valty')) exs
-      x → modify @Exs \exs → adjust (length exs - 1) (fmap (|> x)) exs
-    fb (q, n, val, ty) = do
-      ty' ← normalize ty
-      modify @(Vector Binding) (|> (q, n, val, ty'))
-      stackLog \_ → "Added 1"
+    fe e0 = do
+      e1 ← case e0 of
+        EVar exId valty → do
+          valty' ← bimapM (traverse normalize) normalize valty
+          pure $ EVar exId valty'
+        x → pure x
+      modify @Scopes \(Scopes bs es) → Scopes bs $ adjust (length es - 1) (fmap (|> e1)) es
   for_ exsMiddleAft fe
-  stackLog \_ → pretty (length bindsAfter) <+> pretty (length exsAfter)
   when (length bindsAfter /= length exsAfter) $ error "Binds/exs mismatch"
-  for_ (zip bindsAfter exsAfter) \(b, (Epoch epoch, e)) → do
-    fb b
-    modify @Exs (|> (Epoch $ epoch + 1, []))
+  for_ (zip bindsAfter exsAfter) \((q, n, val, ty), (Epoch epoch, e)) → do
+    ty' ← normalize ty
+    modify @Scopes \(Scopes bs es) → Scopes (bs |> (q, n, val, ty')) (es |> (Epoch $ epoch + 1, []))
     for_ e fe
-  zzz ← get @Exs
-  www ← get @(Vector Binding)
-  stackLog \_ → pretty (show $ www) <> "\n" <> pretty (show zzz)
-  when (length zzz /= length www + 1) $ error "YEP"
 
 -- -- TODO: Dependent.
 
@@ -207,15 +190,15 @@ scopedVar mapTerm (bindQ, bindI, bindT, bindTy) act =
 
 scopedUniVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → Term → (Term → m a) → m a
 scopedUniVar mapTerm ty act = do
-  scope1 ← (\x → x - 1) . length <$> get @Exs
+  scope1 ← getScopeId
   sub1 ← fresh
-  modify @Exs $ adjust' scope1 (fmap (<> [EUniVar sub1]))
+  modify @Scopes \(Scopes bs es) → Scopes bs $ adjust' scope1 (fmap (<> [EUniVar sub1])) es
   let ensureNotOcc = fix \rec →
         unTerm >>> fmap Term . \case
           UniVar uni2 _ | (scope1, sub1) == uni2 → stackError \_ → "UniVar leaked"
           x → traverseTermF rec (fmap Lambda . rec . unLambda) x
   res ← act (Term $ UniVar (scope1, sub1) ty) >>= mapTerm ensureNotOcc
-  modify @Exs $ adjust' scope1 $ fmap $ maybe (error "impossible") fst . viewr
+  modify @Scopes \(Scopes bs es) → Scopes bs $ adjust' scope1 (fmap $ maybe (error "impossible") fst . viewr) es
   pure res
 
 freshIdent ∷ (Has Fresh sig m) ⇒ m Ident
@@ -223,13 +206,13 @@ freshIdent = (`Ident` False) . ("/" <>) . pack . show <$> fresh
 
 scopedExVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → Term → (Term → m a) → m a
 scopedExVar mapTerm ty0 act = do
-  scopeId ← (\x → x - 1) . length <$> get @Exs
+  scopeId ← getScopeId
   sub ← fresh
-  modify @Exs $ adjust' scopeId (fmap (<> [EMarker, EVar sub (Right ty0)]))
+  modify @Scopes \(Scopes bs es) → Scopes bs $ adjust' scopeId (fmap (<> [EMarker, EVar sub (Right ty0)])) es
   res ← act $ Term $ ExVar (scopeId, sub)
-  unresolved ← state @Exs \scopes →
+  unresolved ← state @Scopes \(Scopes bs exs) →
     let
-      (scopesB, (scopeE, scope)) = fromMaybe (error "Missing ex scope") $ viewr scopes
+      (exsB, (scopeE, scope)) = fromMaybe (error "Missing ex scope") $ viewr exs
       (scope', unresolved) =
         fix
           ( \rec →
@@ -241,12 +224,7 @@ scopedExVar mapTerm ty0 act = do
           )
           scope
      in
-      (scopesB |> (scopeE, scope'), unresolved)
-  do
-    zzz ← get @Exs
-    www ← get @(Vector Binding)
-    stackLog \_ → pretty (show $ www) <> "\n" <> pretty (show zzz)
-    when (length zzz /= length www + 1) $ error "YEP"
+      (Scopes bs (exsB |> (scopeE, scope')), unresolved)
 
   -- TODO: occurence check?
   if null unresolved
@@ -288,19 +266,25 @@ scopedExVar mapTerm ty0 act = do
 writeExBefore ∷ (Has Checker sig m) ⇒ Vector (Int, Term) → (Int, Int) → m ()
 writeExBefore entries (scopeI, beforeSub) = do
   stackLog \p → list ((\(u, t) → pretty u <+> ":" <+> p t) <$> toList entries) <+> "<| (" <> pretty scopeI <> ", " <> pretty beforeSub <> ")"
-  modify @Exs $ adjust' scopeI $ fmap \scope →
-    let (before, after) =
-          splitAt
-            ( fromMaybe (error "Ex not found in context")
-                $ findIndexL
-                  ( \case
-                      EVar sub _ → beforeSub == sub
-                      _ → False
-                  )
-                  scope
-            )
-            scope
-     in before <> fmap (\(i, t) → EVar i $ Right t) entries <> after
+  modify @Scopes \(Scopes bs exs) →
+    Scopes bs
+      $ adjust'
+        scopeI
+        ( fmap \scope →
+            let (before, after) =
+                  splitAt
+                    ( fromMaybe (error "Ex not found in context")
+                        $ findIndexL
+                          ( \case
+                              EVar sub _ → beforeSub == sub
+                              _ → False
+                          )
+                          scope
+                    )
+                    scope
+             in before <> fmap (\(i, t) → EVar i $ Right t) entries <> after
+        )
+        exs
 
 subExVar ∷ (Has (Reader Int :+: Writer (Vector (Int, Term)) :+: Fresh) sig m) ⇒ Term → m Term
 subExVar ty = do
@@ -473,13 +457,16 @@ numFitsInto x d =
     (\(_ ∷ Proxy e) → fromIntegral (minBound @e) <= x && fromIntegral (maxBound @e) >= x)
     (\_ → True)
 
-withEra ∷ (Has (State (Vector Binding)) sig m) ⇒ m a → m a
+withEra ∷ (Has Context sig m) ⇒ m a → m a
 withEra act = do
-  quants ← state @(Vector Binding) \binds →
-    unzip ((\(q, a, b, c) → ((QNorm, a, b, c), q)) <$> binds)
+  quants ← state @Scopes \(Scopes binds es) →
+    bimap (`Scopes` es) id
+      $ unzip ((\(q, a, b, c) → ((QNorm, a, b, c), q)) <$> binds)
   res ← act
-  modify @(Vector Binding) \binds →
-    (\(q, (_, a, b, c)) → (q, a, b, c)) <$> zip quants binds
+  modify @Scopes \(Scopes bs es) →
+    Scopes
+      ((\(q, (_, a, b, c)) → (q, a, b, c)) <$> zip quants bs)
+      es
   pure res
 
 -- mapTermFor ∷ (Applicative f) ⇒ InferMode a → ((Term → f Term) → a → f a)
@@ -707,7 +694,7 @@ infer = logAndRunInfer $ \case
   (TagLit _, InferL) → pure $ Term $ Builtin Tag
   (BoolLit _, InferL) → pure $ Term $ Builtin Bool
   (Var i, InferL) → do
-    binds ← get @(Vector Binding)
+    Scopes binds _ ← get @Scopes
     case binds !? (length binds - i - 1) of
       Just (QNorm, _, _, ty) → do
         stackLog \p → "var" <+> pretty i <+> ":" <+> p ty
@@ -777,7 +764,7 @@ infer = logAndRunInfer $ \case
       <$> builtinsList
   (UniVar _ ty, InferL) → pure ty
   (ExVar (scopeid, subid), InferL) → do
-    exs ← get @Exs
+    Scopes _ exs ← get @Scopes
     pure $ fromMaybe (error "Ex not found in scope") do
       (_, scope) ← exs !? scopeid
       i ←
@@ -835,7 +822,7 @@ instMeta ∷ ∀ sig m. (Has Checker sig m) ⇒ (Int, Int) → Term → m ()
 instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) →
   let
     getCurrPos (scopeI, subI) = do
-      exs ← get @Exs
+      Scopes _ exs ← get @Scopes
       pure $ (scopeI,) $ fromMaybe (error "Ex not found in scope") do
         (_, scope) ← exs !? scopeI
         findIndexL
@@ -854,11 +841,11 @@ instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) �
             then pure $ Term $ ExVar (scope2, sub2)
             else do
               u ← fresh
-              exs ← get @Exs
+              Scopes _ exs ← get @Scopes
               let
                 t2 = fromMaybe (error "Ex not found in scope") do
-                  (_, scope) ← exs !? scope2
-                  EVar _ (Right ty) ← scope !? sub2
+                  (_, scope) ← exs !? fst pos2
+                  EVar _ (Right ty) ← scope !? snd pos2
                   pure ty
               writeExBefore [(u, t2)] pos1
               writeMeta (scope2, sub2) (locs, Term $ ExVar (scope1, u))
@@ -1005,7 +992,7 @@ subtype = \a b →
           EqYes → pure ()
           _ → stackError \p → "Subtype check failed, no rule applies for:" <+> p t1 <+> "<:" <+> p t2
 
-runChecker' ∷ (Applicative m) ⇒ FreshC (ErrorC e (StateC (Vector Binding) (StateC Exs m))) a → m (Either e a)
+runChecker' ∷ (Applicative m) ⇒ FreshC (ErrorC e (StateC Scopes m)) a → m (Either e a)
 runChecker' =
   runContext'
     . runError (pure . Left) (pure . Right)

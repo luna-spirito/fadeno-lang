@@ -36,25 +36,25 @@ instance (Algebra sig m) ⇒ Algebra (Isolate :+: sig) (IsolateC m) where
     L Infect → tell (Any True) $> ctx
     R other → alg (unIsolateC . hdl) (R other) ctx
 
-data Scopes = Scopes !(Vector Binding) !(Vector (Epoch, Vector EEntry))
-
 type Binding = (Quant, Maybe Ident, Maybe Term, Term)
 newtype Epoch = Epoch Int deriving (Show, Eq)
+data Scopes = Scopes !(Vector Binding) !(Vector (Epoch, Vector EEntry))
+
 data Dyn = Dyn !Epoch !Term
 data EEntry = EMarker | EVar !Int !(Either (Int, Term) Term) | EUniVar !Int deriving (Eq, Show)
-type Exs = Vector (Epoch, Vector EEntry) -- for each scope, poch and list of exs
-type Context = State (Vector Binding) :+: State Exs :+: Isolate
+type Context = State Scopes :+: Isolate
 
-runContext' ∷ (Applicative m) ⇒ StateC (Vector Binding) (StateC Exs m) a → m a
-runContext' = evalState [(Epoch 0, [])] . evalState []
+runContext' ∷ (Applicative m) ⇒ StateC Scopes m a → m a
+runContext' = evalState (Scopes [] [(Epoch 0, [])])
 
 withBinding ∷ (Has Context sig m) ⇒ Binding → m a → m a
 withBinding b act = do
-  modify (|> b)
-  modify @Exs (|> (Epoch 0, []))
+  modify @Scopes \(Scopes bs es) → Scopes (bs |> b) (es |> (Epoch 0, []))
   res ← act
-  modify @(Vector Binding) $ maybe (error "Missing binding") fst . viewr
-  modify @Exs $ maybe (error "Missing ex scope") fst . viewr
+  modify @Scopes \(Scopes bs es) →
+    Scopes
+      (maybe (error "Missing binding") fst $ viewr bs)
+      (maybe (error "Missing ex scope") fst $ viewr es)
   pure res
 
 -- | Intensional equality.
@@ -63,8 +63,11 @@ data EqRes
   | EqNot -- provably uneq
   | EqUnknown
 
+getScopeId ∷ (Has Context sig m) ⇒ m Int
+getScopeId = (\(Scopes bs _es) → length bs) <$> get @Scopes
+
 getEpoch ∷ (Has Context sig m) ⇒ m Epoch
-getEpoch = maybe (error "Missing ex scope") (fst . snd) . viewr <$> get @Exs
+getEpoch = maybe (error "Missing ex scope") (fst . snd) . (\(Scopes _ es) → viewr es) <$> get @Scopes
 
 -- unwrap :: (Has Context sig m) ⇒ Term → m (TermF Dyn)
 -- unwrap = traverseTermF dyn (fmap Lambda . dyn . unLambda) . unTerm
@@ -336,7 +339,7 @@ traverseNormTermF c locals t0 =
                   Just (Just v) → nestedByP v updatedGlobalI
                   _ → Term $ Var updatedGlobalI
         else do
-          globals ← get @(Vector Binding)
+          Scopes globals _ ← get @Scopes
           let updatedGlobalI = globalI - countErased locals
           pure case globals !? (length globals - 1 - (globalI - length locals)) of
             Just (_, _, Just raw, _) → nestedByP raw $ updatedGlobalI
@@ -350,8 +353,7 @@ traverseNormTermF c locals t0 =
       FRecord b' → concat <$> c locals a <*> c locals b'
       FRow (name, b') → Term <$> (Concat <$> c locals a <*> (FRow . (name,) . Lambda <$> (c (locals |> Nothing) $ unLambda b')))
     ExVar (i, subi) → do
-      globals ← get @(Vector Binding)
-      exs ← get @Exs
+      Scopes globals exs ← get @Scopes
       let valtyM = do
             (_, scope) ← exs !? i
             ind ←
