@@ -1,5 +1,3 @@
-{-# LANGUAGE UndecidableInstances #-}
-
 module Main where
 
 import Control.Algebra
@@ -8,22 +6,28 @@ import Control.Carrier.Fresh.Church (FreshC, evalFresh)
 import Control.Carrier.Reader (ReaderC, runReader)
 import Control.Carrier.State.Church (StateC)
 import Control.Carrier.Writer.Church (WriterC, execWriter, runWriter)
+import Control.Effect.Empty (empty)
 import Control.Effect.Error (Error, throwError)
 import Control.Effect.Fresh (Fresh, fresh)
 import Control.Effect.Lift (Lift, sendIO)
 import Control.Effect.Reader (Reader, ask, local)
-import Control.Effect.State (get, put)
+import Control.Effect.State (State, get, modify, put, state)
+import Control.Effect.Throw (Throw)
 import Control.Effect.Writer (Writer, censor, listen, tell)
+import Data.Bitraversable (bimapM)
 import Data.ByteString.Char8 (pack)
 import Data.List (find, sortBy)
-import Data.RRBVector (Vector, deleteAt, ifoldr, viewl, (!?), (<|))
+import Data.RRBVector (Vector, adjust, adjust', deleteAt, drop, findIndexL, ifoldl', ifoldr, splitAt, unzip, viewl, viewr, zip, (!?), (<|), (|>))
+import Data.Type.Equality (type (~))
 import GHC.Exts (IsList (..))
-import Normalize (Binding, EqRes (..), Resolved, applyLambda, insertBinds, isEq', nested, normalize, numDecDispatch, resolve, resolve', rewrite, rewriteTerm, runSeqResolve, termQQ, withResolved)
-import Parser (Bits (..), BlockT (..), BuiltinT (..), ExVarId (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), builtinsList, identOfBuiltin, intercept, pIdent, pQuant, pTerm, parse, render, rowOf, typOf)
-import Prettyprinter (Doc, annotate, group, indent, line, nest, pretty, (<+>))
+import Normalize (Binding, Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, numDecDispatch, rewrite, rewriteTerm, runContext', runIsolate, splitAt3, termQQ, withBinding)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, intercept, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parse, render, rowOf, traverseTermF, typOf)
+import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
-import RIO hiding (Reader, Vector, ask, concat, filter, link, local, runReader, toList)
+import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, runReader, toList, zip)
 import RIO.HashMap qualified as HM
+
+-- TODO: recheck if locals work correctly in metas, especially when one meta is instantiated to another
 
 -- TODO: You currently don't perform `resolve` in terms processed...
 -- This is probably an error.
@@ -31,6 +35,10 @@ import RIO.HashMap qualified as HM
 -- TODO: Permit inference of dependent Pis?
 -- TODO: Recheck the whole file.
 -- TODO: Concat uncomfortably replicate Pi.
+-- TODO: errors. Probably all impossibles as `error` or `undefined`
+-- TODO: Row (Type+ u) -> Row u?
+
+type Checker = Context :+: Fresh :+: StackLog :+: Throw (Doc AnsiStyle)
 
 -- | Debug stack
 data StackLog m a where
@@ -54,21 +62,19 @@ instance (Algebra sig m) ⇒ Algebra (StackLog :+: sig) (StackAccC m) where
         $ hdl (ctx $> act)
     R other → alg (unStackAccC . hdl) (R other) ctx
 
-termLoggerM ∷ (Has Solve sig m) ⇒ m (TermT → Doc AnsiStyle)
-termLoggerM = do
-  ctx ← ask @(Vector Binding)
-  pure $ \t → pTerm ((\(q, i, _, _) → (q, i)) <$> ctx) t
+termLoggerM ∷ (Has Context sig m) ⇒ m (Term → Doc AnsiStyle)
+termLoggerM = (\(Scopes ctx _) → pTerm $ (\(q, n, _, _) → (q, n)) <$> ctx) <$> get @Scopes
 
-stackLog ∷ (Has Solve sig m) ⇒ ((TermT → Doc AnsiStyle) → Doc AnsiStyle) → m ()
+stackLog ∷ (Has (Context :+: StackLog) sig m) ⇒ ((Term → Doc AnsiStyle) → Doc AnsiStyle) → m ()
 stackLog f = send . StackLog . f =<< termLoggerM
 
-stackScope ∷ (Has Solve sig m) ⇒ ((TermT → Doc AnsiStyle) → Doc AnsiStyle) → m a → m a
+stackScope ∷ (Has (Context :+: StackLog) sig m) ⇒ ((Term → Doc AnsiStyle) → Doc AnsiStyle) → m a → m a
 stackScope namef act = do
   tl ← termLoggerM
   send $ StackScope (namef tl) act
 
 -- Monomorphised to Doc AnsiStyle.
-stackError ∷ ∀ sig m a. (Has Solve sig m) ⇒ ((TermT → Doc AnsiStyle) → Doc AnsiStyle) → m a
+stackError ∷ ∀ sig m a. (Has Checker sig m) ⇒ ((Term → Doc AnsiStyle) → Doc AnsiStyle) → m a
 stackError ef = do
   stackLog \_ → "<panic!!!11>"
   throwError . ef =<< termLoggerM
@@ -110,349 +116,339 @@ runStackPrintC = runReader 0 . unStackPrintC
 
 -- Check
 
-type Solve = Reader (Vector Binding) :+: Writer Resolved :+: Fresh :+: Error (Doc AnsiStyle) :+: StackLog
+-- writeMeta' ∷ ∀ sig m. (Has Checker sig m) ⇒ (Int, Int) → Term → m ()
+-- writeMeta' = \(scope, subi) val → do
+--   exs0 ← get @Exs
+--   let (exsBefore, exsMiddleM, exsAfter) = splitAt3 scope exs0
+--   (exsMiddleBef, exMiddleMiddle, exsMiddleAft) ← maybe (stackError \_ → "Internal error: ex not found in context") pure do
+--     middle ← exsMiddleM
+--     i ← findIndexL ((== subi) . fst) middle
+--     pure $ splitAt3 i middle
+--   case exMiddleMiddle of
+--     Just (Right _) → _
+--   (bindsBefore, bindsAfter) ← splitAt scope <$> get @(Vector Binding)
+--   put $ exsBefore |> (exsMiddleBef |> (subi, Left val))
+--   put bindsBefore
+--   let
+--     fe ∷ (Int, Either Term Term) → m ()
+--     fe (exId, valty) = do
+--       valty' ← bimapM f f valty
+--       modify @Exs \exs → adjust' (length exs - 1) (|> (exId, valty')) exs
+--     fb (q, n, val, ty) = do
+--       ty' ← f ty
+--       modify @(Vector Binding) (|> (q, n, val, ty'))
+--   for_ exsMiddleAft fe
+--   for_ (zip bindsAfter exsAfter) \(b, e) → do
+--     fb b
+--     modify @Exs (|> [])
+--     for_ e fe
 
-writeMeta ∷ (Has Solve sig m) ⇒ Maybe Ident → ExVarId → TermT → Int → TermT → m ()
-writeMeta n var ty locs val = do
-  stackLog \p → maybe "_" pIdent n <+> ":=" <+> p val
-  local insideEra $ infer val $ Check ty
-  tell $ HM.singleton var (locs, val)
+writeMeta ∷ ∀ sig m. (Has Checker sig m) ⇒ (Int, Int) → (Int, Term) → m ()
+writeMeta exId0@(scope0, subi0) (valLocals0, valNow0) = do
+  stackLog \p → "exi# " <> pretty exId0 <+> ":=" <+> p valNow0
+  depth ← (\scope → scope - scope0) <$> getScopeId -- no -1 due to scope being ridiculous
+  val0 ← maybe (stackError \_ → "Leak") pure $ nestedBy' valLocals0 valNow0 $ -depth
+  Scopes (splitAt scope0 → (bindsBefore, bindsAfter)) (splitAt3 scope0 → (exsBefore, exsMiddleM, exsAfter)) ← get @Scopes
+  (Epoch exsMiddleEpoch, (exsMiddleBef, exsMiddleMiddle, exsMiddleAft)) ← maybe (stackError \_ → "ex not found in context") pure do
+    middle ← exsMiddleM
+    i ←
+      findIndexL
+        ( \case
+            EVar subi2 _ → subi2 == subi0
+            _ → False
+        )
+        $ snd middle
+    pure $ splitAt3 i <$> middle
+  put $ Scopes bindsBefore $ exsBefore |> (Epoch exsMiddleEpoch, exsMiddleBef)
+  case exsMiddleMiddle of
+    Just (EVar _ (Right ty)) → infer val0 $ Check ty
+    _ → stackError \_ → "Internal error: existential already instantiated"
+  modify @Scopes \(Scopes bs es) → Scopes bs $ adjust' scope0 (bimap (\(Epoch i) → Epoch $ i + 1) (|> EVar subi0 (Left (valLocals0, val0)))) es
+  let
+    fe ∷ EEntry → m ()
+    fe e0 = do
+      e1 ← case e0 of
+        EVar exId valty → do
+          valty' ← bimapM (traverse normalize) normalize valty
+          pure $ EVar exId valty'
+        x → pure x
+      modify @Scopes \(Scopes bs es) → Scopes bs $ adjust (length es - 1) (fmap (|> e1)) es
+  for_ exsMiddleAft fe
+  when (length bindsAfter /= length exsAfter) $ error "Binds/exs mismatch"
+  for_ (zip bindsAfter exsAfter) \((q, n, val, ty), (Epoch epoch, e)) → do
+    ty' ← normalize ty
+    modify @Scopes \(Scopes bs es) → Scopes (bs |> (q, n, val, ty')) (es |> (Epoch $ epoch + 1, []))
+    for_ e fe
+
+-- -- TODO: Dependent.
 
 -- | Introduce new variable/binding.
-scopedVar ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → (Quant, Maybe Ident, Maybe TermT, TermT) → m a → m a
-scopedVar mapTerm (bindQ, bindI, bindT, bindTy) act = do
-  (resolved, res) ← intercept @Resolved $ local (insertBinds (bindQ, bindI, bindT, Just bindTy)) act
-  let unnest' locs0 original =
-        rewrite
-          (const (+ 1))
-          (+ 1)
-          ( \term locs → case term of
-              Var i | i == locs → stackError \p → "Var leaked in " <> p original
-              Var i | i > locs → pure $ Just $ Var $ i - 1
-              _ → pure Nothing
-          )
-          locs0
-          original
-  tell =<< for resolved \(locs, ex) → (locs,) <$> unnest' locs ex
-  mapTerm (unnest' 0) res
+scopedVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → (Quant, Maybe Ident, Maybe Term, Term) → m a → m a
+scopedVar mapTerm (bindQ, bindI, bindT, bindTy) act =
+  withBinding (bindQ, bindI, bindT, bindTy) act
+    >>= mapTerm (\t → maybe (stackError \p → "Var leaked in" <+> p t) pure $ nestedBy' 0 t $ -1)
 
-scopedUniVar ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → Int → m a → m a
-scopedUniVar mapTerm uni1 act = do
-  (resolved, res) ← listen @Resolved act
-  let ensureNotOcc original =
-        rewrite
-          (const id)
-          id
-          ( \term () → case term of
-              UniVar _ uni2 _ | uni1 == uni2 → stackError \p → "UniVar leaked in " <> p original
-              _ → pure Nothing
-          )
-          ()
-          original
-  for_ resolved \(_, x) → ensureNotOcc x
-  mapTerm ensureNotOcc res
+scopedUniVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → Term → (Term → m a) → m a
+scopedUniVar mapTerm ty act = do
+  scope1 ← getScopeId
+  sub1 ← fresh
+  modify @Scopes \(Scopes bs es) → Scopes bs $ adjust' scope1 (fmap (<> [EUniVar sub1])) es
+  let ensureNotOcc = fix \rec →
+        unTerm >>> fmap Term . \case
+          UniVar uni2 _ | (scope1, sub1) == uni2 → stackError \_ → "UniVar leaked"
+          x → traverseTermF rec (fmap Lambda . rec . unLambda) x
+  res ← act (Term $ UniVar (scope1, sub1) ty) >>= mapTerm ensureNotOcc
+  modify @Scopes \(Scopes bs es) → Scopes bs $ adjust' scope1 (fmap $ maybe (error "impossible") fst . viewr) es
+  pure res
 
-freshIdent ∷ (Has Solve sig m) ⇒ m Ident
+freshIdent ∷ (Has Fresh sig m) ⇒ m Ident
 freshIdent = (`Ident` False) . ("/" <>) . pack . show <$> fresh
 
-scopedExVar ∷ (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → (Int, TermT) → m a → m a
-scopedExVar mapTerm (ex1, ex1ty) act = do
-  (resolved, res) ← intercept @Resolved act
-  let
-    -- \| Is dervative of `ex1`?
-    isOfEx1 (ExVarId x) = (== ex1) $ fst $ fromMaybe (error "impossible") $ viewl x
-    resolved' = HM.filterWithKey (\k _ → not $ isOfEx1 k) resolved
-  -- Ensure no leak
-  for_ resolved' \(_, original) →
-    rewrite
-      (const id)
-      id
-      ( \term () → case term of
-          ExVar _ ex2 _
-            | isOfEx1 ex2 →
-                stackError \p → "ExVar #" <> pretty ex1 <+> "leaked in " <> p original
-          _ → pure Nothing
-      )
-      ()
-      original
-  tell resolved'
-  -- Rewrite
-  let unresolved =
-        sortBy (\a b → fst a `compare` fst b)
-          $ toList
-          $ runIdentity
-          $ execWriter @(HashMap ExVarId TermT)
-          $ rewrite
-            (const id)
-            id
-            ( \term () → case term of
-                ExVar _ ex2 ty
-                  | isOfEx1 ex2 → tell @(HashMap ExVarId TermT) [(ex2, ty)] $> Nothing
-                _ → pure Nothing
-            )
-            ()
-            (resolve resolved $ ExVar (Just $ Ident "" False) (ExVarId [ex1]) ex1ty)
+scopedExVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → Term → (Term → m a) → m a
+scopedExVar mapTerm ty0 act = do
+  scopeId ← getScopeId
+  sub ← fresh
+  modify @Scopes \(Scopes bs es) → Scopes bs $ adjust' scopeId (fmap (<> [EMarker, EVar sub (Right ty0)])) es
+  res ← act $ Term $ ExVar (scopeId, sub)
+  unresolved ← state @Scopes \(Scopes bs exs) →
+    let
+      (exsB, (scopeE, scope)) = fromMaybe (error "Missing ex scope") $ viewr exs
+      (scope', unresolved) =
+        fix
+          ( \rec →
+              viewr >>> \case
+                Just (rest, EMarker) → (rest, [])
+                Just (rest, EVar _ (Left _)) → rec rest
+                Just (rest, EVar i (Right ty)) → (|> (i, ty)) <$> rec rest
+                _ → error "Marker disappeared"
+          )
+          scope
+     in
+      (Scopes bs (exsB |> (scopeE, scope')), unresolved)
+
+  -- TODO: occurence check?
   if null unresolved
     then pure res
     else
       mapTerm
-        ( \outT →
-            let rewriteExVar ex with0 =
-                  runIdentity
-                    . rewrite
-                      (const nested)
-                      nested
-                      ( \term with → pure $ case term of
-                          ExVar _ ex' _ | ex == ex' → Just with
-                          _ → Nothing
+        ( \t →
+            let resolve binds =
+                  run
+                    . runReader @Int 0
+                    . fix
+                      ( \rec →
+                          unTerm >>> fmap Term . \case
+                            Var n → do
+                              locs ← ask @Int
+                              pure
+                                $ if n >= locs
+                                  then Var $ n + length binds
+                                  else Var n
+                            ExVar (scopeId2, j)
+                              | scopeId == scopeId2
+                              , Just indL ← findIndexL ((== j) . fst) binds → do
+                                  locs ← ask
+                                  pure $ Var $ locs + (length binds - indL - 1)
+                            x → traverseTermF (rec) (fmap Lambda . local @Int (+ 1) . rec . unLambda) x
                       )
-                      with0
-             in foldM
-                  ( \acc (ex, ty) → do
+             in foldr
+                  ( \(newBindId, newBindTy0) rec binds → do
                       n ← freshIdent
-                      pure $ Pi QEra (Just n) ty $ Lambda $ rewriteExVar ex (Var 0) $ nested acc
+                      let newBindTy = resolve binds newBindTy0
+                      Term . Pi QEra (Just n) newBindTy . Lambda <$> rec (binds |> (newBindId, newBindTy))
                   )
-                  outT
+                  (\binds → pure $ resolve binds t)
                   unresolved
+                  []
         )
         res
 
+writeExBefore ∷ (Has Checker sig m) ⇒ Vector (Int, Term) → (Int, Int) → m ()
+writeExBefore entries (scopeI, beforeSub) = do
+  stackLog \p → list ((\(u, t) → pretty u <+> ":" <+> p t) <$> toList entries) <+> "<| (" <> pretty scopeI <> ", " <> pretty beforeSub <> ")"
+  modify @Scopes \(Scopes bs exs) →
+    Scopes bs
+      $ adjust'
+        scopeI
+        ( fmap \scope →
+            let (before, after) =
+                  splitAt
+                    ( fromMaybe (error "Ex not found in context")
+                        $ findIndexL
+                          ( \case
+                              EVar sub _ → beforeSub == sub
+                              _ → False
+                          )
+                          scope
+                    )
+                    scope
+             in before <> fmap (\(i, t) → EVar i $ Right t) entries <> after
+        )
+        exs
+
+subExVar ∷ (Has (Reader Int :+: Writer (Vector (Int, Term)) :+: Fresh) sig m) ⇒ Term → m Term
+subExVar ty = do
+  scope ← ask
+  sub ← fresh
+  tell @(Vector (Int, Term)) [(sub, ty)]
+  pure $ Term $ ExVar (scope, sub)
+
 withMono' ∷
-  (Has Solve sig m) ⇒
+  (Has Checker sig m) ⇒
   -- | Unwrap Foralls
   Bool →
-  ((TermT → m TermT) → a → m a) →
+  ((Term → m Term) → a → m a) →
   -- | onMeta
-  ReaderC (Maybe Ident, ExVarId, TermT) m TermT →
+  ReaderC Int (WriterC (Vector (Int, Term)) m) Term →
   -- | onOther
-  (Resolved → TermT → m a) →
-  TermT →
+  (Term → m a) →
+  Term →
   m a
 withMono' foralls mapTerm onMeta onOther = go
  where
-  go = \case
-    ExVar n i ty → do
-      val ← runReader (n, i, ty) onMeta
-      runSeqResolve do
-        withResolved \_ → writeMeta n i ty 0 val
-        withResolved \exs → onOther exs val
-    Pi QEra n x y | foralls → stackScope (\_ → "(unwrapped forall)") do
-      exId ← fresh
-      scopedExVar mapTerm (exId, x) $ go $ applyLambda y $ ExVar n (ExVarId [exId]) x
-    r → onOther [] r
+  go =
+    unTerm >>> \case
+      ExVar (scope, sub) → do
+        (newExs, res) ← runWriter (curry pure) $ runReader scope onMeta
+        writeExBefore newExs (scope, sub)
+        writeMeta (scope, sub) (0, res)
+        onOther res
+      Pi QEra _n x y
+        | foralls →
+            stackScope (\_ → "(unwrapped forall)")
+              $ scopedExVar mapTerm x
+              $ go
+              . applyLambda y
+      r → onOther $ Term r
 
 withMono ∷
-  (Has Solve sig m) ⇒
-  ((TermT → m TermT) → a → m a) →
-  ReaderC (Maybe Ident, ExVarId, TermT) m TermT →
-  (Resolved → TermT → m a) →
-  TermT →
+  (Has Checker sig m) ⇒
+  ((Term → m Term) → a → m a) →
+  ReaderC Int (WriterC (Vector (Int, Term)) m) Term →
+  (Term → m a) →
+  Term →
   m a
 withMono = withMono' True
 
--- TODO: Remove type!
-subExVar' ∷ (Has (Reader (Maybe Ident, ExVarId, TermT) :+: Fresh) sig m) ⇒ ByteString → m (Maybe Ident, ExVarId)
-subExVar' subName = do
-  subI ← fresh
-  (baseIdentM, ExVarId baseI, _ ∷ TermT) ← ask
-  let newIdentM = (\(Ident baseName op) → Ident (baseName <> "/" <> subName) op) <$> baseIdentM
-  pure (newIdentM, (ExVarId $ baseI <> [subI]))
+-- unifyFields ∷ (Has Solve sig m) ⇒ Vector' (Term, Term) → StateC (Maybe Term) m ()
+-- unifyFields fi = runSeqResolve $ for_ fi \(_fieldName, fieldValue) → do
+--   fieldValue' ← withResolved \exs → pure $ resolve exs fieldValue
+--   currentUnifiedTyM ← get
+--   withResolved \_ → case currentUnifiedTyM of
+--     Nothing → put $ Just fieldValue'
+--     Just currentUnifiedTy → runSeqResolve do
+--       withResolved \_ → subtype fieldValue' currentUnifiedTy
+--       withResolved \exs → put $ Just $ resolve exs currentUnifiedTy
 
-subExVar ∷ (Has (Reader (Maybe Ident, ExVarId, TermT) :+: Fresh) sig m) ⇒ ByteString → TermT → m TermT
-subExVar subName subTy = (\(a, b) → ExVar a b subTy) <$> subExVar' subName
+-- -- TODO: Just remove this... please...
+-- ensureIsType ∷ (Has Solve sig m) ⇒ Term → m Term
+-- ensureIsType t =
+--   withMono
+--     id
+--     (lift fails)
+--     ( \_ → \ty → case ty of
+--         App (Builtin TypePlus) _ → pure ty
+--         App (Builtin Row) _ → pure ty
+--         -- Currently ensureIsType is used in writeMeta for ExSuperType. So don't uncomment this without thinking!
+--         -- App (Builtin Row) _ → pure ty
+--         -- App (Builtin Record) r →
+--         --   rowOf <$> withKnownFields id r \fields →
+--         --     fromMaybe bottomRow <$> execState Nothing (unifyFields fields)
+--         _ → fails
+--     )
+--     t
+--  where
+--   fails = stackError \p → p t <> " is not a type?"
 
-isEqUnify ∷ (Has Solve sig m) ⇒ TermT → TermT → m EqRes
-isEqUnify = isEq' instMeta
+-- nestMode ∷ InferMode a → InferMode a
+-- nestMode = \case
+--   Infer → Infer
+--   Check x → Check $ nested x
 
-data LookupRes a
-  = LookupFound !a
-  | LookupMissing !(Vector' TermT) -- Visited keys
-  | LookupUnknown
-  deriving (Show)
+-- -- TODO: We could implement "bindings update" as an effect.
+-- -- Performance improvements over rewriting all the bindings.
 
-{- | Accepts `tag`, `row` and `record`. Provides access to the field `tag` in `row`,
-performs refines if necessary.
--}
-rowGet ∷ ∀ sig m a. (Has Solve sig m) ⇒ ((TermT → m TermT) → a → m a) → TermT → (TermT → m a) → TermT → TermT → m (LookupRes a)
-rowGet mapTerm tag cont = go
- where
-  notARow x = stackError \p → "Not a row:" <+> p x
-  go ∷ TermT → TermT → m (LookupRes a)
-  go row record =
-    withMono
-      ( \f → \case
-          LookupFound a → LookupFound <$> mapTerm f a
-          LookupMissing (Vector' keys) → LookupMissing . Vector' <$> traverse f keys
-          LookupUnknown → pure LookupUnknown
-      )
-      ( do
-          (tName, tId) ← subExVar' "t"
-          local (\_ → (tName, tId, Builtin Any')) do
-            let t = ExVar tName tId $ Builtin Any'
-            tail ← subExVar "tail" $ rowOf $ nested t
-            pure $ Concat (FieldsLit (FRow ()) [(tag, t)]) (FRow (Nothing, Lambda tail))
-      )
-      ( \_ → \case
-          FieldsLit (FRow ()) (Vector' l) → case viewl l of
-            Nothing → pure $ LookupMissing []
-            Just ((n, v), rest) → runSeqResolve do
-              eqTag ← withResolved \_ → isEqUnify n tag
-              case eqTag of
-                EqYes → LookupFound <$> withResolved \exs → cont (resolve exs v)
-                EqNot → do
-                  inRest ← withResolved \exs → go (FieldsLit (FRow ()) (Vector' $ bimap (resolve exs) (resolve exs) <$> rest)) record
-                  case inRest of
-                    LookupFound res → pure $ LookupFound res
-                    LookupMissing (Vector' fi) → withResolved \exs → pure $ LookupMissing $ Vector' $ resolve exs n <| fi
-                    LookupUnknown → pure LookupUnknown
-                EqUnknown → pure LookupUnknown
-          Concat l (FRow (_, r)) → runSeqResolve do
-            inL ← withResolved \exs → go (resolve exs l) record
-            case inL of
-              LookupMissing visited1 → do
-                let
-                  select f = normalize [] $ App (App (Builtin f) $ ListLit $ visited1) record
-                  recordL = select RecordKeepFields
-                  recordR = select RecordDropFields
-                r' ← withResolved \exs → go (resolve exs $ applyLambda r recordL) recordR
-                case r' of
-                  LookupMissing visited2 → pure $ LookupMissing $ visited1 <> visited2
-                  o → pure o
-              o → pure o
-          x → notARow x
-      )
-      row
+-- resolveBinds ∷ Resolved → Vector (Quant, Maybe Term, Term) → Vector (Quant, Maybe Term, Term)
+-- resolveBinds (HM.null → True) = id
+-- resolveBinds exs = fmap $ bimap id $ resolve exs
 
-unifyFields ∷ (Has Solve sig m) ⇒ Vector' (TermT, TermT) → StateC (Maybe TermT) m ()
-unifyFields fi = runSeqResolve $ for_ fi \(_fieldName, fieldValue) → do
-  fieldValue' ← withResolved \exs → pure $ resolve exs fieldValue
-  currentUnifiedTyM ← get
-  withResolved \_ → case currentUnifiedTyM of
-    Nothing → put $ Just fieldValue'
-    Just currentUnifiedTy → runSeqResolve do
-      withResolved \_ → subtype fieldValue' currentUnifiedTy
-      withResolved \exs → put $ Just $ resolve exs currentUnifiedTy
+-- resolveMode ∷ Resolved → InferMode a → InferMode a
+-- resolveMode exs = \case
+--   Infer → Infer
+--   Check a → Check $ resolve exs a
 
--- TODO: Just remove this... please...
-ensureIsType ∷ (Has Solve sig m) ⇒ TermT → m TermT
-ensureIsType t =
-  withMono
-    id
-    (lift fails)
-    ( \_ → \ty → case ty of
-        App (Builtin TypePlus) _ → pure ty
-        App (Builtin Row) _ → pure ty
-        -- Currently ensureIsType is used in writeMeta for ExSuperType. So don't uncomment this without thinking!
-        -- App (Builtin Row) _ → pure ty
-        -- App (Builtin Record) r →
-        --   rowOf <$> withKnownFields id r \fields →
-        --     fromMaybe bottomRow <$> execState Nothing (unifyFields fields)
-        _ → fails
-    )
-    t
- where
-  fails = stackError \p → p t <> " is not a type?"
+-- -- | Select bindings for normalizing annotations.
+-- annoBinds ∷ (Has Solve sig m) ⇒ m (Vector (Maybe Term))
+-- annoBinds = (fmap \(_, _, a, _) → a) <$> ask @(Vector Binding)
 
-insideEra ∷ Vector Binding → Vector Binding
-insideEra = fmap \(_q, a, b, c) → (QNorm, a, b, c)
+-- -- | Select bindings for normalizing terms.
+-- termBinds ∷ (Has Solve sig m) ⇒ m (Vector (Maybe Term))
+-- termBinds =
+--   let f = \(q, _, a, _) → case q of
+--         QEra → Just undefined -- Just and not Nothing to make sure `normalize` erases it.
+--         QNorm → a
+--    in (fmap f) <$> ask @(Vector Binding)
+
+-- inferApp ∷ (Has Solve sig m) ⇒ Quant → Term → Term → m Term
+-- inferApp q f a = runSeqResolve do
+--   let norm = q == QNorm
+--   fTy ← withResolved \_ → infer f Infer
+--   withResolved \_ →
+--     withMono'
+--       norm
+--       id
+--       ( if norm
+--           then Pi QNorm Nothing <$> subExVar "in" (Builtin Any') <*> (Lambda <$> subExVar "out" (Builtin Any'))
+--           else stackError \_ → "Cannot apply erased argument to unknown"
+--       )
+--       ( \_ → \case
+--           Pi q2 _n inT outT | q == q2 → runSeqResolve do
+--             let updCtx = if norm then id else local @(Vector Binding) ((\(_, i, t, ty) → (QNorm, i, t, ty)) <$>)
+--             withResolved \_ → updCtx $ infer a $ Check $ inT
+--             withResolved \exs → do
+--               ab ← annoBinds
+--               pure $ resolve exs $ applyLambda outT (normalize ab a)
+--           t → stackError \p → "inferApp" <+> pretty (show q) <+> p t
+--       )
+--       fTy
 
 data InferMode a where
-  Infer ∷ InferMode TermT
-  Check ∷ TermT → InferMode ()
+  Infer ∷ InferMode Term
+  Check ∷ Term → InferMode ()
 
-nestMode ∷ InferMode a → InferMode a
-nestMode = \case
-  Infer → Infer
-  Check x → Check $ nested x
+{- | Left is original, right is dynamic. This is absolutely ugly, but necessary for some of the cases, where left is needed.
+unwrapMode :: Has Context sig m ⇒ InferMode Term a → m (InferMode (Dyn, TermF Dyn) a)
+unwrapMode = \case
+  Infer → pure Infer
+  Check c → Check <$> ((,) <$> dyn c <*> unwrap c) -- 💀
+{\-# INLINE unwrapMode #-\}
+-}
 
-mapTermFor ∷ (Applicative f) ⇒ InferMode a → ((TermT → f TermT) → a → f a)
-mapTermFor = \case
-  Infer → id
-  Check _ → const pure
+--
 
--- TODO: We could implement "bindings update" as an effect.
--- Performance improvements over rewriting all the bindings.
-
-resolveBinds ∷ Resolved → Vector (Quant, Maybe TermT, TermT) → Vector (Quant, Maybe TermT, TermT)
-resolveBinds (HM.null → True) = id
-resolveBinds exs = fmap $ bimap id $ resolve exs
-
-resolveMode ∷ Resolved → InferMode a → InferMode a
-resolveMode exs = \case
-  Infer → Infer
-  Check a → Check $ resolve exs a
-
--- | Select bindings for normalizing annotations.
-annoBinds ∷ (Has Solve sig m) ⇒ m (Vector (Maybe TermT))
-annoBinds = (fmap \(_, _, a, _) → a) <$> ask @(Vector Binding)
-
--- | Select bindings for normalizing terms.
-termBinds ∷ (Has Solve sig m) ⇒ m (Vector (Maybe TermT))
-termBinds =
-  let f = \(q, _, a, _) → case q of
-        QEra → Just undefined -- Just and not Nothing to make sure `normalize` erases it.
-        QNorm → a
-   in (fmap f) <$> ask @(Vector Binding)
-
-checkDepLam ∷ ∀ sig m. (Has Solve sig m) ⇒ Quant → Maybe Ident → Lambda TermT → TermT → Lambda TermT → m ()
-checkDepLam q i bod inT outT =
-  scopedVar (const pure) (q, i, Nothing, inT)
-    $ infer (unLambda bod)
-    $ Check
-    $ unLambda outT
-
-inferApp ∷ (Has Solve sig m) ⇒ Quant → TermT → TermT → m TermT
-inferApp q f a = runSeqResolve do
-  let norm = q == QNorm
-  fTy ← withResolved \_ → infer f Infer
-  withResolved \_ →
-    withMono'
-      norm
-      id
-      ( if norm
-          then Pi QNorm Nothing <$> subExVar "in" (Builtin Any') <*> (Lambda <$> subExVar "out" (Builtin Any'))
-          else stackError \_ → "Cannot apply erased argument to unknown"
-      )
-      ( \_ → \case
-          Pi q2 _n inT outT | q == q2 → runSeqResolve do
-            let updCtx = if norm then id else local @(Vector Binding) ((\(_, i, t, ty) → (QNorm, i, t, ty)) <$>)
-            withResolved \_ → updCtx $ infer a $ Check $ inT
-            withResolved \exs → do
-              ab ← annoBinds
-              pure $ resolve exs $ applyLambda outT (normalize ab a)
-          t → stackError \p → "inferApp" <+> pretty (show q) <+> p t
-      )
-      fTy
-
-checkList ∷ (Has Solve sig m) ⇒ Vector TermT → TermT → m TermT
-checkList = flip $ foldM \ty0 v → runSeqResolve do
-  withResolved \_ → infer v $ Check ty0
-  withResolved \exs → pure $ resolve exs ty0
-
-inferList ∷ (Has Solve sig m) ⇒ Vector TermT → m (Maybe TermT)
-inferList tts = for (viewl tts) \(t, ts) → runSeqResolve do
-  tT ← withResolved \_ → infer t Infer
-  withResolved \_ → checkList ts tT
-
--- stackScope ("<" <> group (pTerm' t) <> "> : " <> pMode mode) $
-logAndRunInfer ∷ ∀ sig m a. (Has Solve sig m) ⇒ ((TermT, InferMode a) → m a) → TermT → InferMode a → m a
-logAndRunInfer f t@(Block{}) mode = f (t, mode) -- No logging to reduce noise
+logAndRunInfer ∷ ∀ sig m a. (Has Checker sig m) ⇒ ((TermF Term, (Epoch, InferMode a)) → m a) → Term → InferMode a → m a
 logAndRunInfer f t mode =
-  let
-    scope x = stackScope @sig @m @a \p → ("<" <> group (p t) <> "> : " <> x p)
-    act = f (t, mode)
-   in
-    case mode of
-      Infer → scope (\_ → "_") do
-        res ← act
-        when (t /= BuiltinsVar) $ stackLog \p → p res
-        pure res
-      Check t' → scope (\p → p t') act
+  let act = getEpoch >>= \e → f (unTerm t, (e, mode))
+   in case t of
+        Term Block{} → act -- No logging to reduce noise
+        _ →
+          let
+            scope x = stackScope @sig @m @a \p → ("<" <> group (p t) <> "> : " <> x p)
+           in
+            case mode of
+              Infer → scope (\_ → "_") do
+                res ← act
+                when (t /= Term BuiltinsVar) $ stackLog \p → p res
+                pure res
+              Check t' → scope (\p → p t') act
+{-# INLINE logAndRunInfer #-}
 
-withBlockLog ∷ (Has Solve sig m) ⇒ TermT → m a → m a
+withBlockLog ∷ (Has Checker sig m) ⇒ Term → m a → m a
 withBlockLog into act = case into of
-  Block{} → act
+  Term Block{} → act
   _ → stackScope (\_ → "in") act
+
+--
 
 numFitsInto ∷ Integer → NumDesc → Bool
 numFitsInto x d =
@@ -461,199 +457,332 @@ numFitsInto x d =
     (\(_ ∷ Proxy e) → fromIntegral (minBound @e) <= x && fromIntegral (maxBound @e) >= x)
     (\_ → True)
 
+withEra ∷ (Has Context sig m) ⇒ m a → m a
+withEra act = do
+  quants ← state @Scopes \(Scopes binds es) →
+    bimap (`Scopes` es) id
+      $ unzip ((\(q, a, b, c) → ((QNorm, a, b, c), q)) <$> binds)
+  res ← act
+  modify @Scopes \(Scopes bs es) →
+    Scopes
+      ((\(q, (_, a, b, c)) → (q, a, b, c)) <$> zip quants bs)
+      es
+  pure res
+
+-- mapTermFor ∷ (Applicative f) ⇒ InferMode a → ((Term → f Term) → a → f a)
+-- mapTermFor = \case
+--   Infer → id
+--   Check _ → const pure
+
+-- | Check, instantly unwrapping a layer
+pattern CheckL ∷ () ⇒ (a2 ~ ()) ⇒ TermF Dyn → (Epoch, InferMode a2)
+pattern CheckL x ← (e, Check (fDyn e → x))
+
+pattern InferL ∷ () ⇒ (a2 ~ Term) ⇒ (a1, InferMode a2)
+pattern InferL ← (_, Infer)
+
+inferApp ∷ (Has Checker sig m) ⇒ Quant → Term → Term → m Term
+inferApp q f a = do
+  let norm = q == QNorm
+  infer f Infer
+    >>= withMono'
+      norm
+      id
+      ( if norm
+          then Term <$> (Pi QNorm Nothing <$> subExVar (Term $ Builtin Any') <*> (Lambda <$> subExVar (Term $ Builtin Any')))
+          else stackError \_ → "Cannot apply erased argument to unknown"
+      )
+      ( \t0 →
+          getEpoch >>= \e0 → case t0 of
+            (fDyn e0 → Pi q2 _n inT outT) | q == q2 → do
+              let updCtx = if norm then id else withEra
+              updCtx $ (infer a . Check =<< fetchT inT)
+              applyLambda <$> fetchLambda outT <*> normalize a
+            t → stackError \p → "inferApp" <+> pretty (show q) <+> p t
+      )
+
+checkDepLam ∷ ∀ sig m. (Has Checker sig m) ⇒ Quant → Maybe Ident → Lambda Term → Dyn → Lambda Dyn → m ()
+checkDepLam q i bod inT outT = do
+  inT' ← fetchT inT
+  outT' ← fetchLambda outT
+  scopedVar (const pure) (q, i, Nothing, inT')
+    $ infer (unLambda bod)
+    $ Check
+    $ unLambda outT'
+
+data LookupRes a
+  = LookupFound !a
+  | LookupMissing !(Vector Dyn) -- Visited keys
+  | LookupUnknown
+
+-- {- | Accepts `tag`, `row` and `record`. Provides access to the field `tag` in `row`,
+-- performs refines if necessary.
+-- -}
+rowGet ∷ ∀ sig m a. (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → Term → (Term → m a) → Term → Term → m (LookupRes a)
+rowGet mapTerm tag cont = go -- tag is source term
+ where
+  notARow x = stackError \p → "Not a row:" <+> p x
+  go ∷ Term → Term → m (LookupRes a)
+  go row record =
+    withMono
+      ( \f → \case
+          LookupFound a → LookupFound <$> mapTerm f a
+          LookupMissing a → pure $ LookupMissing a -- erased anyway, no point of mapping
+          LookupUnknown → pure LookupUnknown
+      )
+      ( do
+          t ← subExVar $ Term $ Builtin Any'
+          head ← subExVar t
+          tail ← subExVar $ rowOf t
+          pure $ Term $ Concat (Term $ FieldsLit (FRow ()) [(tag, head)]) (FRow (Nothing, Lambda tail))
+      )
+      ( \t →
+          getEpoch >>= \e → case t of
+            (fDyn e → FieldsLit (FRow ()) (Vector' l)) →
+              foldr
+                ( \(n, v) rec → do
+                    eqTag ← isEqUnify tag =<< fetchT n
+                    case eqTag of
+                      EqYes → LookupFound <$> (fetchT v >>= cont)
+                      EqUnknown → pure $ LookupUnknown
+                      EqNot → rec
+                )
+                (pure $ LookupMissing $ fst <$> l)
+                l
+            (fDyn e → Concat l (FRow (_, r))) → do
+              inL ← (`go` record) =<< fetchT l
+              case inL of
+                LookupMissing visited1 → do
+                  visited1' ← traverse fetchT visited1
+                  let
+                    select f = normalize $ Term $ App (Term $ App (Term $ Builtin f) $ Term $ ListLit $ Vector' visited1') record
+                  recordL ← select RecordKeepFields
+                  recordR ← select RecordDropFields
+                  r' ← (\r' → go (applyLambda r' recordL) recordR) =<< fetchLambda r
+                  case r' of
+                    LookupMissing visited2 → pure $ LookupMissing $ visited1 <> visited2
+                    o → pure o
+                o → pure o
+            x → notARow x
+      )
+      row
+
+checkList ∷ (Has Checker sig m) ⇒ Vector Term → Dyn → m ()
+checkList els ty = for_ els \el → infer el . Check =<< fetchT ty
+
+inferList ∷ (Has Checker sig m) ⇒ Vector Term → m (Maybe Term)
+inferList tts = for (viewl tts) \(t, ts) → do
+  tT ← dyn =<< infer t Infer
+  checkList ts tT
+  fetchT tT
+
 -- | Either infers a normalized type for the value and context, or checks a value against the normalized type.
-infer ∷ ∀ sig m a. (Has Solve sig m) ⇒ TermT → InferMode a → m a
-infer = logAndRunInfer \case
+infer ∷ ∀ sig m a. (Has Checker sig m) ⇒ Term → InferMode a → m a
+infer = logAndRunInfer $ \case
   -- Here, we will convert Checks to Infers.
   -- However, converting Infer to a Check when checking a term is hereby declared a deadly sin.
-  (_, Check (Builtin Any')) → pure ()
-  (Block (BlockLet q name tyM val into), mode) → runSeqResolve do
-    ty ← withResolved \_ → stackScope (\_ → ("let" <+> pQuant q <> maybe "_" pIdent name))
-      $ (if q == QEra then local insideEra else id)
+  (_, CheckL (Builtin Any')) → pure ()
+  (Block (BlockLet q name tyM val into), mode0) → do
+    ty ← stackScope (\_ → ("let" <+> pQuant q <> maybe "_" pIdent name))
+      $ (if q == QEra then withEra else id)
       $ case tyM of
         Nothing → infer val Infer
         Just ty → do
-          ab ← annoBinds
-          -- TODO: check ty' to be a type?
-          -- EDIT: typechecking is undecidable... so... uh... no?
-          let ty' = normalize ab ty
+          ty' ← normalize ty
           infer val $ Check ty'
           pure ty'
-    val' ← withResolved \_ → do
-      tb ← if q == QEra then annoBinds else termBinds -- TODO: I'm not sure what to do with termBinds overall.
-      pure $ normalize tb val -- TODO: I hope no `resolve exs` is needed here.
-    withResolved \exs →
-      withBlockLog (unLambda into)
-        $ scopedVar (mapTermFor mode) (q, name, Just val', ty)
-        $ infer (unLambda into)
-        $ resolveMode exs
-        $ nestMode mode
-  (Block (BlockRewrite prf inner), mode) → runSeqResolve do
+    val' ← normalize val
+    let
+      fInto ∷ ((Term → m Term) → a → m a) → InferMode a → m a
+      fInto mapTerm mode = scopedVar mapTerm (q, name, Just val', ty) $ infer (unLambda into) mode
+    withBlockLog (unLambda into) $ case mode0 of
+      (_, Infer) → fInto id Infer
+      (e, Check subty0) → do
+        subty ← fetchT $ Dyn e subty0
+        fInto (const pure) $ Check $ nested subty
+  (Block (BlockRewrite prf inner), mode) → do
     -- Currently: Eq <simple/outer> <complicated/inner>
-    let rewriteTerm' what with x = case rewriteTerm what with x of
-          Just x' → pure x'
-          Nothing → stackError \p → "Rewrite" <+> p what <+> "==>" <+> p with <+> "did not alter" <+> p x
-    prfTy ← withResolved \_ → infer prf Infer
-    withResolved \_ →
-      withMono
-        (mapTermFor mode)
-        (stackError \_ → "Type of rewrite must be known")
-        ( \_ → \case
-            Builtin Eq `App` simple `App` complicated → withBlockLog inner $ case mode of
-              Infer → runSeqResolve do
-                innerTy ← withResolved \_ → infer inner Infer
-                withResolved \exs2 → rewriteTerm' (resolve exs2 complicated) (resolve exs2 simple) innerTy
-              Check ty → infer inner . Check =<< rewriteTerm' simple complicated ty
-            x → stackError \p → p x <+> "is invalid rewrite"
-        )
-        prfTy
-  -- TODO: (Lam QEra arg bod, Infer)
-  (Lam QEra n1 bod, Check (Pi QEra n2 inT outT)) → checkDepLam QEra (n1 <|> n2) bod inT outT
-  (AppErased f a, Infer) → inferApp QEra f a
-  (term, Check (Pi QEra n xTy yT)) → do
-    uniId ← fresh
-    scopedUniVar (const pure) uniId $ infer term $ Check $ applyLambda yT $ UniVar n uniId xTy
-  (Lam QNorm n bod, Infer) → do
-    inT ← fresh
-    let inT' = ExVar n (ExVarId [inT]) (Builtin Any')
-    scopedExVar id (inT, Builtin Any') $ runSeqResolve do
-      outT ← withResolved \_ →
-        scopedVar id (QNorm, n, Nothing, inT') $ infer (unLambda bod) Infer
-      withResolved \exs → pure $ Pi QNorm Nothing (resolve exs inT') $ Lambda $ nested outT
-  (Lam QNorm n1 bod, Check (Pi QNorm n2 inT outT)) → checkDepLam QNorm (n1 <|> n2) bod inT outT
-  (App (App (Builtin RecordGet) tag) record, mode) → runSeqResolve do
-    withResolved \_ → infer tag $ Check $ Builtin Tag
-    row0 ← withResolved \_ → infer record Infer
-    stackLog \p → p tag <+> p row0 <+> p record
-    withResolved \_ → do
-      res ←
-        rowGet
-          (mapTermFor mode)
-          tag
-          ( \ty → case mode of
-              Infer → pure ty
-              Check ty2 → subtype ty ty2
+    let rewriteTerm' x what with =
+          rewriteTerm what with x >>= \case
+            Just x' → pure x'
+            Nothing → stackError \p → "Rewrite" <+> p what <+> "==>" <+> p with <+> "did not alter" <+> p x
+    prfTy ← infer prf Infer
+    let
+      fInto ∷ ((Term → m Term) → a → m a) → (Dyn → Dyn → m a) → m a
+      fInto mapTerm cont =
+        withMono
+          mapTerm
+          (stackError \_ → "Type of rewrite must be known")
+          ( \t →
+              getEpoch >>= \e0 → case t of
+                (Term (Term (Term (Builtin Eq) `App` (Dyn e0 → simple)) `App` (Dyn e0 → complicated))) → cont simple complicated
+                _ → stackError \p → p t <+> "is invalid rewrite"
           )
-          row0
-          record
-      case res of
-        LookupFound x → pure x
-        _ → stackError \_ → "App RecordGet"
-  (App f a, Infer) → inferApp QNorm f a
-  (FieldsLit (FRecord ()) flds, Infer) → runSeqResolve do
+          prfTy
+    withBlockLog inner case mode of
+      (_, Infer) → fInto id \simple complicated → do
+        innerTy ← infer inner Infer
+        uncurry (rewriteTerm' innerTy) =<< ((,) <$> fetchT complicated <*> fetchT simple)
+      (e, Check ty) →
+        fInto (const pure) \simple complicated →
+          infer inner . Check =<< do
+            x' ← fetchT $ Dyn e ty
+            s' ← fetchT simple
+            c' ← fetchT complicated
+            rewriteTerm' x' s' c'
+  -- -- TODO: (Lam QEra arg bod, Infer)
+  (Lam q1 n1 bod, CheckL (Pi q2 n2 inT outT)) | q1 == q2 → checkDepLam q1 (n1 <|> n2) bod inT outT
+  (term, CheckL (Pi QEra _ xTy yT)) → do
+    xTy' ← fetchT xTy
+    scopedUniVar (const pure) xTy' \uni →
+      infer (Term term) . Check . (`applyLambda` uni) =<< fetchLambda yT
+  (Lam QNorm n bod, InferL) →
+    scopedExVar id (Term $ Builtin Any') $ dyn >=> \inT → do
+      outT ← fetchT inT >>= \inT' → scopedVar id (QNorm, n, Nothing, inT') $ infer (unLambda bod) Infer
+      fetchT inT <&> \inT' → Term $ Pi QNorm Nothing inT' $ Lambda $ nested outT
+  (AppErased f a, InferL) → inferApp QEra f a
+  (App (unTerm → App (unTerm → Builtin RecordGet) tag) record, mode) → do
+    infer tag $ Check $ Term $ Builtin Tag
+    tag' ← normalize tag
+    let
+      mapTerm ∷ (Term → m Term) → a → m a
+      cont ∷ Term → m a
+      (mapTerm, cont) = case mode of
+        (_, Infer) → (id, pure)
+        (e, Check ty2) → (const pure, \ty → subtype ty =<< fetchT (Dyn e ty2))
+    row0 ← infer record Infer
+    res ←
+      rowGet
+        mapTerm
+        tag'
+        cont
+        row0
+        record
+    case res of
+      LookupFound x → pure x
+      _ → stackError \_ → "App RecordGet"
+  (App f a, InferL) → inferApp QNorm f a
+  (FieldsLit (FRecord ()) flds, InferL) → do
     rowFields ← for flds \(n, v) → do
-      withResolved \_ → infer n $ Check $ Builtin Tag
-      vTy ← withResolved \_ → infer v Infer
+      infer n $ Check $ Term $ Builtin Tag
+      vTy ← infer v Infer
       pure (n, vTy)
-    pure $ FieldsLit (FRow ()) rowFields
-  (ListLit (Vector' values), Check (App (Builtin List) ty)) → void $ checkList values ty
-  (ListLit (Vector' values), Infer) → App (Builtin List) . fromMaybe (Builtin Never) <$> inferList values
-  (Concat l (FRecord r), Infer) →
-    runSeqResolve
-      $ Concat
-      <$> (withResolved \_ → infer l Infer)
-      <*> (withResolved \_ → FRow . (Nothing,) . Lambda . nested <$> infer r Infer)
-  (Concat l (FRecord r), Check (Concat lT (FRow (_, rT)))) → runSeqResolve do
-    withResolved \_ → infer l $ Check lT
-    withResolved \exs → do
-      ab ← termBinds
-      infer r $ Check $ resolve exs $ applyLambda rT (normalize ab l)
-  (NumLit x, Check (Builtin (Num d))) →
+    pure $ Term $ FieldsLit (FRow ()) rowFields
+  (ListLit (Vector' values), (e, Check (Term (App (Term (Builtin List)) (Dyn e → ty))))) → checkList values ty
+  (ListLit (Vector' values), (_, Infer)) → Term . App (Term $ Builtin List) . fromMaybe (Term $ Builtin Never) <$> inferList values
+  (Concat l (FRecord r), (_, Infer)) →
+    Term
+      <$> ( Concat
+              <$> (infer l Infer)
+              <*> (FRow . (Nothing,) . Lambda . nested <$> infer r Infer)
+          )
+  (Concat l (FRecord r), CheckL (Concat lT (FRow (_, rT)))) → do
+    infer l . Check =<< fetchT lT
+    l' ← normalize l
+    infer r . Check . (`applyLambda` l') =<< fetchLambda rT
+  (NumLit x, CheckL (Builtin (Num d))) →
     if x `numFitsInto` d
       then pure ()
       else stackError \_ → "Number literal " <> pretty x <> " does not fit into " <> pIdent (identOfBuiltin $ Num d)
-  (NumLit x, Infer) →
+  (NumLit x, InferL) →
     pure
+      $ Term
       $ Builtin
       $ Num
       $ let candidates = NumDesc False <$> [Bits8, Bits16, Bits32, Bits64]
          in fromMaybe (NumDesc False BitsInf) $ find @[] (x `numFitsInto`) candidates
-  (TagLit _, Infer) → pure $ Builtin Tag
-  (BoolLit _, Infer) → pure $ Builtin Bool
-  (Var i, Infer) → do
-    binds ← ask @(Vector Binding)
-    case binds !? i of
-      Just (QNorm, _, _, Just ty) → do
+  (TagLit _, InferL) → pure $ Term $ Builtin Tag
+  (BoolLit _, InferL) → pure $ Term $ Builtin Bool
+  (Var i, InferL) → do
+    Scopes binds _ ← get @Scopes
+    case binds !? (length binds - i - 1) of
+      Just (QNorm, _, _, ty) → do
         stackLog \p → "var" <+> pretty i <+> ":" <+> p ty
-        pure ty
+        pure $ nestedByP ty $ i + 1
       _ → stackError \_ → "Unknown var #" <> pretty i
   -- Type-level
-  -- (FieldsLit (FRow ()) flds, Infer) → error "make c
-  (FieldsLit (FRow ()) (Vector' flds), Infer) → runSeqResolve do
-    for_ flds \(n, _) → withResolved \_ → infer n $ Check $ Builtin Tag
-    withResolved \_ → rowOf . fromMaybe (Builtin Never) <$> inferList (snd <$> flds)
-  (FieldsLit (FRow ()) (Vector' flds), Check (App (Builtin Row) ty)) → runSeqResolve do
-    for_ flds \(n, _) → withResolved \_ → infer n $ Check $ Builtin Tag
-    withResolved \exs → void $ checkList (snd <$> flds) $ resolve exs ty
-  (inp@(FieldsLit (FRow ()) _), Check (App (Builtin TypePlus) u)) → infer inp $ Check $ rowOf $ typOf u -- Lazy redirect
+  (FieldsLit (FRow ()) (Vector' flds), InferL) → do
+    for_ flds \(n, _) → infer n $ Check $ Term $ Builtin Tag
+    rowOf . fromMaybe (Term $ Builtin Never) <$> inferList (snd <$> flds)
+  (FieldsLit (FRow ()) (Vector' flds), (e, Check (unTerm → App (unTerm → Builtin Row) (Dyn e → ty)))) → do
+    for_ flds \(n, _) → infer n $ Check $ Term $ Builtin Tag
+    checkList (snd <$> flds) ty
+  (inp@(FieldsLit (FRow ()) _), (_, Check (unTerm → App (unTerm → Builtin TypePlus) u))) → infer (Term inp) $ Check $ rowOf $ typOf u -- Lazy redirect
   -- TODO Ctrl+C & Ctrl+V hell, rewrite somehow..
-  (Concat l (FRow (i, r)), Check (App (Builtin Row) ty)) → runSeqResolve do
-    withResolved \_ → infer l $ Check $ rowOf ty
-    withResolved \exs → do
-      ab ← termBinds
-      scopedVar (const pure) (QNorm, i, Nothing, normalize ab l)
-        $ infer (unLambda r)
-        $ Check
-        $ rowOf
-        $ nested
-        $ resolve exs ty
-  (inp@(Concat _ (FRow _)), Check (App (Builtin TypePlus) u)) → infer inp $ Check $ rowOf $ typOf u -- Lazy redirect
-  (Concat l (FRow (i, r)), Infer) → runSeqResolve do
-    lT0 ← withResolved \_ → infer l Infer
-    withResolved \_ →
-      withMono
+  (Concat l (FRow (i, r)), (e, Check (unTerm → App (unTerm → Builtin Row) (Dyn e → ty)))) → do
+    infer l . Check . rowOf =<< fetchT ty
+    l' ← normalize l
+    fetchT ty
+      >>= scopedVar (const pure) (QNorm, i, Nothing, l')
+      . infer (unLambda r)
+      . Check
+      . rowOf
+      . nested
+  (inp@(Concat _ (FRow _)), (_, Check (unTerm → App (unTerm → Builtin TypePlus) u))) → infer (Term inp) $ Check $ rowOf $ typOf u -- Lazy redirect
+  (Concat l (FRow (i, r)), InferL) → do
+    infer l Infer
+      >>= withMono
         id
-        (rowOf <$> subExVar "t" (Builtin Any'))
-        ( \_ → \case
-            App (Builtin Row) lT → runSeqResolve do
-              withResolved \_ → do
-                ab ← termBinds
-                scopedVar (const pure) (QNorm, i, Nothing, normalize ab l) $ infer (unLambda r) $ Check $ rowOf $ nested lT
-              withResolved \exs → pure $ rowOf $ resolve exs lT
-            _ → stackError \p → p l <+> "is not a row"
+        (rowOf <$> subExVar (Term $ Builtin Any'))
+        ( \t0 →
+            getEpoch >>= \e → case unTerm t0 of
+              App (unTerm → Builtin Row) (Dyn e → lT) → do
+                l' ← normalize l
+                fetchT lT >>= scopedVar (const pure) (QNorm, i, Nothing, l') . infer (unLambda r) . Check . rowOf . nested
+                rowOf <$> fetchT lT
+              _ → stackError \p → p l <+> "is not a row"
         )
-        lT0
-  (Pi _q i inTy outTy, Check (App (Builtin TypePlus) u)) → runSeqResolve do
-    withResolved \_ → infer inTy $ Check $ typOf u
-    withResolved \exs → do
-      ab ← termBinds
-      scopedVar (const pure) (QNorm, i, Nothing, normalize ab inTy)
-        $ infer (unLambda outTy)
-        $ Check
-        $ typOf
-        $ nested
-        $ resolve exs u
-  (Pi _q i inTy outTy, Infer) → runSeqResolve do
-    inTyTy0 ← withResolved \_ → infer inTy Infer
-    withResolved \_ →
-      withMono
+  (Pi _q i inTy outTy, (e, Check (unTerm → App (unTerm → Builtin TypePlus) (Dyn e → u)))) → do
+    infer inTy . Check . typOf =<< fetchT u
+    inTy' ← normalize inTy
+    fetchT u
+      >>= scopedVar (const pure) (QNorm, i, Nothing, inTy')
+      . infer (unLambda outTy)
+      . Check
+      . typOf
+      . nested
+  (Pi _q i inTy outTy, InferL) → do
+    infer inTy Infer
+      >>= withMono
         id
-        (typOf <$> subExVar "u" (Builtin $ Num $ NumDesc True BitsInf))
-        ( \_ → \case
-            App (Builtin TypePlus) u → runSeqResolve do
-              withResolved \_ → do
-                ab ← annoBinds
-                scopedVar (const pure) (QNorm, i, Nothing, normalize ab inTy) $ infer (unLambda outTy) $ Check $ typOf $ nested u
-              withResolved \exs → pure $ rowOf $ resolve exs u
-            _ → stackError \p → p inTy <+> "is not a type"
+        (typOf <$> subExVar (Term $ Builtin $ Num $ NumDesc True BitsInf))
+        ( \t0 →
+            getEpoch >>= \e → case unTerm t0 of
+              App (unTerm → Builtin TypePlus) (Dyn e → u) → do
+                inTy' ← normalize inTy
+                fetchT u >>= scopedVar (const pure) (QNorm, i, Nothing, inTy') . infer (unLambda outTy) . Check . typOf . nested
+                typOf <$> fetchT u
+              _ → stackError \p → p inTy <+> "is not a type"
         )
-        inTyTy0
-  (Builtin x, Infer) → pure $ typOfBuiltin x
-  (BuiltinsVar, Infer) →
+  (Builtin x, InferL) → pure $ typOfBuiltin x
+  (BuiltinsVar, InferL) →
     pure
+      $ Term
       $ FieldsLit (FRow ())
       $ Vector'
-      $ (\b → (TagLit $ identOfBuiltin b, typOfBuiltin b))
+      $ (\b → (Term $ TagLit $ identOfBuiltin b, typOfBuiltin b))
       <$> builtinsList
-  (UniVar _n _i ty, Infer) → pure ty
-  (ExVar _n _i ty, Infer) → pure ty
-  (Sorry, Check k) → stackLog \p → annotate (color Yellow) $ "sorry :" <+> p k
-  (k, Infer) → stackError \p → p k
-  (term, Check c) → stackScope (\p → "check via infer" <+> p term <+> ":" <+> p c) $ runSeqResolve do
-    ty ← withResolved \_ → infer term Infer
-    withResolved \exs → subtype (resolve exs ty) $ resolve exs c
+  (UniVar _ ty, InferL) → pure ty
+  (ExVar (scopeid, subid), InferL) → do
+    Scopes _ exs ← get @Scopes
+    pure $ fromMaybe (error "Ex not found in scope") do
+      (_, scope) ← exs !? scopeid
+      i ←
+        findIndexL
+          ( \case
+              EVar subid2 _ → subid == subid2
+              _ → False
+          )
+          scope
+      EVar _ (Right ty) ← scope !? i
+      pure ty
+  (Sorry, (_, Check k)) → stackLog \p → annotate (color Yellow) $ "sorry :" <+> p k
+  (t, (_, Infer)) → stackError \p → p $ Term t
+  (t, (e, Check c)) → stackScope (\p → "check via infer" <+> p (Term t) <+> ":" <+> p c) do
+    ty ← infer (Term t) Infer
+    (ty `subtype`) =<< fetchT (Dyn e c)
 
-typOfBuiltin ∷ BuiltinT → TermT
+typOfBuiltin ∷ BuiltinT → Term
 typOfBuiltin = \case
   Num _d → [termQQ| Type+ 0 |]
   Add d → op2d d
@@ -686,180 +815,193 @@ typOfBuiltin = \case
   Never → [termQQ| Type+ 0 |]
   Any' → [termQQ| Type+ 0 |] where
  where
-  opd d = Pi QNorm Nothing (Builtin $ Num d) $ Lambda $ Builtin $ Num d
-  op2d d = Pi QNorm Nothing (Builtin $ Num d) $ Lambda $ Pi QNorm Nothing (Builtin $ Num d) $ Lambda $ Builtin $ Num d
+  opd d = Term $ Pi QNorm Nothing (Term $ Builtin $ Num d) $ Lambda $ Term $ Builtin $ Num d
+  op2d d = Term $ Pi QNorm Nothing (Term $ Builtin $ Num d) $ Lambda $ opd d
 
-instMeta ∷ ∀ sig m. (Has Solve sig m) ⇒ Maybe Ident → ExVarId → TermT → TermT → m ()
-instMeta = (\f a b c d → stackScope (\_ → "instMeta") $ f a b c d) \n1 (ExVarId var1) t1 →
-  let instMeta' ∷ Int → TermT → m TermT
-      instMeta' locs = \case
-        ExVar n2 (ExVarId var2) t2 →
-          if var2 <= var1
-            then pure $ ExVar n2 (ExVarId var2) t2
+instMeta ∷ ∀ sig m. (Has Checker sig m) ⇒ (Int, Int) → Term → m ()
+instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) →
+  let
+    getCurrPos (scopeI, subI) = do
+      Scopes _ exs ← get @Scopes
+      pure $ (scopeI,) $ fromMaybe (error "Ex not found in scope") do
+        (_, scope) ← exs !? scopeI
+        findIndexL
+          ( \case
+              EMarker → False
+              EVar subI2 _ → subI == subI2
+              EUniVar subI2 → subI == subI2
+          )
+          scope
+    instMeta' ∷ Int → Term → m Term
+    instMeta' locs t0 =
+      getEpoch >>= \e → case t0 of
+        (fDyn e → ExVar (scope2, sub2)) → do
+          (pos1, pos2) ← (,) <$> getCurrPos (scope1, sub1) <*> getCurrPos (scope2, sub2)
+          if pos2 <= pos1
+            then pure $ Term $ ExVar (scope2, sub2)
             else do
               u ← fresh
-              n ← freshIdent
-              let var1R = ExVar (Just n) (ExVarId $ var1 <> [u]) t2
-              writeMeta n2 (ExVarId var2) t2 locs var1R
-              pure $ var1R
-        uni@(UniVar _ uni2 _)
-          | [uni2] <= var1 → pure uni
-        App (Builtin W) a → pure $ Builtin W `App` a
-        App f a → runSeqResolve do
-          f' ← withResolved \_ → instMeta' locs f
-          a' ← withResolved \exs → instMeta' locs $ resolve exs a
-          pure $ App f' a'
-        FieldsLit fi flds → FieldsLit fi <$> traverse (bitraverse (instMeta' locs) (instMeta' locs)) flds
-        Concat a (FRecord b) →
-          runSeqResolve
-            $ Concat
-            <$> (withResolved \_ → instMeta' locs a)
-            <*> (FRecord <$> withResolved \exs → instMeta' locs $ resolve exs b)
-        Concat a (FRow (i, b)) → runSeqResolve do
-          a' ← withResolved \_ → instMeta' locs a
-          b' ← withResolved \exs → instMeta' (locs + 1) $ resolve' 1 exs $ unLambda b
-          pure $ Concat a' $ FRow (i, Lambda b')
-        Var x → pure $ Var x -- TODO: I hope this is correct, but needs to be rechecked.
-        Builtin x → pure $ Builtin x
-        BoolLit x → pure $ BoolLit x
-        NumLit x → pure $ NumLit x
-        TagLit x → pure $ TagLit x
-        Pi QNorm n inT outT → runSeqResolve do
-          inT' ← withResolved \_ → instMeta' locs inT
-          outT' ← withResolved \exs → instMeta' (locs + 1) $ resolve' 1 exs $ unLambda outT
-          pure $ Pi QNorm n inT' $ Lambda outT'
-        x → stackError \p → "instMeta (of" <+> pretty (tshow $ ExVarId var1) <> ")" <+> p x
-   in \val →
-        let r = writeMeta n1 (ExVarId var1) t1 0 =<< instMeta' 0 val
-         in case val of
-              ExVar _ var2 _ →
-                if var2 == ExVarId var1
-                  then pure ()
-                  else r
-              _ → r
+              Scopes _ exs ← get @Scopes
+              let
+                t2 = fromMaybe (error "Ex not found in scope") do
+                  (_, scope) ← exs !? fst pos2
+                  EVar _ (Right ty) ← scope !? snd pos2
+                  pure ty
+              writeExBefore [(u, t2)] pos1
+              writeMeta (scope2, sub2) (locs, Term $ ExVar (scope1, u))
+              pure $ Term $ ExVar (scope1, u)
+        uni@(fDyn e → UniVar uni2 _) → do
+          (pos1, pos2) ← (,) <$> getCurrPos (scope1, sub1) <*> getCurrPos uni2
+          if pos2 <= pos1
+            then pure uni
+            else stackError \_ → "Attempting to asign existential to later introduced universal"
+        Term (App (Term (Builtin W)) a) → pure $ Term $ (Term $ Builtin W) `App` a
+        (fDyn e → App f a) → do
+          f' ← instMeta' locs =<< fetchT f
+          a' ← instMeta' locs =<< fetchT a
+          pure $ Term $ App f' a'
+        (fDyn e → FieldsLit fi flds) → Term . FieldsLit fi <$> traverse (bitraverse (instMeta' locs <=< fetchT) (instMeta' locs <=< fetchT)) flds
+        (fDyn e → Concat a (FRecord b)) →
+          Term
+            <$> ( Concat
+                    <$> (instMeta' locs =<< fetchT a)
+                    <*> (FRecord <$> (instMeta' locs =<< fetchT b))
+                )
+        (fDyn e → Concat a (FRow (i, b))) → do
+          a' ← instMeta' locs =<< fetchT a
+          b' ← instMeta' (locs + 1) . unLambda =<< fetchLambda b -- resolve' 1 exs $ unLambda b
+          pure $ Term $ Concat a' $ FRow (i, Lambda b')
+        (fDyn e → Var x) → pure $ Term $ Var x -- TODO: I hope this is correct, but needs to be rechecked.
+        (fDyn e → Builtin x) → pure $ Term $ Builtin x
+        (fDyn e → BoolLit x) → pure $ Term $ BoolLit x
+        (fDyn e → NumLit x) → pure $ Term $ NumLit x
+        (fDyn e → TagLit x) → pure $ Term $ TagLit x
+        (fDyn e → Pi QNorm n inT outT) → do
+          inT' ← instMeta' locs =<< fetchT inT
+          outT' ← instMeta' (locs + 1) . unLambda =<< fetchLambda outT
+          pure $ Term $ Pi QNorm n inT' $ Lambda outT'
+        x → stackError \p → "instMeta (of" <+> pretty (scope1, sub1) <> ")" <+> p x
+   in
+    \val →
+      let r = writeMeta (scope1, sub1) . (0,) =<< instMeta' 0 val
+       in case val of
+            Term (ExVar var2) →
+              if (scope1, sub1) == var2
+                then pure ()
+                else r
+            _ → r
 
--- TODO: Use isEq.
+isEqUnify ∷ (Has Checker sig m) ⇒ Term → Term → m EqRes
+isEqUnify = isEq' instMeta
 
--- | a <: b Check if type `a` is a subtype of type `b`.
-subtype ∷ ∀ sig m. (Has Solve sig m) ⇒ TermT → TermT → m ()
+-- -- TODO: Use isEq.
+
+-- -- | a <: b Check if type `a` is a subtype of type `b`.
+subtype ∷ ∀ sig m. (Has Checker sig m) ⇒ Term → Term → m ()
 subtype = \a b →
   stackScope (\p → p a <+> annotate (color Cyan) "<:" <+> p b) $ subtype' a b
  where
   -- Core subtyping logic based on the structure of the resolved types.
-  subtype' ∷ TermT → TermT → m ()
-  subtype' = curry \case
-    -- Existential Variables (?a <: ?b, ?a <: T, T <: ?a)
-    (ExVar _ ex1 _, ExVar _ ex2 _) | ex1 == ex2 → pure ()
-    (ExVar n1 ex1 ty1, t2) → instMeta n1 ex1 ty1 t2
-    (t1, ExVar n2 ex2 ty2) → instMeta n2 ex2 ty2 t1
-    -- Universal Variables (u1 <: u2) - Must be identical.
-    (UniVar _ id1 _, UniVar _ id2 _) | id1 == id2 → pure ()
-    -- T <: Pi QEra x:K. Body  => Introduce UniVar for x
-    (t, Pi QEra (Just n) k body) → do
-      uniId ← fresh
-      scopedUniVar (const pure) uniId
-        $ subtype t
-        $ applyLambda body
-        $ UniVar (Just n) uniId k
-    -- Pi QEra x:K. Body <: T => Introduce ExVar for x
-    (Pi QEra (Just n) k body, t) → do
-      exId ← fresh
-      scopedExVar (\_ _ → stackError \_ → "Unresolved existential" <+> pIdent n) (exId, k)
-        $ subtype (applyLambda body (ExVar (Just n) (ExVarId [exId]) k)) t
+  subtype' ∷ Term → Term → m ()
+  subtype' = \t10 t20 →
+    getEpoch >>= \e → case (t10, t20) of
+      -- Existential Variables (?a <: ?b, ?a <: T, T <: ?a)
+      (fDyn e → ExVar ex1, fDyn e → ExVar ex2) | ex1 == ex2 → pure ()
+      (fDyn e → ExVar ex1, t2) → instMeta ex1 t2
+      (t1, fDyn e → ExVar ex) → instMeta ex t1
+      -- Universal Variables (u1 <: u2) - Must be identical.
+      (fDyn e → UniVar id1 _, fDyn e → UniVar id2 _) | id1 == id2 → pure ()
+      -- T <: Pi QEra x:K. Body  => Introduce UniVar for x
+      (t, unTerm → Pi QEra (Just _n) inT outT) →
+        scopedUniVar (const pure) inT $ \uni →
+          subtype t $ applyLambda outT uni
+      -- Pi QEra x:K. Body <: T => Introduce ExVar for x
+      (unTerm → Pi QEra (Just n) inT outT, t) →
+        scopedExVar (\_ _ → stackError \_ → "Unresolved existential" <+> pIdent n) inT \exi →
+          subtype (applyLambda outT exi) t
+      -- Function Types (Πx:T1.U1 <: Πy:T2.U2)
+      (fDyn e → Pi q1 n1 inT1 outT1, fDyn e → Pi q2 n2 inT2 outT2) | q1 == q2 → do
+        -- Input types are contravariant (T2 <: T1)
+        uncurry subtype =<< (,) <$> fetchT inT2 <*> fetchT inT1
+        -- Output types are covariant
+        fetchT inT2 >>= \inT2' → scopedVar (const pure) (QNorm, n1 <|> n2, Nothing, inT2') do
+          outT1' ← fetchLambda outT1
+          outT2' ← fetchLambda outT2
+          subtype (unLambda outT1') (unLambda outT2')
+      (fDyn e → Builtin (Num d1@(NumDesc nonneg1 bits1)), fDyn e → Builtin (Num d2@(NumDesc nonneg2 bits2))) →
+        let fits = case (nonneg1, nonneg2) of
+              (True, False) → bits1 < bits2 || bits2 == BitsInf
+              (False, True) → False
+              _ → bits1 <= bits2
+         in if fits then pure () else stackError \_ → "Cannot fit " <> pIdent (identOfBuiltin $ Num d1) <> " into " <> pIdent (identOfBuiltin $ Num d2)
+      (fDyn e → Builtin Never, _) → pure ()
+      (_, fDyn e → Builtin Any') → pure ()
+      -- Builtin Types (must be identical)
+      (fDyn e → Builtin a, fDyn e → Builtin b) | a == b → pure ()
+      (fDyn e → Var i, fDyn e → Var j) | i == j → pure ()
+      -- Type Universes (Type L1 <: Type L2 where L1 <= L2)
+      (Term (App (fDyn e → Builtin TypePlus) a0), Term (App (fDyn e → Builtin TypePlus) b0)) → do
+        case (a0, b0) of
+          (fDyn e → NumLit x, fDyn e → NumLit y) | x <= y → pure ()
+          (fDyn e → NumLit 0, _) → pure ()
+          -- If one level is existential, unify it with the other level constraint.
+          (fDyn e → ExVar ex, b) → instMeta ex b
+          (a, fDyn e → ExVar ex) → instMeta ex a
+          (a, b) →
+            isEqUnify a b >>= \case
+              -- Skippind `dyn`'s here since non-EqYes doesn't update a & b.
+              EqYes → pure ()
+              _ → stackError \p → "Cannot subtype universes with levels:" <+> p a <+> "≤" <+> p b
+      (Term (App (fDyn e → Builtin List) a), Term (App (fDyn e → Builtin List) b)) → subtype a b
+      (Term (App (fDyn e → Builtin W) a), Term (App (fDyn e → Builtin W) b)) →
+        isEqUnify a b >>= \case
+          EqYes → pure ()
+          _ → stackError \p → "Cannot equate wrapped types" <+> p a <+> "and" <+> p b
+      (Term (App (fDyn e → Builtin Row) a), Term (App (fDyn e → Builtin Row) b)) → subtype a b
+      (Term (App (fDyn e → Builtin Row) a), Term (App (fDyn e → Builtin TypePlus) u)) → subtype a $ typOf u
+      (fDyn e → FieldsLit (FRow ()) (Vector' fields1), fDyn e → FieldsLit (FRow ()) fields2) →
+        foldM_
+          ( \fields1' (tag, ty) →
+              ifoldr
+                ( \i (tag2, ty2) rec →
+                    ((,) <$> fetchT tag <*> fetchT tag2) >>= uncurry isEqUnify >>= \case
+                      EqYes → do
+                        uncurry subtype =<< ((,) <$> fetchT ty <*> fetchT ty2)
+                        pure $ deleteAt i fields1'
+                      EqUnknown →
+                        fetchT tag >>= \tag' →
+                          fetchT tag2 >>= \tag2' →
+                            stackError \p → "Unable to check field equality when subtyping:" <+> p tag' <+> "?=" <+> p tag2'
+                      EqNot → rec
+                )
+                (fetchT tag >>= \tag' → fetchT ty >>= \ty' → stackError \p → "Can't find" <+> p tag' <+> "in" <+> p ty')
+                fields1'
+          )
+          fields1
+          fields2
+      -- n : l1 \/ r1  <:  n : l2 \/ r2
+      (fDyn e → Concat l1 (FRow (n1, lr1)), fDyn e → Concat l2 (FRow (n2, lr2))) → do
+        uncurry subtype =<< ((,) <$> fetchT l1 <*> fetchT l2)
+        fetchT l1 >>= \l1' → scopedVar (const pure) (QNorm, n1 <|> n2, Nothing, l1') do
+          body1' ← fetchLambda lr1
+          body2' ← fetchLambda lr2
+          subtype (unLambda body1') (unLambda body2')
+      -- Catch-all: if no rule matches, check equality
+      (t1, t2) →
+        isEqUnify t1 t2 >>= \case
+          EqYes → pure ()
+          _ → stackError \p → "Subtype check failed, no rule applies for:" <+> p t1 <+> "<:" <+> p t2
 
-    -- Function Types (Πx:T1.U1 <: Πy:T2.U2)
-    (Pi q1 n1 inT1 outT1, Pi q2 n2 inT2 outT2) | q1 == q2 → runSeqResolve do
-      -- Input types are contravariant (T2 <: T1)
-      withResolved \_ → subtype inT2 inT1
-      -- Output types are covariant
-      withResolved \exs → do
-        uniId ← fresh
-        scopedUniVar (const pure) uniId do
-          let var = UniVar (n1 <|> n2) uniId inT2
-          let outT1' = resolve exs $ applyLambda outT1 var
-          let outT2' = resolve exs $ applyLambda outT2 var
-          subtype outT1' outT2'
-    (Builtin (Num d1@(NumDesc nonneg1 bits1)), Builtin (Num d2@(NumDesc nonneg2 bits2))) →
-      let fits = case (nonneg1, nonneg2) of
-            (True, False) → bits1 < bits2 || bits2 == BitsInf
-            (False, True) → False
-            _ → bits1 <= bits2
-       in if fits then pure () else stackError \_ → "Cannot fit " <> pIdent (identOfBuiltin $ Num d1) <> " into " <> pIdent (identOfBuiltin $ Num d2)
-    (Builtin Never, _) → pure ()
-    (_, Builtin Any') → pure ()
-    -- Builtin Types (must be identical)
-    (Builtin a, Builtin b) | a == b → pure ()
-    (Var i, Var j) | i == j → pure ()
-    -- Type Universes (Type L1 <: Type L2 where L1 <= L2)
-    (App (Builtin TypePlus) a, App (Builtin TypePlus) b) → do
-      case (a, b) of
-        (NumLit x, NumLit y) | x <= y → pure ()
-        (NumLit 0, _) → pure ()
-        -- If one level is existential, unify it with the other level constraint.
-        (ExVar nA exA tyA, lvl2) → instMeta nA exA tyA lvl2
-        (lvl1, ExVar nB exB tyB) → instMeta nB exB tyB lvl1
-        _ → runSeqResolve do
-          r ← withResolved \_ → isEqUnify a b
-          case r of
-            EqYes → pure ()
-            _ → withResolved \exs → stackError \p → "Cannot subtype universes with levels:" <+> p (resolve exs a) <+> "<=" <+> p (resolve exs b)
-    (App (Builtin List) a, App (Builtin List) b) → subtype a b
-    (App (Builtin W) a, App (Builtin W) b) →
-      isEqUnify a b >>= \case
-        EqYes → pure ()
-        _ → stackError \p → "Cannot equate wrapped types" <+> p a <+> "and" <+> p b
-    (App (Builtin Row) a, App (Builtin Row) b) → subtype a b
-    (App (Builtin Row) a, App (Builtin TypePlus) u) → subtype a $ typOf u
-    (FieldsLit (FRow ()) (Vector' fields1), FieldsLit (FRow ()) fields2) →
-      let
-        fields1Drop fields1' name ty =
-          runSeqResolve
-            $ ifoldr
-              ( \i (name1, ty1) rec → do
-                  eqName ← withResolved \exs → isEqUnify (resolve exs name) (resolve exs name1)
-                  case eqName of
-                    EqYes → do
-                      withResolved \exs → subtype (resolve exs ty1) (resolve exs ty)
-                      withResolved \exs → pure $ bimap (resolve exs) (resolve exs) <$> deleteAt i fields1'
-                    EqUnknown → stackError \_ → "Unable to check field equality when subtyping"
-                    EqNot → rec
-              )
-              (stackError \_ → "Missing field from left side when subtyping")
-              fields1'
-       in
-        runSeqResolve
-          $ foldM_
-            (\fields1' (name, ty) → withResolved \exs → fields1Drop fields1' (resolve exs name) (resolve exs ty))
-            fields1
-            fields2
-    -- n : l1 \/ r1  <:  n : l2 \/ r2
-    (Concat l1 (FRow (n, lr1)), Concat l2 (FRow (_, lr2))) → runSeqResolve do
-      withResolved \_ → subtype l1 l2
-      uniId ← fresh
-      withResolved \exs → scopedUniVar (const pure) uniId do
-        let var = UniVar n uniId l1
-        let body1 = resolve exs $ applyLambda lr1 var
-        let body2 = resolve exs $ applyLambda lr2 var
-        subtype body1 body2
-
-    -- Catch-all: if no rule matches, check equality
-    (t1, t2) → runSeqResolve do
-      eq ← withResolved \_ → isEqUnify t1 t2
-      case eq of
-        EqYes → pure ()
-        _ → withResolved \exs → stackError \p → "Subtype check failed, no rule applies for:" <+> p (resolve exs t1) <+> "<:" <+> p (resolve exs t2)
-
-runSolveM ∷ (Applicative m) ⇒ ReaderC (Vector Binding) (WriterC Resolved (FreshC (ErrorC (Doc AnsiStyle) m))) a → m (Either (Doc AnsiStyle) a)
-runSolveM =
-  runError (pure . Left) (pure . Right)
+runChecker' ∷ (Applicative m) ⇒ FreshC (ErrorC e (StateC Scopes m)) a → m (Either e a)
+runChecker' =
+  runContext'
+    . runError (pure . Left) (pure . Right)
     . evalFresh 0
-    . runWriter (const pure) -- TODO: alert on unhandled?
-    . runReader []
 
 checkSource ∷ ByteString → IO ()
 checkSource source = do
   term ← either (fail . show) pure $ parse [] source
-  (stacks, res) ← runStackAccC $ runSolveM $ infer term Infer
+  (stacks, res) ← runIsolate $ runStackAccC $ runChecker' $ infer term Infer
   render case res of
     Left e →
       pStacks stacks
@@ -871,7 +1013,7 @@ checkSource source = do
 checkSourceDebug ∷ ByteString → IO ()
 checkSourceDebug source = do
   term ← either (fail . show) pure $ parse [] source
-  res ← runStackPrintC $ runSolveM $ infer term Infer
+  res ← runIsolate $ runStackPrintC $ runChecker' $ infer term Infer
   render case res of
     Left e → annotate (color Red) "error: " <> e
     Right r → pTerm [] r

@@ -12,7 +12,7 @@ import Data.RRBVector (Vector, imap, replicate, splitAt, viewr, zip, (<|), (|>))
 import Data.Serialize qualified as S
 import GHC.Exts (IsList (..))
 import Normalize (rewrite)
-import Parser (Bits (..), BlockT (..), BuiltinT (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), TermT (..), Vector' (..), parseFile)
+import Parser (Bits (..), BlockT (..), BuiltinT (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), Vector' (..), parseFile)
 import RIO hiding (Vector, replicate, toList, zip)
 import RIO.ByteString qualified as B
 import RIO.HashMap qualified as HM
@@ -20,7 +20,7 @@ import RIO.List (stripSuffix)
 
 -- Unfortunately, not a rewrite', since this just erases & is not meant to
 -- simplify anything
-erase ∷ Vector Bool → TermT → TermT
+erase ∷ Vector Bool → Term → Term
 erase reals = \case
   NumLit x → NumLit x
   TagLit tag → TagLit tag
@@ -45,7 +45,7 @@ erase reals = \case
   ExVar{} → undefined
   UniVar{} → undefined
 
-listCaptures ∷ Lambda TermT → IntSet
+listCaptures ∷ Lambda Term → IntSet
 listCaptures =
   runIdentity
     . execWriter
@@ -61,8 +61,8 @@ listCaptures =
     . unLambda
 
 -- Identifies captured bindings and erases non-captured variables
--- Proper type: Fun (n : Int) (Lambda n TermT) -> { .captures: IntSet | .erased: Lambda n TermT }
-lambdaToClosure ∷ Int → Lambda TermT → (IntSet, Lambda TermT)
+-- Proper type: Fun (n : Int) (Lambda n Term) -> { .captures: IntSet | .erased: Lambda n Term }
+lambdaToClosure ∷ Int → Lambda Term → (IntSet, Lambda Term)
 lambdaToClosure n orig =
   let
     captures = listCaptures orig
@@ -71,13 +71,13 @@ lambdaToClosure n orig =
     (captures, Lambda $ erase (replicate n True <> reals) $ unLambda orig)
 
 -- A helper function that identifies trivially nested lambdas `\x y z. ...`
--- Proper type: Fun (Lambda 1 TermT) -> (self : { .n : Int } \/ { .lam : Lambda self.n TermT })
-getLambdaN ∷ Lambda TermT → (Int, Lambda TermT)
+-- Proper type: Fun (Lambda 1 Term) -> (self : { .n : Int } \/ { .lam : Lambda self.n Term })
+getLambdaN ∷ Lambda Term → (Int, Lambda Term)
 getLambdaN lam = case unLambda lam of
   Lam QNorm _ body → bimap (+ 1) id $ getLambdaN body
   body → (1, Lambda body)
 
-getAppN ∷ (TermT, Vector TermT) → (TermT, Vector TermT)
+getAppN ∷ (Term, Vector Term) → (Term, Vector Term)
 getAppN (App f a, args) = getAppN (f, a <| args)
 getAppN (f, args) = (f, args)
 
@@ -92,8 +92,8 @@ data Value
   | VBuiltin !BuiltinT
   | VPanic
   deriving
-    ( -- | Pi !Quant !TermT !(Either (Ident, Lambda TermT) TermT)
-      -- | Concat !TermT !(Either (Ident, Lambda TermT) TermT)
+    ( -- | Pi !Quant !Term !(Either (Ident, Lambda Term) Term)
+      -- | Concat !Term !(Either (Ident, Lambda Term) Term)
       Show
     , Eq
     )
@@ -132,7 +132,7 @@ registry val = do
       pure i
 
 -- compiles erased
-compile' ∷ (Has Compile sig m) ⇒ TermT → m ()
+compile' ∷ (Has Compile sig m) ⇒ Term → m ()
 compile' = \case
   NumLit x → instr $ IPush $ VNum x
   TagLit tag → instr . IPush . VTag =<< registry tag
