@@ -676,7 +676,7 @@ pTerm' (fuse, oldPrec, vars) t0 =
         , (if fuse == FLam then " " else annotate (color Cyan) "\\")
             <> pQuant q
             <> maybe "_" pIdent arg
-            <> pTerm' (FLam, 0, vars) (unLambda x)
+            <> pTerm' (FLam, 0, vars |> (q, arg)) (unLambda x)
         )
       Block block → (1,) $ case block of
         BlockLet q nameM tyM val in_ →
@@ -737,10 +737,10 @@ pTerm' (fuse, oldPrec, vars) t0 =
         _ →
           (4, pTerm' (FNo, 4, vars) lam <+> pTerm' (FNo, 5, vars) arg2)
       AppErased lam arg → (4, pTerm' (FNo, 4, vars) lam <+> "@" <> pTerm' (FNo, 5, vars) arg)
-      Builtin x → (5, "fadeno." <> pIdent (identOfBuiltin x))
+      Builtin x → (5, "fadeno." <> annotate (color Green) (pIdent (identOfBuiltin x)))
       BuiltinsVar → (5, "fadeno")
       NumLit x → (5, pretty x)
-      BoolLit x → (5, if x then "true" else "false")
+      BoolLit x → (5, annotate (color Green) if x then "true" else "false")
       TagLit x → (5, annotate (color Blue) $ "." <> pIdent x)
       FieldsLit fi fields →
         let (brL, brR) = case fi of
@@ -754,7 +754,7 @@ pTerm' (fuse, oldPrec, vars) t0 =
                 (fmap (\(n, v) → pTerm' (FNo, 5, vars) n <+> annotate (color Cyan) "=" <+> pTerm' (FNo, 0, vars) v) (toList fields))
             )
       ListLit vec → (5, encloseSep "[" "]" " | " $ fmap (\x → pTerm' (FNo, 0, vars) x) (toList vec))
-      Var x → (5, maybe ("#" <> pretty x) (\(_, i) → maybe "_" pIdent i) $ vars !? (length vars - x - 1))
+      Var x → (5, maybe ("#" <> pretty x) (\(_, i) → maybe "_" pIdent i) (vars !? (length vars - x - 1)))
       ExVar i → (5, "(exi#" <> pretty i <> ")")
       UniVar i t → (5, "(uni#" <> pretty i <+> ":" <+> pTerm' (FNo, 0, vars) t <> ")")
 
