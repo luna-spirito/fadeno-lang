@@ -49,7 +49,7 @@ _++_ = \a b. to_int+ (a + b) @~sum_pos
 /: Fun {Acc} (Acc) (Fun (Int+) (Acc) -> Acc) (Int+) -> Acc
 int+_fold = \@Acc. ~int+_fold @(\_. Acc)
 
-/: Fun {n : Int+} -> Eq 0 (n + (int_neg n))
+/: Fun {n : Int+} -> Eq (n + (int_neg n)) 0
 ~n-n = SORRY
 
 /: Fun {a : Any} {b : Any} (Eq a b) -> Eq b a
@@ -76,8 +76,7 @@ inv_index = \i n @prf. to_int+ (n - (i + 1)) @prf
     (\i rec @~i+1<=n.
       step (inv_index i n @~i+1<=n) @(~inv_index_bounded @i @n) (rewrite ~simplify @i in rec @(~smaller @i ~i+1<=n))
     )
-    n
-    @(rewrite ~sym (~n-n @n) in refl)
+    n @refl
 
 /: Fun {Acc} (n : Int+) (Fun (i : Int+) {_ : Where (i < n)} (Acc) -> Acc) (Acc) -> Acc
 int+_unfold = \@Acc. ~int+_unfold @(\_. Acc)

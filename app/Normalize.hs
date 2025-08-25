@@ -38,23 +38,25 @@ instance (Algebra sig m) ⇒ Algebra (Isolate :+: sig) (IsolateC m) where
 
 type Binding = (Quant, Maybe Ident, Maybe Term, Term)
 newtype Epoch = Epoch Int deriving (Show, Eq)
-data Scopes = Scopes !(Vector Binding) !(Vector (Epoch, Vector EEntry))
+
+data EEntry = EMarker | EVar !Int !(Either (Int, Term) Term) | EUniVar !Int | ERewrite !Term !Term deriving (Eq, Show)
+data Scopes = Scopes !(Vector Binding) !(Vector (Epoch, Vector EEntry)) !(Vector (Int, Term, Term)) -- Note: the `rs` vector is "just an index". Sad.
 
 data Dyn = Dyn !Epoch !Term
-data EEntry = EMarker | EVar !Int !(Either (Int, Term) Term) | EUniVar !Int deriving (Eq, Show)
 type Context = State Scopes :+: Isolate
 
 runContext' ∷ (Applicative m) ⇒ StateC Scopes m a → m a
-runContext' = evalState (Scopes [] [(Epoch 0, [])])
+runContext' = evalState (Scopes [] [(Epoch 0, [])] [])
 
 withBinding ∷ (Has Context sig m) ⇒ Binding → m a → m a
 withBinding b act = do
-  modify @Scopes \(Scopes bs es) → Scopes (bs |> b) (es |> (Epoch 0, []))
+  modify @Scopes \(Scopes bs es rs) → Scopes (bs |> b) (es |> (Epoch 0, [])) rs
   res ← act
-  modify @Scopes \(Scopes bs es) →
+  modify @Scopes \(Scopes bs es rs) →
     Scopes
       (maybe (error "Missing binding") fst $ viewr bs)
       (maybe (error "Missing ex scope") fst $ viewr es)
+      rs
   pure res
 
 -- | Intensional equality.
@@ -64,13 +66,11 @@ data EqRes
   | EqUnknown
 
 getScopeId ∷ (Has Context sig m) ⇒ m Int
-getScopeId = (\(Scopes bs _es) → length bs) <$> get @Scopes
+getScopeId = (\(Scopes bs _es _rs) → length bs) <$> get @Scopes
 
 getEpoch ∷ (Has Context sig m) ⇒ m Epoch
-getEpoch = maybe (error "Missing ex scope") (fst . snd) . (\(Scopes _ es) → viewr es) <$> get @Scopes
+getEpoch = maybe (error "Missing ex scope") (fst . snd) . (\(Scopes _ es _) → viewr es) <$> get @Scopes
 
--- unwrap :: (Has Context sig m) ⇒ Term → m (TermF Dyn)
--- unwrap = traverseTermF dyn (fmap Lambda . dyn . unLambda) . unTerm
 dyn ∷ (Has Context sig m) ⇒ Term → m Dyn
 dyn x = (`Dyn` x) <$> getEpoch
 
@@ -241,7 +241,7 @@ data ListDropRes = TDFound !(Vector' Term) | TDMissing | TDUnknown
 -- | Processes application of `f` onto `a`.
 postApp ∷ Term → Term → Term
 postApp f0 a0 = case (unTerm f0, a0) of
-  (Lam QNorm _ bod, a) → applyLambda bod a
+  (Lam QNorm _ bod, a) → run $ runContext' $ runIsolate $ applyLambda bod a -- TODO: This is wrong. Do we need fuel or something?
   (App (Term (Builtin RecordGet)) name1, a) →
     let
       search a' = case unconsField a' of
@@ -263,7 +263,7 @@ postApp f0 a0 = case (unTerm f0, a0) of
       (nTM, nV) = unplus n
      in
       -- TODO: causes constant re-normalization of `int+_fold` args.
-      (if nV > 0 then run . runIsolate . runContext' . normalize else id)
+      (if nV > 0 then run . runIsolate . runContext' . normalize else id) -- TODO: This is wrong again?
         $ repeat nV (Term . App step)
         $ case nTM of
           Nothing → start
@@ -318,8 +318,21 @@ splitAt3 i v =
     (bef, fst <$> aft, maybe [] snd aft)
 
 traverseNormTermF ∷ (Has Context sig m) ⇒ (Vector (Maybe Term) → Term → m Term) → Vector (Maybe Term) → TermF Term → m Term
-traverseNormTermF c locals t0 =
-  case t0 of
+traverseNormTermF c locals t0 = rewr =<< trav
+ where
+  rewr res = do
+    scope ← getScopeId
+    Scopes _ _ rs ← get
+    foldr
+      ( \(i, from, to) rec → do
+          let nest = i - scope + length locals - countErasedLocals
+          case isEq (nestedByP from nest) res of
+            EqYes → pure $ nestedByP to nest
+            _ → rec
+      )
+      (pure res)
+      rs
+  trav = case t0 of
     BuiltinsVar → pure builtinsVar
     Lam QEra _ body → c (locals |> Just undefined) $ unLambda body -- TODO: Total?
     App f a → do
@@ -339,8 +352,8 @@ traverseNormTermF c locals t0 =
                   Just (Just v) → nestedByP v updatedGlobalI
                   _ → Term $ Var updatedGlobalI
         else do
-          Scopes globals _ ← get @Scopes
-          let updatedGlobalI = globalI - countErased locals
+          Scopes globals _ _ ← get @Scopes
+          let updatedGlobalI = globalI - countErasedLocals
           pure case globals !? (length globals - 1 - (globalI - length locals)) of
             Just (_, _, Just raw, _) → nestedByP raw $ updatedGlobalI
             _ → Term $ Var updatedGlobalI
@@ -353,7 +366,7 @@ traverseNormTermF c locals t0 =
       FRecord b' → concat <$> c locals a <*> c locals b'
       FRow (name, b') → Term <$> (Concat <$> c locals a <*> (FRow . (name,) . Lambda <$> (c (locals |> Nothing) $ unLambda b')))
     ExVar (i, subi) → do
-      Scopes globals exs ← get @Scopes
+      Scopes globals exs _ ← get @Scopes
       let valtyM = do
             (_, scope) ← exs !? i
             ind ←
@@ -369,7 +382,7 @@ traverseNormTermF c locals t0 =
         Just (Left val) → pure $ uncurry nestedByP' val $ length locals + (length globals - i) -- no -1 because of ridiculous scope counting
         _ → pure $ Term $ ExVar (i, subi)
     _ → Term <$> traverseTermF (c locals) (\l → fmap Lambda $ c (locals |> Nothing) $ unLambda l) t0
- where
+  countErasedLocals = countErased locals
   countErased = foldl' (\acc e → if isJust e then acc + 1 else acc) 0
 
 builtinsVar ∷ Term
@@ -387,18 +400,8 @@ normalize' = rewrite (\_ _ → pure Nothing)
 normalize ∷ (Has Context sig m) ⇒ Term → m Term
 normalize = normalize' []
 
-applyLambda ∷ Lambda Term → Term → Term
-applyLambda bod val = run $ runContext' $ runIsolate $ normalize' [Just val] $ unLambda bod
-
-rewriteTerm ∷ (Has Context sig m) ⇒ Term → Term → Term → m (Maybe Term)
-rewriteTerm what0 with0 =
-  runWriter @Any (\(Any rewrote) final → pure $ guard rewrote *> Just final)
-    . rewrite
-      ( \locs term → case isEq term (nestedByP what0 locs) of
-          EqYes → tell (Any True) $> Just (nestedByP with0 locs)
-          _ → pure Nothing
-      )
-      []
+applyLambda ∷ (Has Context sig m) ⇒ Lambda Term → Term → m Term
+applyLambda bod val = normalize' [Just val] $ unLambda bod
 
 -- {- | Parse builtin
 -- Just a variation of parseQQ that has all the builtins in scope from the start.
