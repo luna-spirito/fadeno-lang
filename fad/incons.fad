@@ -3,8 +3,8 @@
 //forall (x : fadeno.U32). (\y. x + y)
 
 // \x.
-//   ty = fadeno.Type+ 0
-//   /: fadeno.Type+ x
+//   ty = fadeno.Type^ 0
+//   /: fadeno.Type^ x
 //   y = fadeno.U32
 //   in y
 

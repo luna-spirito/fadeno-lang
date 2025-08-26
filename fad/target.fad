@@ -6,12 +6,12 @@
 // cfg = { .core = {( .events = Gear (EventId -Map> Event) )} }
 
 // /: GearTemplate cfg.core (Text -Map> Record {( .name = Text | .revisions = List Text )})
-// unwrapImports = 
+// unwrapImports =
 
 // Bad!
-// fadeno.Serialized : forall (u : U32). Type+ u -> Type+ u
-// fadeno.ser : forall (u : U32) (a : Type+ u). a -> Serialized a
-// fadeno.deser : forall (u : U32) (a : Type+ u). Serialized a -> a
+// fadeno.Serialized : forall (u : U32). Type^ u -> Type^ u
+// fadeno.ser : forall (u : U32) (a : Type^ u). a -> Serialized a
+// fadeno.deser : forall (u : U32) (a : Type^ u). Serialized a -> a
 
 Serializer = \a. Record
   {(.ser = a -> Binary
@@ -19,6 +19,4 @@ Serializer = \a. Record
   | .restore = w : a -> self.deser (self.ser w) = { .tag = .ok | .val = w }
   )}
 
-// fadeno.uni : forall (u : U32). a : Type+ u -> Serializer a
-
-
+// fadeno.uni : forall (u : U32). a : Type^ u -> Serializer a

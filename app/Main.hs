@@ -575,7 +575,7 @@ inferList tts = for (viewl tts) \(t, ts) → do
   checkList ts tT
   fetchT tT
 
--- match Row+ and Type+, since any Row+ is Type+
+-- match Row^ and Type^, since any Row^ is Type^
 isTypePlus ∷ Term → Bool
 isTypePlus =
   unTerm >>> \case
@@ -796,23 +796,23 @@ infer = logAndRunInfer $ \case
 
 typOfBuiltin ∷ BuiltinT → Term
 typOfBuiltin = \case
-  Num _d → [termQQ| Type+ 0 |]
+  Num _d → [termQQ| Type^ 0 |]
   Add d → op2d d
   IntNeg d → opd d
-  Tag → [termQQ| Type+ 0 |]
-  Bool → [termQQ| Type+ 0 |]
-  RowPlus → [termQQ| Fun (u : Int+) -> Type+ u |]
-  List → [termQQ| Fun {u} (Type+ u) -> Type+ u |]
-  TypePlus → [termQQ| Fun (u : Int+) -> Type+ (u + 1) |]
-  Eq → [termQQ| Fun (Any) (Any) -> Type+ 0 |]
+  Tag → [termQQ| Type^ 0 |]
+  Bool → [termQQ| Type^ 0 |]
+  RowPlus → [termQQ| Fun (u : Int+) -> Type^ u |]
+  List → [termQQ| Fun {u} (Type^ u) -> Type^ u |]
+  TypePlus → [termQQ| Fun (u : Int+) -> Type^ (u + 1) |]
+  Eq → [termQQ| Fun (Any) (Any) -> Type^ 0 |]
   Refl → [termQQ| Fun {x} -> Eq x x |]
   RecordGet →
     [termQQ|
-      Fun {u : Int+} {row : Row+ u} {T : Type+ u} (tag : Tag) (record : {( (tag) = T )} \/ row) -> T
+      Fun {u : Int+} {row : Row^ u} {T : Type^ u} (tag : Tag) (record : {( (tag) = T )} \/ row) -> T
     |]
   -- TODO: Better type
-  RecordKeepFields → [termQQ| Fun {u : Int+} {row : Row+ u} (List Tag) (row) -> Any |]
-  RecordDropFields → [termQQ| Fun {u : Int+} {row : Row+ u} (List Tag) (row) -> Any |]
+  RecordKeepFields → [termQQ| Fun {u : Int+} {row : Row^ u} (List Tag) (row) -> Any |]
+  RecordDropFields → [termQQ| Fun {u : Int+} {row : Row^ u} (List Tag) (row) -> Any |]
   ListLength → [termQQ| Fun {A} (List A) -> Int+ |]
   ListIndexL → [termQQ| Fun {A} (i : Int+) (l : List A) {_ : Where (int_>=0 (int_add (list_length l) (int_neg (i + 1))))} -> A |]
   NatFold → [termQQ| Fun {Acc : Fun (Int+) -> Any} (Acc 0) (Fun (i : Int+) (Acc i) -> Acc (i + 1)) (n : Int+) -> Acc n |]
@@ -821,11 +821,11 @@ typOfBuiltin = \case
   IntEq → [termQQ| Fun (Int) (Int) -> Bool |]
   IntNeq → [termQQ| Fun (Int) (Int) -> Bool |]
   TagEq → [termQQ| Fun (Tag) (Tag) -> Bool |]
-  W → [termQQ| Fun {u} (Type+ u) -> Type+ u |]
+  W → [termQQ| Fun {u} (Type^ u) -> Type^ u |]
   Wrap → [termQQ| Fun {A} (A) -> W A |]
   Unwrap → [termQQ| Fun {A} (W A) -> A |]
-  Never → [termQQ| Type+ 0 |]
-  Any' → [termQQ| Type+ 0 |] where
+  Never → [termQQ| Type^ 0 |]
+  Any' → [termQQ| Type^ 0 |] where
  where
   opd d = Term $ Pi QNorm Nothing (Term $ Builtin $ Num d) $ Lambda $ Term $ Builtin $ Num d
   op2d d = Term $ Pi QNorm Nothing (Term $ Builtin $ Num d) $ Lambda $ opd d

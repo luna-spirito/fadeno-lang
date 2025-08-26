@@ -76,7 +76,7 @@ data BuiltinT
   | RowPlus
   | List
   | Bool
-  | TypePlus -- Type+ 0, Type+ 1, ..., Type+ Aleph
+  | TypePlus -- Type^ 0, Type^ 1, ..., Type^ Aleph
   | Eq
   | Refl
   | RecordGet -- Second-class!
@@ -118,9 +118,9 @@ identOfBuiltin = \case
   Num d → r $ numDesc True d
   Tag → r "Tag"
   Bool → r "Bool"
-  RowPlus → r "Row+"
+  RowPlus → r "Row^"
   List → r "List"
-  TypePlus → r "Type+"
+  TypePlus → r "Type^"
   Eq → r "Eq"
   Refl → r "refl"
   RecordGet → r "record_get"
