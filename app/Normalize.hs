@@ -3,6 +3,7 @@
 {-# HLINT ignore "Use const" #-}
 module Normalize where
 
+import Arithmetic (normalizePoly)
 import Control.Algebra
 import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.State.Church (StateC, evalState)
@@ -275,7 +276,6 @@ postApp f0 a0 = case (unTerm f0, a0) of
     if cond then thenBranch else elseBranch
   (Builtin IntGte0, Term (NumLit x)) → Term $ BoolLit $ x >= 0
   (Term (Builtin IntEq) `App` Term (NumLit l), Term (NumLit r)) → Term $ BoolLit $ l == r
-  (Term (Builtin IntNeq) `App` Term (NumLit l), Term (NumLit r)) → Term $ BoolLit $ l /= r
   (Term (Builtin Wrap) `App` _ty, b) → b
   (Term (Builtin Unwrap) `App` _ty, b) → b
   -- Add
@@ -284,7 +284,7 @@ postApp f0 a0 = case (unTerm f0, a0) of
     | Term (NumLit a') ← a → Term $ NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a' + fromIntegral b) (\_ → a' + b)
   -- Sub
   (Builtin (IntNeg d), Term (NumLit x)) → Term $ NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ -fromIntegral x) (\_ → -x)
-  (f, a) → Term $ App (Term f) a
+  (f, a) → normalizePoly $ Term $ App (Term f) a
  where
   -- Drop `x` from ListLit.
   listLitDrop ∷ Term → Vector' Term → ListDropRes
@@ -358,7 +358,7 @@ traverseNormTermF c locals t0 = rewr =<< trav
           Scopes globals _ _ ← get @Scopes
           let updatedGlobalI = globalI - countErasedLocals
           pure case globals !? (length globals - 1 - (globalI - length locals)) of
-            Just (_, _, Just raw, _) → nestedByP raw $ updatedGlobalI
+            Just (_, _, Just raw, _) → nestedByP raw updatedGlobalI
             _ → Term $ Var updatedGlobalI
     AppErased f _a → c locals f
     Block (BlockLet _q _name _ty val into) → do
@@ -384,7 +384,7 @@ traverseNormTermF c locals t0 = rewr =<< trav
       case valtyM of
         Just (Left val) → pure $ uncurry nestedByP' val $ length locals + (length globals - i) -- no -1 because of ridiculous scope counting
         _ → pure $ Term $ ExVar (i, subi)
-    _ → Term <$> traverseTermF (c locals) (\l → fmap Lambda $ c (locals |> Nothing) $ unLambda l) t0
+    _ → Term <$> traverseTermF (c locals) (fmap Lambda . c (locals |> Nothing) . unLambda) t0
   countErasedLocals = countErased locals
   countErased = foldl' (\acc e → if isJust e then acc + 1 else acc) 0
 

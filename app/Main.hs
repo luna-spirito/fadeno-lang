@@ -23,7 +23,7 @@ import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, sp
 import Data.Type.Equality (type (~))
 import GHC.Exts (IsList (..))
 import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, numDecDispatch, runContext', runIsolate, splitAt3, termQQ, withBinding)
-import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parse, render, rowOf, traverseTermF, typ, typOf)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parse, render, rowOf, traverseTermF, typ, typOf, pattern IntND, pattern Op2)
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, runReader, take, to, toList, zip)
@@ -697,6 +697,7 @@ typOfBuiltin ∷ BuiltinT → Term
 typOfBuiltin = \case
   Num _d → [termQQ| Type^ 0 |]
   Add d → op2d d
+  Mul d → op2d d
   IntNeg d → opd d
   Tag → [termQQ| Type^ 0 |]
   Bool → [termQQ| Type^ 0 |]
@@ -718,7 +719,6 @@ typOfBuiltin = \case
   If → [termQQ| Fun {A} (cond : Bool) (Fun {_ : Eq cond true} -> A) (Fun {_ : Eq cond false} -> A) -> A |]
   IntGte0 → [termQQ| Fun (Int) -> Bool |]
   IntEq → [termQQ| Fun (Int) (Int) -> Bool |]
-  IntNeq → [termQQ| Fun (Int) (Int) -> Bool |]
   TagEq → [termQQ| Fun (Tag) (Tag) -> Bool |]
   W → [termQQ| Fun {u} (Type^ u) -> Type^ u |]
   Wrap → [termQQ| Fun {A} (A) -> W A |]
@@ -850,7 +850,6 @@ subtype = \a b →
       -- Type Universes (Type L1 <: Type L2 where L1 <= L2)
       (Term (App (fDyn e → Builtin TypePlus) a0), Term (App (fDyn e → Builtin TypePlus) b0)) → do
         case (a0, b0) of
-          (fDyn e → NumLit x, fDyn e → NumLit y) | x <= y → pure ()
           (fDyn e → NumLit 0, _) → pure ()
           -- If one level is existential, unify it with the other level constraint.
           (fDyn e → ExVar ex, b) → instMeta ex b
@@ -859,7 +858,13 @@ subtype = \a b →
             isEqUnify a b >>= \case
               -- Skippind `dyn`'s here since non-EqYes doesn't update a & b.
               EqYes → pure ()
-              _ → stackError \p → "Cannot subtype universes with levels:" <+> p a <+> "≤" <+> p b
+              _ → do
+                let negA = Term $ Term (Builtin $ IntNeg IntND) `App` a
+                evaluated ← normalize (Term $ Term (Builtin IntGte0) `App` Term (Op2 (Add IntND) b negA))
+                stackLog \p → p evaluated
+                isEqUnify evaluated (Term $ BoolLit True) >>= \case
+                  EqYes → pure ()
+                  _ → stackError \p → "Cannot subtype universes with levels:" <+> p a <+> "≤" <+> p b <> line <> "Stuck at:" <+> p evaluated
       (Term (App (fDyn e → Builtin List) a), Term (App (fDyn e → Builtin List) b)) → subtype a b
       (Term (App (fDyn e → Builtin W) a), Term (App (fDyn e → Builtin W) b)) →
         isEqUnify a b >>= \case

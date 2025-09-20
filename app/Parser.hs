@@ -34,6 +34,8 @@ module Parser (
   typ,
   typOf,
   traverseTermF,
+  pattern IntND,
+  pattern Op2,
 ) where
 
 import Control.Algebra
@@ -44,6 +46,7 @@ import Control.Carrier.Writer.Church (Writer, censor, listen)
 import Control.Effect.Empty qualified as E
 import Control.Effect.Reader qualified as R
 import Data.ByteString.Char8 qualified as BS
+import Data.Functor.Classes (Eq1, Ord1)
 import Data.Kind (Type)
 import Data.RRBVector (Vector, findIndexR, (!?), (|>))
 import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string, try)
@@ -67,12 +70,12 @@ data Ident = Ident !ByteString !Bool -- raw name, is operator
 instance Hashable Ident
 
 data Quant = QEra | QNorm
-  deriving (Show, Eq, Lift)
+  deriving (Show, Eq, Ord, Lift)
 
 data Bits = Bits8 | Bits16 | Bits32 | Bits64 | BitsInf
   deriving (Show, Eq, Ord, Lift)
 data NumDesc = NumDesc !Bool {- ≥ 0 -} !Bits
-  deriving (Show, Eq, Lift)
+  deriving (Show, Eq, Ord, Lift)
 
 data BuiltinT
   = Tag
@@ -91,7 +94,6 @@ data BuiltinT
   | If -- TODO: Make Choice counterpart for Record
   | IntGte0
   | IntEq
-  | IntNeq
   | TagEq
   | W
   | Wrap
@@ -99,15 +101,17 @@ data BuiltinT
   | Never
   | Any'
   | Add !NumDesc
+  | Mul !NumDesc
   | Num !NumDesc
   | IntNeg !NumDesc
-  deriving (Show, Eq, Lift)
+  deriving (Show, Eq, Ord, Lift)
 
 builtinsList ∷ Vector BuiltinT
 builtinsList =
   [Tag, RowPlus, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, IntGte0, IntEq, TagEq, W, Wrap, Unwrap, Never, Any']
     <> (Num <$> nd)
     <> (Add <$> ndSansIntP)
+    <> (Mul <$> ndSansIntP)
     <> (IntNeg <$> ndSansIntP)
  where
   ndFins = NumDesc <$> [False, True] <*> [Bits8, Bits16, Bits32, Bits64]
@@ -118,6 +122,7 @@ identOfBuiltin ∷ BuiltinT → Ident
 identOfBuiltin = \case
   Add d → r $ numDesc False d <> "_add"
   IntNeg d → r $ numDesc False d <> "_neg"
+  Mul d → r $ numDesc False d <> "_mul"
   Num d → r $ numDesc True d
   Tag → r "Tag"
   Bool → r "Bool"
@@ -134,8 +139,7 @@ identOfBuiltin = \case
   NatFold → r "~int+_fold"
   If → r "if"
   IntGte0 → r "int_>=0"
-  IntEq → r "int_/="
-  IntNeq → r "int_=="
+  IntEq → r "int_=="
   TagEq → r "tag_=="
   W → r "W"
   Wrap → r "wrap"
@@ -156,12 +160,18 @@ identOfBuiltin = \case
   -- \| regular
   r x = x `Ident` False
 
+pattern IntND ∷ NumDesc
+pattern IntND = NumDesc False BitsInf
+
+pattern Op2 ∷ BuiltinT → Term → Term → TermF Term
+pattern Op2 f a b = Term (Term (Builtin f) `App` a) `App` b
+
 newtype Lambda a = Lambda {unLambda ∷ a}
   deriving (Show, Eq, Lift)
 
 -- Vector + Lift
 newtype Vector' a = Vector' (Vector a)
-  deriving (Show, Eq, Functor, Foldable, Traversable, Semigroup)
+  deriving (Show, Eq, Ord, Eq1, Ord1, Functor, Foldable, Traversable, Semigroup)
 
 instance IsList (Vector' a) where
   type Item (Vector' a) = a
