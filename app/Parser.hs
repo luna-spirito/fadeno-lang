@@ -1,3 +1,6 @@
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+
+{-# HLINT ignore "Use const" #-}
 module Parser (
   Bits (..),
   BlockF (..),
@@ -107,7 +110,7 @@ builtinsList =
     <> (Add <$> ndSansIntP)
     <> (IntNeg <$> ndSansIntP)
  where
-  ndFins = (NumDesc <$> [False, True] <*> [Bits8, Bits16, Bits32, Bits64])
+  ndFins = NumDesc <$> [False, True] <*> [Bits8, Bits16, Bits32, Bits64]
   ndSansIntP = ndFins <> [NumDesc False BitsInf]
   nd = ndSansIntP <> [NumDesc True BitsInf]
 
@@ -231,13 +234,13 @@ rowOf ∷ Term → Term
 rowOf u = Term $ App (Term $ Builtin RowPlus) u
 
 recordGet ∷ Term → Term → Term
-recordGet tag record = Term $ (Term $ (Term $ Builtin RecordGet) `App` tag) `App` record
+recordGet tag record = Term $ Term (Term (Builtin RecordGet) `App` tag) `App` record
 
 typ ∷ Term
 typ = typOf $ Term $ NumLit 0
 
 eqOf ∷ Term → Term → Term
-eqOf a b = Term $ Term ((Term $ Builtin Eq) `App` a) `App` b
+eqOf a b = Term $ Term (Term (Builtin Eq) `App` a) `App` b
 
 -- parsing
 
@@ -277,7 +280,7 @@ number = token do
 -- TODO: block words from ident' as well?.. probably not.
 -- TODO: Convert blocklists to functions
 identSym ∷ Parser' Char
-identSym = satisfy \x → not $ x `elem` (" \\/\n(){}[].:|" ∷ String)
+identSym = satisfy \x → x `notElem` (" \\/\n(){}[].:|" ∷ String)
 
 -- Returns the identifier and whether it's an operator
 -- Expect the ident to start RIGHT NOW.
@@ -290,7 +293,7 @@ identRightNow = do
         _ → (rawResult, False)
   guard $ not $ BS.null result
   guard $ not $ "@" `BS.isPrefixOf` result
-  guard $ not $ result `elem` (["Fun", "=", "in", "->", "unpack", "fadeno", "rewrite", "true", "false"] ∷ [ByteString])
+  guard $ result `notElem` (["Fun", "=", "in", "->", "unpack", "fadeno", "rewrite", "true", "false"] ∷ [ByteString])
   pure if result == "_" then Nothing else Just (Ident result isOp)
 
 ident ∷ Parser' (Maybe Ident)
@@ -357,7 +360,7 @@ parsePrim = token do
                     v ← parseTop
                     pure (n, v)
               knownFields ← fromList <$> sepBy (token $(char '|')) parseField
-              token $ (when isRow $(char ')')) *> $(char '}')
+              token $ when isRow $(char ')') *> $(char '}')
               pure $ Term $ FieldsLit (if isRow then FRow () else FRecord ()) knownFields
           )
       <|> ( do
@@ -366,7 +369,7 @@ parsePrim = token do
               token $(char ']')
               pure $ Term $ ListLit elems
           )
-      <|> (Term BuiltinsVar <$ (notFollowedBy $(string "fadeno") identSym))
+      <|> (Term BuiltinsVar <$ notFollowedBy $(string "fadeno") identSym)
       <|> (Term Sorry <$ notFollowedBy ($(string "SORRY") <* many ($(char '!') <|> $(char '1'))) identSym)
       <|> ( Term . Var <$> do
               -- Variable parsing
@@ -423,8 +426,8 @@ parseTy =
           (n, t) ←
             ((,) <$> (ident <* token $(char ':')) <*> parseTop)
               <|> case q of
-                QNorm → ((Nothing,) <$> parseTop)
-                QEra → ((,Term $ Builtin Any') . Just <$> (maybe failed pure =<< ident))
+                QNorm → (Nothing,) <$> parseTop
+                QEra → (,Term $ Builtin Any') . Just <$> (maybe failed pure =<< ident)
           token $ case q of
             QNorm → $(char ')')
             QEra → $(char '}')
@@ -433,23 +436,22 @@ parseTy =
           (q, n, t) ← getArg
           Term . Pi q n t . Lambda <$> local (|> (QNorm, n)) getArgs
         getArgs =
-          (($(string "->") *> parseApp))
+          ($(string "->") *> parseApp)
             <|> getArgs1
       getArgs1
   )
     <|> ( do
             -- Fused: parseApp <|> (\/)
             left ← parseApp
-            ( ( do
-                  iM ← token do
-                    $(char '\\')
-                    optional identRightNow <* $(char '/')
-                  Term . Concat left <$> case iM of
-                    Nothing → FRecord <$> parseTy
-                    Just i → FRow . (i,) . Lambda <$> local (|> (QNorm, i)) parseTy
+            ( do
+                iM ← token do
+                  $(char '\\')
+                  optional identRightNow <* $(char '/')
+                Term . Concat left <$> case iM of
+                  Nothing → FRecord <$> parseTy
+                  Just i → FRow . (i,) . Lambda <$> local (|> (QNorm, i)) parseTy
               )
-                <|> pure left
-              )
+              <|> pure left
         )
 
 -- -- 4
@@ -462,7 +464,7 @@ parseInfixOps = infxl parseTy parseOperator'
     case i of
       Just (Ident opName False) →
         findVar opName >>= \case
-          Just (idx, QNorm, True) → pure \a b → Term $ (Term $ (Term $ Var idx) `App` a) `App` b
+          Just (idx, QNorm, True) → pure \a b → Term $ Term (Term (Var idx) `App` a) `App` b
           _ → empty -- Not a known operator in this scope
       _ → empty
 
@@ -481,12 +483,12 @@ parseBlock = do
         local insideEra parseInfixOps
       name ← ident
       q ← parseEq
-      expr ← local (insideLet q) $ parseTop
+      expr ← local (insideLet q) parseTop
       pure (q, name, ty, expr)
     someEntries =
       ( do
           (q, name, ty, expr) ← binding
-          rest ← Lambda <$> (local (|> (q, name)) manyEntries)
+          rest ← Lambda <$> local (|> (q, name)) manyEntries
           pure $ Term $ Block $ BlockLet q name ty expr rest
       )
         <|> ( do
@@ -503,8 +505,7 @@ parseBlock = do
         <|> ( do
                 token $ $(string "rewrite")
                 rewrite ← parseTop
-                rest ← manyEntries
-                pure $ Term $ Block (BlockRewrite rewrite rest)
+                Term . Block . BlockRewrite rewrite <$> manyEntries
             )
     manyEntries =
       someEntries
@@ -617,9 +618,7 @@ isSimple =
   let ping = do
         modify @Int (+ 1)
         curr ← get
-        if complexThreshold curr
-          then E.empty
-          else pure ()
+        when (complexThreshold curr) E.empty
       complexity =
         unTerm >>> \case
           Lam _ _ (Lambda x) → ping *> complexity x
@@ -753,7 +752,7 @@ pTerm' (fuse, oldPrec, vars) t0 =
                 (annotate (color White) " | ")
                 (fmap (\(n, v) → pTerm' (FNo, 5, vars) n <+> annotate (color Cyan) "=" <+> pTerm' (FNo, 0, vars) v) (toList fields))
             )
-      ListLit vec → (5, encloseSep "[" "]" " | " $ fmap (\x → pTerm' (FNo, 0, vars) x) (toList vec))
+      ListLit vec → (5, encloseSep "[" "]" " | " $ pTerm' (FNo, 0, vars) <$> toList vec)
       Var x → (5, maybe ("#" <> pretty x) (\(_, i) → maybe "_" pIdent i) (vars !? (length vars - x - 1)))
       ExVar (s, i) → (5, "(exi#" <> pretty s <> "/" <> pretty i <> ")")
       UniVar (s, i) t → (5, "(uni#" <> pretty s <> "/" <> pretty i <+> ":" <+> pTerm' (FNo, 0, vars) t <> ")")

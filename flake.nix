@@ -14,7 +14,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        hask = "910";
+        hask = "912";
       in
         {
           checks.pre-commit-check = pre-commit-hooks.lib.${system}.run {

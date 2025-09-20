@@ -1,3 +1,6 @@
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+
+{-# HLINT ignore "Use const" #-}
 module Main where
 
 import Control.Algebra
@@ -78,7 +81,7 @@ pStacks = \case
   (x : xs) → line <> "├ " <> pStack x <> pStacks xs
 
 pStack ∷ StackEntry → Doc AnsiStyle
-pStack = \(StackEntry x xs) → group x <> nest 2 (pStacks xs) where
+pStack (StackEntry x xs) = group x <> nest 2 (pStacks xs)
 
 runStackAccC ∷ (Applicative m) ⇒ StackAccC m a → m ([StackEntry], a)
 runStackAccC = runWriter (\w a → pure (toList @(Vector _) w, a)) . unStackAccC
@@ -93,9 +96,7 @@ instance (Has (Lift IO) sig m) ⇒ Algebra (StackLog :+: sig) (StackPrintC m) wh
       pure ctx
     L (StackScope msg act) → do
       sendMsg msg
-      res ← local @Int (+ 1) $ unStackPrintC $ hdl (ctx $> act)
-      -- sendMsg "--"
-      pure res
+      local @Int (+ 1) $ unStackPrintC $ hdl (ctx $> act)
     R other → alg (unStackPrintC . hdl) (R other) ctx
    where
     sendMsg msg = do
@@ -131,7 +132,7 @@ writeMeta exId0@(scope0, subi0) (valLocals0, valNow0) = do
             _ → acc
         )
         0
-        (exsMiddleAft <> (join $ snd <$> exsAfter))
+        (exsMiddleAft <> (snd =<< exsAfter))
     rsBef = take (length rs0 - rewrites) rs0
   put $ Scopes bindsBefore (exsBefore |> (Epoch exsMiddleEpoch, exsMiddleBef)) rsBef
   case exsMiddleMiddle of
@@ -228,7 +229,7 @@ scopedExVar mapTerm ty0 act = do
                               , Just indL ← findIndexL ((== j) . fst) binds → do
                                   locs ← ask
                                   pure $ Var $ locs + (length binds - indL - 1)
-                            x → traverseTermF (rec) (fmap Lambda . local @Int (+ 1) . rec . unLambda) x
+                            x → traverseTermF rec (fmap Lambda . local @Int (+ 1) . rec . unLambda) x
                       )
              in foldr
                   ( \(newBindId, newBindTy0) rec binds → do
@@ -298,8 +299,10 @@ withMono' foralls mapTerm onMeta onOther = go
       Pi QEra _n x y
         | foralls →
             stackScope (\_ → "(unwrapped forall)")
-              $ scopedExVar mapTerm x
-              $ (go <=< applyLambda y)
+              $ scopedExVar
+                mapTerm
+                x
+                (go <=< applyLambda y)
       r → onOther $ Term r
 
 withMono ∷
@@ -322,7 +325,7 @@ logAndRunInfer f t mode =
         Term Block{} → act -- No logging to reduce noise
         _ →
           let
-            scope x = stackScope @sig @m @a \p → ("<" <> group (p t) <> "> : " <> x p)
+            scope x = stackScope @sig @m @a \p → "<" <> group (p t) <> "> : " <> x p
            in
             case mode of
               Infer → scope (\_ → "_") do
@@ -349,7 +352,7 @@ numFitsInto x d =
 withEra ∷ (Has Context sig m) ⇒ m a → m a
 withEra act = do
   quants ← state @Scopes \(Scopes binds es rs) →
-    bimap (\x → Scopes x es rs) id
+    first (\x → Scopes x es rs)
       $ unzip ((\(q, a, b, c) → ((QNorm, a, b, c), q)) <$> binds)
   res ← act
   modify @Scopes \(Scopes bs es rs) →
@@ -386,7 +389,7 @@ inferApp q f a = do
           getEpoch >>= \e0 → case t0 of
             (fDyn e0 → Pi q2 _n inT outT) | q == q2 → do
               let updCtx = if norm then id else withEra
-              updCtx $ (infer a . Check =<< fetchT inT)
+              updCtx (infer a . Check =<< fetchT inT)
               uncurry applyLambda =<< ((,) <$> fetchLambda outT <*> normalize a)
             t → stackError \p → "inferApp" <+> pretty (show q) <+> p t
       )
@@ -434,7 +437,7 @@ rowGet mapTerm tag cont = go -- tag is source term
                     eqTag ← isEqUnify tag =<< fetchT n
                     case eqTag of
                       EqYes → LookupFound <$> (fetchT v >>= cont)
-                      EqUnknown → pure $ LookupUnknown
+                      EqUnknown → pure LookupUnknown
                       EqNot → rec
                 )
                 (pure $ LookupMissing $ fst <$> l)
@@ -499,7 +502,7 @@ infer = logAndRunInfer $ \case
   -- However, converting Infer to a Check when checking a term is hereby declared a deadly sin.
   (_, CheckL (Builtin Any')) → pure ()
   (Block (BlockLet q name tyM val into), mode0) → do
-    ty ← stackScope (\_ → ("let" <+> pQuant q <> maybe "_" pIdent name))
+    ty ← stackScope (\_ → "let" <+> pQuant q <> maybe "_" pIdent name)
       $ (if q == QEra then withEra else id)
       $ case tyM of
         Nothing → infer val Infer
@@ -584,7 +587,7 @@ infer = logAndRunInfer $ \case
   (Concat l (FRecord r), (_, Infer)) →
     Term
       <$> ( Concat
-              <$> (infer l Infer)
+              <$> infer l Infer
               <*> (FRow . (Nothing,) . Lambda . nested <$> infer r Infer)
           )
   (Concat l (FRecord r), CheckL (Concat lT (FRow (_, rT)))) → do
@@ -615,8 +618,7 @@ infer = logAndRunInfer $ \case
   -- Type-level
   (FieldsLit (FRow ()) (Vector' flds), InferL) → do
     for_ flds \(n, _) → infer n $ Check $ Term $ Builtin Tag
-    (fromMaybe typ <$> inferList (snd <$> flds))
-      >>= withMonoUniverse id (pure . rowOf)
+    inferList (snd <$> flds) >>= withMonoUniverse id (pure . rowOf) . fromMaybe typ
   (FieldsLit (FRow ()) (Vector' flds), (e, Check (unTerm → App (isTypePlus → True) (Dyn e . typOf → ty)))) → do
     for_ flds \(n, _) → infer n $ Check $ Term $ Builtin Tag
     checkList (snd <$> flds) ty
@@ -765,7 +767,7 @@ instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) �
           if pos2 <= pos1
             then pure uni
             else stackError \_ → "Attempting to asign existential to later introduced universal"
-        Term (App (Term (Builtin W)) a) → pure $ Term $ (Term $ Builtin W) `App` a
+        Term (App (Term (Builtin W)) a) → pure $ Term $ Term (Builtin W) `App` a
         (fDyn e → App f a) → do
           f' ← instMeta' locs =<< fetchT f
           a' ← instMeta' locs =<< fetchT a
@@ -796,9 +798,7 @@ instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) �
       let r = writeMeta (scope1, sub1) . (0,) =<< instMeta' 0 val
        in case val of
             Term (ExVar var2) →
-              if (scope1, sub1) == var2
-                then pure ()
-                else r
+              unless ((scope1, sub1) == var2) r
             _ → r
 
 isEqUnify ∷ (Has Checker sig m) ⇒ Term → Term → m EqRes
@@ -813,7 +813,7 @@ subtype = \a b →
  where
   -- Core subtyping logic based on the structure of the resolved types.
   subtype' ∷ Term → Term → m ()
-  subtype' = \t10 t20 →
+  subtype' t10 t20 =
     getEpoch >>= \e → case (t10, t20) of
       -- Existential Variables (?a <: ?b, ?a <: T, T <: ?a)
       (fDyn e → ExVar ex1, fDyn e → ExVar ex2) | ex1 == ex2 → pure ()
@@ -823,12 +823,10 @@ subtype = \a b →
       (fDyn e → UniVar id1 _, fDyn e → UniVar id2 _) | id1 == id2 → pure ()
       -- T <: Pi QEra x:K. Body  => Introduce UniVar for x
       (t, unTerm → Pi QEra (Just _n) inT outT) →
-        scopedUniVar (const pure) inT $ \uni →
-          subtype t =<< applyLambda outT uni
+        scopedUniVar (const pure) inT (subtype t <=< applyLambda outT)
       -- Pi QEra x:K. Body <: T => Introduce ExVar for x
       (unTerm → Pi QEra (Just n) inT outT, t) →
-        scopedExVar (\_ _ → stackError \_ → "Unresolved existential" <+> pIdent n) inT \exi →
-          (`subtype` t) =<< applyLambda outT exi
+        scopedExVar (\_ _ → stackError \_ → "Unresolved existential" <+> pIdent n) inT ((`subtype` t) <=< applyLambda outT)
       -- Function Types (Πx:T1.U1 <: Πy:T2.U2)
       (fDyn e → Pi q1 n1 inT1 outT1, fDyn e → Pi q2 n2 inT2 outT2) | q1 == q2 → do
         -- Input types are contravariant (T2 <: T1)
