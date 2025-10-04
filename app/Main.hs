@@ -19,14 +19,14 @@ import Control.Effect.Writer (Writer, censor, tell)
 import Data.Bitraversable (bimapM)
 import Data.ByteString.Char8 (pack)
 import Data.List (find)
-import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, splitAt, take, unzip, viewl, viewr, zip, (!?), (|>))
+import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, replicate, splitAt, take, unzip, viewl, viewr, zip, (!?), (|>))
 import Data.Type.Equality (type (~))
 import GHC.Exts (IsList (..))
-import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, numDecDispatch, runContext', runIsolate, splitAt3, termQQ, withBinding)
+import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Rewrite (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', numDecDispatch, runContext', runIsolate, splitAt3, termQQ, withBinding, withMarked)
 import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parse, render, rowOf, traverseTermF, typ, typOf, pattern IntND, pattern Op2)
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
-import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, runReader, take, to, toList, zip)
+import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, replicate, runReader, take, to, toList, zip)
 
 -- TODO: Permit inference of dependent Pis?
 -- TODO: Concat uncomfortably replicates Pi.
@@ -148,10 +148,12 @@ writeMeta exId0@(scope0, subi0) (valLocals0, valNow0) = do
           valty' ← bimapM (traverse normalize) normalize valty
           pure (EVar exId valty', id)
         EUniVar n → pure (EUniVar n, id)
-        ERewrite a b → do
-          (a', b') ← (,) <$> normalize a <*> normalize b
+        ERewrite (Rewrite locsCount lfromto0) → do
+          let locs = replicate locsCount Nothing
+          lfromto ← fmap Lambda $ bimapM (normalize' locs) (normalize' locs) $ unLambda lfromto0
           s ← getScopeId
-          pure (ERewrite a' b', (|> (s, a', b')))
+          let rewr = Rewrite locsCount lfromto
+          pure (ERewrite rewr, (|> (s, rewr)))
       modify @Scopes \(Scopes bs es rs) → Scopes bs (adjust (length es - 1) (fmap (|> e1)) es) $ rsf rs
   for_ exsMiddleAft fe
   when (length bindsAfter /= length exsAfter) $ error "Binds/exs mismatch"
@@ -188,30 +190,23 @@ scopedExVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → Te
 scopedExVar mapTerm ty0 act = do
   scopeId ← getScopeId
   sub ← fresh
-  modify @Scopes \(Scopes bs es rs) → Scopes bs (adjust' scopeId (fmap (<> [EMarker, EVar sub (Right ty0)])) es) rs
-  res ← act $ Term $ ExVar (scopeId, sub)
-  unresolved ← state @Scopes \(Scopes bs exs rs) →
-    let
-      (exsB, (scopeE, scope)) = fromMaybe (error "Missing ex scope") $ viewr exs
-      (scope', unresolved) =
-        fix
-          ( \rec →
-              viewr >>> \case
-                Just (rest, EMarker) → (rest, [])
-                Just (rest, EVar _ (Left _)) → rec rest
-                Just (rest, EVar i (Right ty)) → (|> (i, ty)) <$> rec rest
-                _ → error "Marker disappeared"
+  (finalEntries, res) ← withMarked [EVar sub (Right ty0)] $ act $ Term $ ExVar (scopeId, sub)
+  let unresolved =
+        foldl'
+          ( \acc e → case e of
+              EVar _ (Left _) → acc
+              EVar i (Right ty) → acc |> (i, ty)
+              _ → error "Unexpected entry"
           )
-          scope
-     in
-      (Scopes bs (exsB |> (scopeE, scope')) rs, unresolved)
-
+          []
+          finalEntries
   -- TODO: occurence check?
   if null unresolved
     then pure res
     else
       mapTerm
         ( \t →
+            -- \| binds is `Vector (ExVarId, Term)`
             let resolve binds =
                   run
                     . runReader @Int 0
@@ -485,7 +480,7 @@ nestBinding fromScope term0 = do
   Scopes _ _ rs ← get
   stackLog \_ → "Trying nesting"
   case viewr rs of
-    Just (_, (sRewr, _, _)) | sRewr >= fromScope → (stackLog \_ → "Nested") *> normalize term
+    Just (_, (lastRewroteAtScope, _)) | lastRewroteAtScope >= fromScope → (stackLog \_ → "Nested") *> normalize term
     _ → pure term
 
 -- | If input is a kind, returns universe level.
@@ -520,28 +515,26 @@ infer = logAndRunInfer $ \case
         subty ← fetchT $ Dyn e subty0
         fInto (const pure) $ Check $ nested subty
   (Block (BlockRewrite prf inner), mode) → do
-    prfTy ← infer prf Infer
+    prfTy0 ← infer prf Infer
     let
-      fInto ∷ ((Term → m Term) → a → m a) → m a → m a
-      fInto mapTerm cont =
-        withMono
-          mapTerm
-          (stackError \_ → "Type of rewrite must be known")
-          ( \case
-              (Term (Term (Term (Builtin Eq) `App` from) `App` to)) → do
-                i ← getScopeId
-                modify \(Scopes bs es rs) → Scopes bs (adjust' i (fmap (|> ERewrite from to)) es) (rs |> (i, from, to))
-                cont <* modify \(Scopes bs es rs) →
-                  Scopes
-                    bs
-                    (adjust' i (fmap $ maybe (error "Scope disappeared") fst . viewr) es)
-                    (maybe (error "Rewrite disappeared") fst $ viewr rs)
-              t → stackError \p → p t <+> "is invalid rewrite"
-          )
-          prfTy
+      intoRewr = \case
+        Term (Pi QEra _ (Term (Builtin Any')) into) → (\(Rewrite locs lfromto) → (Rewrite (locs + 1) lfromto)) <$> intoRewr (unLambda into)
+        Term (App (Term (App (Term (Builtin Eq)) from)) to) → pure $ Rewrite 0 $ Lambda (from, to)
+        t → stackError \p → p t <+> "is not a valid rewrite"
+    stackLog \p → "(with rewrite" <+> p prfTy0 <> ")"
+    rewr ← intoRewr prfTy0
+    let
+      fInto cont = do
+        i ← getScopeId
+        modify \(Scopes bs es rs) → Scopes bs (adjust' i (fmap (|> ERewrite rewr)) es) (rs |> (i, rewr))
+        cont <* modify \(Scopes bs es rs) →
+          Scopes
+            bs
+            (adjust' i (fmap $ maybe (error "Scope disappeared") fst . viewr) es)
+            (maybe (error "Rewrite disappeared") fst $ viewr rs)
     withBlockLog inner case mode of
-      (_, Infer) → fInto id $ infer inner Infer
-      (e, Check ty) → fInto (const pure) $ infer inner . Check =<< normalize =<< fetchT (Dyn e ty)
+      (_, Infer) → fInto $ infer inner Infer
+      (e, Check ty) → fInto $ infer inner . Check =<< normalize =<< fetchT (Dyn e ty)
   (Lam q1 n1 bod, CheckL (Pi q2 n2 inT outT)) | q1 == q2 → checkDepLam q1 (n1 <|> n2) bod inT outT
   (term, CheckL (Pi QEra _ xTy yT)) → do
     xTy' ← fetchT xTy
@@ -766,7 +759,7 @@ instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) �
           (pos1, pos2) ← (,) <$> getCurrPos (scope1, sub1) <*> getCurrPos uni2
           if pos2 <= pos1
             then pure uni
-            else stackError \_ → "Attempting to asign existential to later introduced universal"
+            else stackError \_ → "Attempting to assign existential to later introduced universal"
         Term (App (Term (Builtin W)) a) → pure $ Term $ Term (Builtin W) `App` a
         (fDyn e → App f a) → do
           f' ← instMeta' locs =<< fetchT f

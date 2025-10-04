@@ -9,14 +9,15 @@ import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.State.Church (StateC, evalState)
 import Control.Carrier.Writer.Church (WriterC, runWriter)
 import Control.Effect.Empty (empty)
-import Control.Effect.State (State, get, modify)
+import Control.Effect.State (State, get, modify, state)
 import Control.Effect.Writer (tell)
+import Data.Bitraversable (bimapM)
 import Data.ByteString.Char8 (pack)
 import Data.Monoid (Any (..))
-import Data.RRBVector (Vector, deleteAt, findIndexL, ifoldr, splitAt, viewl, viewr, zip, (!?), (|>))
+import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, ifoldr, splitAt, take, viewl, viewr, zip, (!?), (<|), (|>))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, intercept, nestedByP, nestedByP', pTerm, parse, recordGet, render, traverseTermF)
-import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, to, toList, try, zip)
+import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, take, to, toList, try, zip)
 
 -- TODO: Erasure is wrong... Verify for \f. f @4
 
@@ -43,8 +44,15 @@ instance (Algebra sig m) ⇒ Algebra (Isolate :+: sig) (IsolateC m) where
 type Binding = (Quant, Maybe Ident, Maybe Term, Term)
 newtype Epoch = Epoch Int deriving (Show, Eq)
 
-data EEntry = EMarker | EVar !Int !(Either (Int, Term) Term) | EUniVar !Int | ERewrite !Term !Term deriving (Eq, Show)
-data Scopes = Scopes !(Vector Binding) !(Vector (Epoch, Vector EEntry)) !(Vector (Int, Term, Term)) -- Note: the `rs` vector is "just an index". Sad.
+data Rewrite = Rewrite !Int !(Lambda (Term, Term)) deriving (Eq, Show) -- (foralls, from, to)
+data EEntry
+  = EMarker
+  | EVar !Int !(Either (Int, Term) Term) -- ExVarId, valty
+  | EUniVar !Int
+  | ERewrite !Rewrite
+  deriving (Eq, Show)
+data Scopes = Scopes !(Vector Binding) !(Vector (Epoch, Vector EEntry)) !(Vector (Int, Rewrite)) -- (bindings, metas, index of rewrites from metas)
+-- Note: the `rs` vector is "just an index". Sad.
 
 data Dyn = Dyn !Epoch !Term
 type Context = State Scopes :+: Isolate
@@ -62,6 +70,30 @@ withBinding b act = do
       (maybe (error "Missing ex scope") fst $ viewr es)
       rs
   pure res
+
+{- | Executes action in context with some marked EEntry region, returns the transformed EEntry region.
+Basically, needed for EMarker + EVar pattern. Marker is needed to ensure the start is still identifiable.
+-}
+withMarked ∷ (Has Context sig m) ⇒ Vector EEntry → m a → m (Vector EEntry, a)
+withMarked orig act = do
+  scopeId ← getScopeId
+  modify @Scopes \(Scopes bs es rs) → Scopes bs (adjust' scopeId (fmap (<> (EMarker <| orig))) es) rs
+  res ← act
+  transformed ← state @Scopes \(Scopes bs exs rs) →
+    let
+      (exsB, (scopeE, scope)) = fromMaybe (error "Missing ex scope") $ viewr exs
+      (scope', transformed) =
+        fix
+          ( \rec →
+              viewr >>> \case
+                Just (rest, EMarker) → (rest, [])
+                Just (rest, entry) → (|> entry) <$> rec rest
+                Nothing → error "Marker disappeared"
+          )
+          scope
+     in
+      (Scopes bs (exsB |> (scopeE, scope')) rs, transformed)
+  pure (transformed, res)
 
 -- | Intensional equality.
 data EqRes
@@ -320,21 +352,69 @@ splitAt3 i v =
    in
     (bef, fst <$> aft, maybe [] snd aft)
 
+tryRewrite ∷ (Has Context sig m) ⇒ Rewrite → Term → m (Maybe Term)
+tryRewrite (Rewrite forallsCount lfromto) t = do
+  -- traceM $ "rewrite " <> tshow t <> " with " <> tshow lfromto
+  scopeId ← getScopeId
+  let
+    foralls = [-1, -2 .. (-forallsCount)]
+    exVars = Just . Term . ExVar . (scopeId,) <$> foralls
+  (resolvedForalls, res) ← withMarked ((`EVar` Right (Term $ Builtin Any')) <$> foralls) do
+    (from, to) ← bimapM (normalize' exVars) (normalize' exVars) $ unLambda lfromto
+    let
+      inst' foral with = modify @Scopes \(Scopes bs exs rs) →
+        Scopes
+          bs
+          ( adjust'
+              scopeId
+              ( \(Epoch e, entries) →
+                  let (bef, fromMaybe (error "impossible") → target, aft) =
+                        splitAt3
+                          ( fromMaybe (error "Metavariable disappeared")
+                              $ findIndexL
+                                ( \case
+                                    EVar i _ → i == foral
+                                    _ → False
+                                )
+                                entries
+                          )
+                          entries
+                   in case target of
+                        EVar _ (Right (Term (Builtin Any'))) → (Epoch $ e + 1, bef <> [EVar foral $ Left (0, with)] <> aft)
+                        _ → error "Attempted to re-instantiate meta"
+              )
+              exs
+          )
+          rs
+      inst = curry \case
+        ((scopeId2, foral), with) | scopeId2 == scopeId, foral < 0 → inst' foral with
+        _ → send Infect
+    isEq' inst from t >>= \case
+      EqYes → Just <$> normalize to
+      _ → pure Nothing
+  for_ resolvedForalls \case
+    EVar _ (Left _) → pure ()
+    _ → error "Unresolved in rewrite"
+  pure res
+
 traverseNormTermF ∷ (Has Context sig m) ⇒ (Vector (Maybe Term) → Term → m Term) → Vector (Maybe Term) → TermF Term → m Term
 traverseNormTermF c locals t0 = rewr =<< trav
  where
   rewr res = do
+    -- traceM "Rewriting"
     scope ← getScopeId
-    Scopes _ _ rs ← get
-    foldr
-      ( \(i, from, to) rec → do
+    Scopes _ _ rs00 ← get
+    ifoldr
+      ( \rewrI (i, Rewrite forallsCount lfromto) rec → do
+          Scopes _ _ rs0 ← get
+          modify \(Scopes bs exs rs) → Scopes bs exs $ take rewrI rs
           let nest = i - scope + length locals - countErasedLocals
-          case isEq (nestedByP from nest) res of
-            EqYes → pure $ nestedByP to nest
-            _ → rec
+          replacement ← tryRewrite (Rewrite forallsCount $ Lambda $ bimap (`nestedByP` nest) (`nestedByP` nest) $ unLambda lfromto) res
+          modify \(Scopes bs exs _rs) → Scopes bs exs rs0
+          maybe rec pure replacement
       )
       (pure res)
-      rs
+      rs00
   trav = case t0 of
     BuiltinsVar → pure builtinsVar
     Lam QEra _ body → c (locals |> Just undefined) $ unLambda body -- TODO: Total?

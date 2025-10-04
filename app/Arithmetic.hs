@@ -6,7 +6,7 @@ import Data.Foldable1 (foldl1')
 import Data.Functor.Classes (Ord1 (liftCompare))
 import Data.RRBVector (Vector, viewl, viewr)
 import GHC.IsList (IsList (..))
-import Parser (Bits (..), BuiltinT (..), Fields (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), pattern IntND, pattern Op2)
+import Parser (BuiltinT (..), Fields (..), Lambda (..), Quant (..), Term (..), TermF (..), pattern IntND, pattern Op2)
 import RIO hiding (Vector, toList)
 
 compareTerm ∷ Term → Term → Ordering
