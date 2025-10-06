@@ -1,3 +1,5 @@
+-- GHC 9.12 spends minutes optimising this module otherwise
+{-# OPTIONS_GHC -O0 #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 {-# HLINT ignore "Use const" #-}
