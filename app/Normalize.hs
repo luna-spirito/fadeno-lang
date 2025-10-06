@@ -6,44 +6,27 @@ module Normalize where
 import Arithmetic (normalizePoly)
 import Control.Algebra
 import Control.Carrier.Empty.Church (runEmpty)
-import Control.Carrier.State.Church (StateC, evalState)
-import Control.Carrier.Writer.Church (WriterC, runWriter)
+import Control.Carrier.State.Church (StateC, evalState, put, runState)
 import Control.Effect.Empty (empty)
 import Control.Effect.State (State, get, modify, state)
-import Control.Effect.Writer (tell)
 import Data.Bitraversable (bimapM)
 import Data.ByteString.Char8 (pack)
-import Data.Monoid (Any (..))
 import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, ifoldr, splitAt, take, viewl, viewr, zip, (!?), (<|), (|>))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, intercept, nestedByP, nestedByP', pTerm, parse, recordGet, render, traverseTermF)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, nestedByP, nestedByP', pTerm, parse, recordGet, render, traverseTermF)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, take, to, toList, try, zip)
 
 -- TODO: Erasure is wrong... Verify for \f. f @4
 
--- Like Throw/Catch, but doesn't abort the computation.
--- More of crutch I guess...
-data Isolate m a where
-  Isolate ∷ m a → m a → Isolate m a
-  Infect ∷ Isolate m ()
-newtype IsolateC m a = IsolateC {unIsolateC ∷ WriterC Any m a}
-  deriving (Functor, Applicative, Monad)
-runIsolate ∷ (Applicative m) ⇒ IsolateC m a → m a
-runIsolate (IsolateC act) = runWriter (\_ → pure) act
-
-instance (Algebra sig m) ⇒ Algebra (Isolate :+: sig) (IsolateC m) where
-  alg hdl sig ctx = IsolateC case sig of
-    L (Isolate act err) → do
-      (Any infected, res) ← intercept @Any $ unIsolateC $ hdl $ act <$ ctx
-      if infected
-        then unIsolateC $ hdl $ err <$ ctx
-        else pure res
-    L Infect → tell (Any True) $> ctx
-    R other → alg (unIsolateC . hdl) (R other) ctx
+-- | Intensional equality.
+data EqRes
+  = EqYes -- provably eq
+  | EqNot -- provably uneq
+  | EqUnknown
+  deriving (Eq)
 
 type Binding = (Quant, Maybe Ident, Maybe Term, Term)
 newtype Epoch = Epoch Int deriving (Show, Eq)
-
 data Rewrite = Rewrite !Int !(Lambda (Term, Term)) deriving (Eq, Show) -- (foralls, from, to)
 data EEntry
   = EMarker
@@ -55,7 +38,14 @@ data Scopes = Scopes !(Vector Binding) !(Vector (Epoch, Vector EEntry)) !(Vector
 -- Note: the `rs` vector is "just an index". Sad.
 
 data Dyn = Dyn !Epoch !Term
-type Context = State Scopes :+: Isolate
+
+type Context = State Scopes
+
+-- | Perform an effectful operation, comitting changes after the operation iff not aborted and EqYes.
+transactContext ∷ (Has Context sig m) ⇒ StateC Scopes m EqRes → m EqRes
+transactContext act = do
+  ctx0 ∷ Scopes ← get
+  runState (\ctx res → when (res == EqYes) (put ctx) $> res) ctx0 act
 
 runContext' ∷ (Applicative m) ⇒ StateC Scopes m a → m a
 runContext' = evalState (Scopes [] [(Epoch 0, [])] [])
@@ -95,12 +85,6 @@ withMarked orig act = do
       (Scopes bs (exsB |> (scopeE, scope')) rs, transformed)
   pure (transformed, res)
 
--- | Intensional equality.
-data EqRes
-  = EqYes -- provably eq
-  | EqNot -- provably uneq
-  | EqUnknown
-
 getScopeId ∷ (Has Context sig m) ⇒ m Int
 getScopeId = (\(Scopes bs _es _rs) → length bs) <$> get @Scopes
 
@@ -128,15 +112,8 @@ fetchT = fetchWith normalize
 fetchLambda ∷ (Has Context sig m) ⇒ Lambda Dyn → m (Lambda Term)
 fetchLambda = fmap Lambda . fetchWith (normalize' [Nothing]) . unLambda
 
-isEq' ∷ (Has Context sig m) ⇒ ((Int, Int) → Term → m ()) → Term → Term → m EqRes
-isEq' f = \l0 r0 →
-  send
-    $ Isolate
-      ( go l0 r0 >>= \case
-          EqYes → pure EqYes
-          x → send Infect $> x
-      )
-      (pure EqNot)
+isEq' ∷ (Has Context sig m) ⇒ ((Int, Int) → Term → StateC Scopes m Bool) → Term → Term → m EqRes
+isEq' tryInst = \l0 r0 → transactContext $ go l0 r0
  where
   go l0 r0 =
     getEpoch >>= \e0 → case (fDyn e0 l0, fDyn e0 r0) of
@@ -148,8 +125,8 @@ isEq' f = \l0 r0 →
       (_, Lam QEra _ _) → undefined
       (BuiltinsVar, _) → undefined
       (_, BuiltinsVar) → undefined
-      (ExVar i, _) → f i r0 $> EqYes
-      (_, ExVar i) → f i l0 $> EqYes
+      (ExVar i, _) → inst i r0
+      (_, ExVar i) → inst i l0
       (Var a, Var b)
         | a == b → pure EqYes
       (Var _, _) → pure EqUnknown
@@ -217,6 +194,10 @@ isEq' f = \l0 r0 →
                   as0
                   bs0
       (FieldsLit{}, _) → pure EqNot
+  inst a b =
+    tryInst a b <&> \case
+      True → EqYes
+      False → EqUnknown
   isEqD a b = uncurry go =<< ((,) <$> a <*> b)
   -- TODO: FRow???
   try act cont =
@@ -229,7 +210,7 @@ isEq' f = \l0 r0 →
       x → pure x
 
 isEq ∷ Term → Term → EqRes
-isEq a b = run $ runIsolate $ runContext' $ runEmpty (pure EqUnknown) pure $ isEq' (\_ _ → empty) a b
+isEq a b = run $ runContext' $ runEmpty (pure EqUnknown) pure $ isEq' (\_ _ → empty) a b
 
 -- | Produces a non-dependent concat (of normalized terms)
 concat ∷ Term → Term → Term
@@ -277,7 +258,7 @@ data ListDropRes = TDFound !(Vector' Term) | TDMissing | TDUnknown
 -- | Processes application of `f` onto `a`.
 postApp ∷ Term → Term → Term
 postApp f0 a0 = case (unTerm f0, a0) of
-  (Lam QNorm _ bod, a) → run $ runContext' $ runIsolate $ applyLambda bod a -- TODO: This is wrong. Do we need fuel or something?
+  (Lam QNorm _ bod, a) → run $ runContext' $ applyLambda bod a -- TODO: This is wrong. Do we need fuel or something?
   (App (Term (Builtin RecordGet)) name1, a) →
     let
       search a' = case unconsField a' of
@@ -299,7 +280,7 @@ postApp f0 a0 = case (unTerm f0, a0) of
       (nTM, nV) = unplus n
      in
       -- TODO: causes constant re-normalization of `int+_fold` args.
-      (if nV > 0 then run . runIsolate . runContext' . normalize else id) -- TODO: This is wrong again?
+      (if nV > 0 then run . runContext' . normalize else id) -- TODO: This is wrong again?
         $ repeat nV (Term . App step)
         $ case nTM of
           Nothing → start
@@ -387,8 +368,8 @@ tryRewrite (Rewrite forallsCount lfromto) t = do
           )
           rs
       inst = curry \case
-        ((scopeId2, foral), with) | scopeId2 == scopeId, foral < 0 → inst' foral with
-        _ → send Infect
+        ((scopeId2, foral), with) | scopeId2 == scopeId, foral < 0 → (inst' foral with) $> True
+        _ → pure False
     isEq' inst from t >>= \case
       EqYes → Just <$> normalize to
       _ → pure Nothing
@@ -504,7 +485,7 @@ termQQ =
           term ← case parse ((QNorm,) . fst <$> scope) (pack s) of
             Left e → fail $ "termQQ: Parse error: " ++ show e
             Right t → pure t
-          let normed = run $ runIsolate $ runContext' $ normalize' (Just . snd <$> scope) term
+          let normed = run $ runContext' $ normalize' (Just . snd <$> scope) term
           ⟦normed⟧
       , quotePat = error "termQQ: No pattern support"
       , quoteType = error "termQQ: No type support"
@@ -514,7 +495,7 @@ termQQ =
 normalizeSource ∷ ByteString → IO ()
 normalizeSource x = do
   let t = either (error . show) id $ parse [] x
-  render $ pTerm [] $ run $ runIsolate $ runContext' $ normalize t
+  render $ pTerm [] $ run $ runContext' $ normalize t
 
 normalizeFile ∷ FilePath → IO ()
 normalizeFile x = normalizeSource =<< readFileBinary x

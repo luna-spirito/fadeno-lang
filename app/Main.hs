@@ -22,7 +22,7 @@ import Data.List (find)
 import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, replicate, splitAt, take, unzip, viewl, viewr, zip, (!?), (|>))
 import Data.Type.Equality (type (~))
 import GHC.Exts (IsList (..))
-import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Rewrite (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', numDecDispatch, runContext', runIsolate, splitAt3, termQQ, withBinding, withMarked)
+import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Rewrite (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', numDecDispatch, runContext', splitAt3, termQQ, withBinding, withMarked)
 import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parse, render, rowOf, traverseTermF, typ, typOf, pattern IntND, pattern Op2)
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
@@ -795,7 +795,7 @@ instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) �
             _ → r
 
 isEqUnify ∷ (Has Checker sig m) ⇒ Term → Term → m EqRes
-isEqUnify = isEq' instMeta
+isEqUnify = isEq' (\a b → instMeta a b $> True)
 
 -- -- TODO: Use isEq.
 
@@ -907,7 +907,7 @@ runChecker' =
 checkSource ∷ ByteString → IO ()
 checkSource source = do
   term ← either (fail . show) pure $ parse [] source
-  (stacks, res) ← runIsolate $ runStackAccC $ runChecker' $ infer term Infer
+  (stacks, res) ← runStackAccC $ runChecker' $ infer term Infer
   render case res of
     Left e →
       pStacks stacks
@@ -919,7 +919,7 @@ checkSource source = do
 checkSourceDebug ∷ ByteString → IO ()
 checkSourceDebug source = do
   term ← either (fail . show) pure $ parse [] source
-  res ← runIsolate $ runStackPrintC $ runChecker' $ infer term Infer
+  res ← runStackPrintC $ runChecker' $ infer term Infer
   render case res of
     Left e → annotate (color Red) "error: " <> e
     Right r → pTerm [] r
