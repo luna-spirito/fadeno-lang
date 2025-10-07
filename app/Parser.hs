@@ -24,6 +24,7 @@ module Parser (
   nestedBy',
   nestedByP,
   nestedByP',
+  parseQQ,
   pIdent,
   pQuant,
   pTerm,
@@ -53,6 +54,7 @@ import Data.Kind (Type)
 import Data.RRBVector (Vector, findIndexR, (!?), (|>))
 import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string, try)
 import GHC.Exts (IsList (..))
+import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (Lift (..))
 import Language.Haskell.TH.Syntax qualified as TH
 import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, encloseSep, layoutSmart, line, nest, softline, (<+>))
@@ -792,3 +794,16 @@ formatSource = render . pTerm [] <=< parseSource
 
 formatFile ∷ FilePath → IO ()
 formatFile = formatSource <=< readFileBinary
+
+parseQQ ∷ QuasiQuoter
+parseQQ =
+  QuasiQuoter
+    { quoteExp = \s → do
+        term ← case parse [] (BS.pack s) of
+          Left e → fail $ "parseQQ: Parse error: " ++ show e
+          Right t → pure t
+        ⟦term⟧
+    , quotePat = error "parseQQ: No pattern support"
+    , quoteType = error "parseQQ: No type support"
+    , quoteDec = error "parseQQ: No declaration support"
+    }

@@ -467,9 +467,9 @@ normalize = normalize' []
 applyLambda ∷ (Has Context sig m) ⇒ Lambda Term → Term → m Term
 applyLambda bod val = normalize' [Just val] $ unLambda bod
 
--- {- | Parse builtin
--- Just a variation of parseQQ that has all the builtins in scope from the start.
--- -}
+{- | Parse builtin
+Just a variation of parseQQ that has all the builtins in scope from the start.
+-}
 termQQ ∷ QuasiQuoter
 termQQ =
   let
