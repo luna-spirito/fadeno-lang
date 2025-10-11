@@ -22,6 +22,7 @@ import Data.List (find)
 import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, replicate, splitAt, take, unzip, viewl, viewr, zip, (!?), (|>))
 import Data.Type.Equality (type (~))
 import GHC.Exts (IsList (..))
+import NameGen
 import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Rewrite (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', numDecDispatch, runContext', splitAt3, termQQ, withBinding, withMarked)
 import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parse, render, rowOf, traverseTermF, typ, typOf, pattern IntND, pattern Op2)
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
