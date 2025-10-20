@@ -98,4 +98,4 @@ Dyn^ = \u. {( .Ty = Type^ u )} \self/ {( .val = self.Ty )}
 /: Fun (u : Int+) (Fun (Type^ u) -> Type^ u) -> Type^ (u + 1)
 Church = \u F. Fun {X : Type^ u} (Fun (F X) -> X) -> X
 
-in {}
+in { ._+_ = _+_ }

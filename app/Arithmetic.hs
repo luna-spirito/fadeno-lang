@@ -36,6 +36,7 @@ compareTerm = \(Term a) (Term b) →
     Concat{} → 14
     ExVar{} → 15
     UniVar{} → 16
+    Import{} → 17
 
   compareFields ∷ (x → x → Ordering) → (y → y → Ordering) → Fields x y → Fields x y → Ordering
   compareFields cmpX cmpY = curry \case
@@ -71,6 +72,8 @@ compareTerm = \(Term a) (Term b) →
     (App{}, _) → undefined
     (Var n1, Var n2) → compare n1 n2
     (Var _, _) → undefined
+    (Import _ a, Import _ b) → compare a b
+    (Import{}, _) → undefined
     (Sorry, Sorry) → EQ
     (Sorry, _) → undefined
     (Pi q1 _ inT1 outT1, Pi q2 _ inT2 outT2) →

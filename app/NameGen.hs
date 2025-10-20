@@ -7,7 +7,7 @@ import Control.Algebra
 import Control.Effect.State (State, state)
 import Data.ByteString qualified as B
 import Data.Char (ord)
-import Data.Foldable (minimum, minimumBy)
+import Data.Foldable (minimumBy)
 import Data.RRBVector
 import RIO hiding (Vector, zip, zipWith)
 

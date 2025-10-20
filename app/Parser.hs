@@ -24,6 +24,7 @@ module Parser (
   identOfBuiltin,
   intercept,
   loadModule,
+  loadModule',
   nested,
   nestedBy',
   nestedByP,
@@ -57,7 +58,7 @@ import Data.ByteString.Char8 qualified as BS
 import Data.Functor.Classes (Eq1, Ord1)
 import Data.Kind (Type)
 import Data.RRBVector (Vector, findIndexR, zip, (!?), (|>))
-import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfy, skipSatisfyAscii, skipSome, string, try)
+import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfyAscii, skipMany, skipSatisfy, skipSatisfyAscii, skipSome, string, try)
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (Lift (..))
@@ -819,8 +820,8 @@ type LoaderC = StateC (HashMap OsPath Int) (StateC N.UsedNames (StateC (Vector T
 newtype Module = Module (Vector Term) -- non-empty
 
 -- TODO: disallow trailing `/` in Import syntax!
-loadModule ∷ FilePath → IO (N.UsedNames, Module)
-loadModule = encodeUtf >=> runState (\t u → pure (u, Module t)) [] . execState N.emptyUsedNames . evalState mempty . new
+loadModule' ∷ OsPath → IO (N.UsedNames, Module)
+loadModule' = runState (\t u → pure (u, Module t)) [] . execState N.emptyUsedNames . evalState mempty . new
  where
   new ∷ OsPath → LoaderC ()
   new path = do
@@ -833,7 +834,8 @@ loadModule = encodeUtf >=> runState (\t u → pure (u, Module t)) [] . execState
     unTerm >>> \case
       Import Nothing subpath → do
         dir ← R.ask
-        let path = takeDirectory dir </> unsafeEncodeUtf (BS.unpack subpath)
+        subpath' ← sendIO $ encodeUtf (BS.unpack subpath)
+        let path = takeDirectory dir </> subpath'
         loaded ← get
         i ← case HM.lookup path loaded of
           Just i → pure i
@@ -851,6 +853,9 @@ loadModule = encodeUtf >=> runState (\t u → pure (u, Module t)) [] . execState
             _ → Nothing
         for_ label $ modify . N.use
         Term <$> traverseTermF subload (fmap Lambda . subload . unLambda) t
+
+loadModule ∷ FilePath → IO (N.UsedNames, Module)
+loadModule = encodeUtf >=> loadModule'
 
 formatModule ∷ Module → IO ()
 formatModule (Module m) =

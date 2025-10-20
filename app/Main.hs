@@ -2,7 +2,7 @@
 
 {-# HLINT ignore "Use const" #-}
 
-module Main (main, parseFile, formatFile, formatModule, loadModule, normalizeModule, checkModule, checkModuleDebug, compileModule, decompileModule) where
+module Main (main, parseFile, formatFile, formatModule, loadModule, normalizeModule, checkModule, checkModuleDebug, compileModule, decompileModule, build) where
 
 import Compiler (compileModule, decompileModule)
 import Control.Algebra
@@ -19,18 +19,19 @@ import Control.Effect.State (get, modify, put, state)
 import Control.Effect.Throw (Throw)
 import Control.Effect.Writer (Writer, censor, tell)
 import Data.Bitraversable (bimapM)
-import Data.ByteString.Char8 (pack)
 import Data.Foldable (foldlM)
 import Data.List (find)
 import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, replicate, splitAt, take, unzip, viewl, viewr, zip, (!?), (|>))
-import Data.Type.Equality (type (~))
 import GHC.Exts (IsList (..))
 import NameGen
 import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Imports (..), Rewrite (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', normalizeModule, numDecDispatch, runSubContext, splitAt3, termQQ, withBinding, withMarked)
-import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), Module (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parse, parseFile, render, rowOf, traverseTermF, typ, typOf, pattern IntND, pattern Op2)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), Module (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, loadModule', nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parseFile, render, rowOf, traverseTermF, typ, typOf, pattern IntND, pattern Op2)
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, replicate, runReader, take, to, toList, zip)
+import Ser (serializeCompileResult)
+import System.File.OsPath (writeFile')
+import System.OsPath (encodeUtf, replaceExtension, unsafeEncodeUtf)
 
 -- TODO: Permit inference of dependent Pis?
 -- TODO: Concat uncomfortably replicates Pi.
@@ -917,6 +918,16 @@ checkModule (names, m) = do
         <> annotate (color Red) "error: "
         <> e
     Right r → pTerm [] r
+
+-- Loads, checks, builds
+build ∷ FilePath → IO ()
+build path = do
+  path' ← encodeUtf path
+  (names, m) ← loadModule' path'
+  checkModule (names, m)
+  writeFile' (path' `replaceExtension` (unsafeEncodeUtf ".fadobj"))
+    $ serializeCompileResult
+    $ compileModule m
 
 checkModuleDebug ∷ (UsedNames, Module) → IO ()
 checkModuleDebug (names, m) = do
