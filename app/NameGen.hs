@@ -11,8 +11,6 @@ import Data.Foldable (minimum, minimumBy)
 import Data.RRBVector
 import RIO hiding (Vector, zip, zipWith)
 
-newtype Name = Name ByteString deriving (Show)
-
 letters ∷ Vector Word8
 letters = fromIntegral . ord <$> "abcdefghijklmnoprstuvz"
 
@@ -38,44 +36,34 @@ allowed aM bM c =
             not (a `elem` vowels && b `elem` vowels && c `elem` vowels)
               && not (a `elem` consonants && b `elem` consonants && c `elem` consonants)
 
-newtype UsedNames = UsedName (Vector (Int, Maybe UsedNames)) deriving (Show)
-emptyTaken ∷ Vector (Int, Maybe UsedNames)
-emptyTaken = (\_ → (0, Nothing)) <$> letters
-instance Semigroup UsedNames where
-  UsedName x <> UsedName y =
-    UsedName
-      $ zipWith
-        ( \(aCnt, a) (bCnt, b) →
-            ( aCnt + bCnt
-            , case (a, b) of
-                (Nothing, Nothing) → Nothing
-                _ → Just $ fromMaybe mempty a <> fromMaybe mempty b
-            )
-        )
-        x
-        y
-instance Monoid UsedNames where
-  mempty = UsedName emptyTaken
+newtype UsedNames = UsedNames (Vector (Int, Maybe UsedNames)) deriving (Show)
 
-mk ∷ ByteString → (Name, UsedNames)
-mk = \x → (Name x, fromMaybe mempty $ buildFor Nothing Nothing $ B.unpack x)
+emptyUsedNames ∷ UsedNames
+emptyUsedNames = UsedNames $ (\_ → (0, Nothing)) <$> letters
+
+use ∷ ByteString → UsedNames → UsedNames
+use = \i s → fromMaybe s $ go Nothing Nothing (Just s) (B.unpack i)
  where
-  buildFor ∷ Maybe Word8 → Maybe Word8 → [Word8] → Maybe UsedNames
-  buildFor aM bM = \case
-    [] → Just mempty
+  go ∷ Maybe Word8 → Maybe Word8 → Maybe UsedNames → [Word8] → Maybe UsedNames
+  go aM bM oldM = \case
+    [] → Just $ fromMaybe emptyUsedNames oldM
     (x : xs)
       | Just letterI ← findIndexL (== x) letters
       , allowed aM bM x →
-          (\next → UsedName $ adjust' letterI (\_ → (1, Just next)) emptyTaken) <$> buildFor bM (Just x) xs
+          let
+            (UsedNames old) = fromMaybe emptyUsedNames oldM
+            (innerCnt0, inner0) = fromMaybe (error "impossible") $ old !? letterI
+           in
+            (\inner → UsedNames $ adjust' letterI (\_ → (innerCnt0 + 1, Just inner)) old) <$> go bM (Just x) inner0 xs
     _ → Nothing
 
-gen ∷ UsedNames → (UsedNames, Name)
-gen = second Name . go Nothing Nothing . Just
+gen ∷ UsedNames → (UsedNames, ByteString)
+gen = go Nothing Nothing . Just
  where
   go ∷ Maybe Word8 → Maybe Word8 → Maybe UsedNames → (UsedNames, ByteString)
   go aM bM = \case
-    Nothing → (UsedName emptyTaken, "")
-    Just (UsedName taken) →
+    Nothing → (emptyUsedNames, "")
+    Just (UsedNames taken) →
       let
         cmpLetters l r = case (allowed aM bM l, allowed aM bM r) of
           (False, _) → GT
@@ -86,7 +74,7 @@ gen = second Name . go Nothing Nothing . Just
             $ zip (zip [0 .. length letters - 1] letters) taken
         (new, res0) = go bM (Just bestLetter) old
        in
-        (UsedName $ adjust' bestI (\_ → (oldCnt + 1, Just new)) taken, bestLetter `B.cons` res0)
+        (UsedNames $ adjust' bestI (\_ → (oldCnt + 1, Just new)) taken, bestLetter `B.cons` res0)
 
-genM ∷ (Has (State UsedNames) sig m) ⇒ m Name
+genM ∷ (Has (State UsedNames) sig m) ⇒ m ByteString
 genM = state gen

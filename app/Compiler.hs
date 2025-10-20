@@ -9,7 +9,8 @@ import Control.Carrier.Writer.Church (WriterC, execWriter, tell)
 import Control.Effect.Empty (Empty, empty)
 import Control.Effect.State (modify, state)
 import Control.Monad (replicateM)
-import Data.Foldable (foldl)
+import Data.ByteString.Char8 (pack)
+import Data.Foldable (Foldable (foldr'), foldl, foldrM)
 import Data.Foldable qualified as Foldable
 import Data.IntMap.Strict qualified as IM
 import Data.IntSet qualified as IS
@@ -17,14 +18,15 @@ import Data.List qualified as List
 import Data.RRBVector (Vector, drop, ifoldl, ifoldl', imap, replicate, reverse, splitAt, take, viewl, viewr, zip, (!?), (<|), (|>))
 import Data.Serialize qualified as S
 import GHC.Exts (IsList (..))
+import NameGen (UsedNames, emptyUsedNames, genM)
 import Normalize (splitAt3)
-import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), nestedByP, traverseTermF)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), Module (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), freshIdent, nestedByP, traverseTermF)
 import RIO hiding (Vector, ask, drop, local, replicate, reverse, runReader, take, toList, zip)
 import RIO.ByteString qualified as B
 import RIO.HashMap qualified as HM
 
--- Unfortunately, not a rewrite', since this just erases & is not meant to
--- simplify anything
+-- KEEPS Import's
+-- Unfortunately, not a rewrite', since this just erases & is not meant to simplify anything.
 erase ∷ Vector Bool → Term → Term
 erase reals =
   unTerm >>> \case
@@ -73,6 +75,7 @@ data Value
     VBuiltinsVar
   | VBuiltin !BuiltinT
   | VPanic
+  | VImport !Int64
   deriving
     ( -- | Pi !Quant !Term !(Either (Ident, Lambda Term) Term)
       -- | Concat !Term !(Either (Ident, Lambda Term) Term)
@@ -104,7 +107,7 @@ type RawTag = Ident
 type TagSet = IntMap Word8
 
 type CodeGen = StateC (Vector Bool) (WriterC (Vector Instr) Identity) () -- True where slot represents a variable
-data Module = MEmpty | MConst !Value | MGen !CodeGen
+data Code = CEmpty | CConst !Value | CGen !CodeGen
 
 -- | Track a new push to the stack, without actually emitting instructions.
 trackPush ∷ Bool → CodeGen
@@ -130,17 +133,17 @@ instr x = do
     IMkQRecord _ n → trackPop n *> trackPush False
   tell @(Vector Instr) [x]
 
-toCodeGen ∷ Module → CodeGen
+toCodeGen ∷ Code → CodeGen
 toCodeGen = \case
-  MConst x → instr $ IPush x
-  MGen gen → gen
-  MEmpty → pure ()
-instance Semigroup Module where
-  MEmpty <> b = b
-  a <> MEmpty = a
-  (toCodeGen → genA) <> (toCodeGen → genB) = MGen $ genA *> genB
-instance Monoid Module where
-  mempty = MEmpty
+  CConst x → instr $ IPush x
+  CGen gen → gen
+  CEmpty → pure ()
+instance Semigroup Code where
+  CEmpty <> b = b
+  a <> CEmpty = a
+  (toCodeGen → genA) <> (toCodeGen → genB) = CGen $ genA *> genB
+instance Monoid Code where
+  mempty = CEmpty
 
 execCodeGen ∷ Vector Bool → CodeGen → Vector Instr
 execCodeGen ctx act = run $ execWriter $ evalState ctx act
@@ -178,9 +181,9 @@ mkTagSet keyvalues = do
   let organized = foldl' (\acc (k, v) → IM.alter (Just . (|> v) . fromMaybe []) (fromIntegral k) acc) IM.empty keyvalues
   (,snd =<< fromList (IM.toAscList organized)) <$> registry (fromIntegral @_ @Word8 . length <$> organized)
 
-toConstM ∷ Module → Maybe Value
+toConstM ∷ Code → Maybe Value
 toConstM = \case
-  MConst x → Just x
+  CConst x → Just x
   _ → Nothing
 
 toTagM ∷ Value → Maybe Word64
@@ -189,39 +192,39 @@ toTagM = \case
   _ → Nothing
 
 -- compiles erased
-compile' ∷ (Has Compile sig m) ⇒ Term → m Module
+compile' ∷ (Has Compile sig m) ⇒ Term → m Code
 compile' =
   unTerm >>> \case
-    NumLit x → pure $ MConst $ VNum $ fromIntegral x
-    TagLit tag → MConst . VTag <$> registry tag
-    BoolLit x → pure $ MConst $ VBool x
+    NumLit x → pure $ CConst $ VNum $ fromIntegral x
+    TagLit tag → CConst . VTag <$> registry tag
+    BoolLit x → pure $ CConst $ VBool x
     ListLit (Vector' entries) → do
       values0 ← for entries compile'
       pure case traverse toConstM values0 of
-        Nothing → fold values0 <> MGen (instr $ IMkList $ fromIntegral $ length entries)
-        Just values → MConst $ VList values
+        Nothing → fold values0 <> CGen (instr $ IMkList $ fromIntegral $ length entries)
+        Just values → CConst $ VList values
     FieldsLit (FRecord ()) (Vector' entries) → do
       kv0 ← for entries \(k, v) → (,) <$> compile' k <*> compile' v
       let n = fromIntegral $ length entries
       (values, mkRecord) ← case traverse (\(k, v) → (,v) <$> (toConstM k >>= toTagM)) kv0 of
-        Nothing → pure (snd <$> kv0, foldMap fst kv0 <> MGen (instr $ IMkRecord $ fromIntegral $ length entries))
+        Nothing → pure (snd <$> kv0, foldMap fst kv0 <> CGen (instr $ IMkRecord $ fromIntegral $ length entries))
         Just kv → do
           (ts, values) ← mkTagSet kv
-          pure (values, MGen $ instr $ IMkQRecord ts n)
-      pure $ fold values <> mkRecord -- ts <> MGen (instr $ IMkRecord $ fromIntegral $ length entries)
-    FieldsLit (FRow ()) _ → error "TODO"
-    BuiltinsVar → pure $ MConst VBuiltinsVar
-    Builtin x → pure $ MConst $ VBuiltin x
+          pure (values, CGen $ instr $ IMkQRecord ts n)
+      pure $ fold values <> mkRecord -- ts <> CGen (instr $ IMkRecord $ fromIntegral $ length entries)
+    FieldsLit (FRow ()) _ → pure $ CConst VPanic
+    BuiltinsVar → pure $ CConst VBuiltinsVar
+    Builtin x → pure $ CConst $ VBuiltin x
     Lam QNorm _ body → do
       let
         (n, body') = getLambdaN body
         (captures, body'') = lambdaToClosure n body'
       bodyModule ← compile' $ unLambda body''
       let
-        captures' = MGen . icopy <$> IS.toAscList captures
+        captures' = CGen . icopy <$> IS.toDescList captures
         closureVars = replicate (fromIntegral n + IS.size captures) True
         closure =
-          MGen
+          CGen
             $ instr
             $ IClosure
               (fromIntegral $ IS.size captures)
@@ -232,11 +235,11 @@ compile' =
     Lam QEra _ _ → error "erased"
     ((unTerm → (unTerm → Term (Builtin If) `App` b) `App` t) `App` f) →
       compile' b >>= \case
-        MConst (VBool b') → compile' if b' then t else f
+        CConst (VBool b') → compile' if b' then t else f
         b' → do
           t' ← compile' t
           f' ← compile' f
-          pure $ MGen do
+          pure $ CGen do
             ctx ← get
             toCodeGen b'
             instr $ IIfElse (execCodeGen ctx $ toCodeGen t') (execCodeGen ctx $ toCodeGen f')
@@ -244,34 +247,38 @@ compile' =
       let (f', args) = getAppN (f, [a])
       args' ← for args compile'
       f'' ← compile' f'
-      pure $ fold args' <> f'' <> MGen (instr $ IApp $ fromIntegral $ length args)
+      pure $ fold args' <> f'' <> CGen (instr $ IApp $ fromIntegral $ length args)
     AppErased{} → undefined
-    Var x → pure $ MGen $ icopy x
+    Var x → pure $ CGen $ icopy x
     Block (BlockLet QNorm _n _ty val body) → do
       val' ← compile' val
       body' ← compile' $ unLambda body
-      pure $ val' <> MGen (instr $ IPushVar) <> body' <> MGen (instr IPopVar)
+      pure $ val' <> CGen (instr IPushVar) <> body' <> CGen (instr IPopVar)
+    Import (fromMaybe (error "unresolved import") → n) _ → pure $ CConst $ VImport $ fromIntegral n
     Block (BlockLet QEra _ _ _ _) → error "erased"
     Block (BlockRewrite _ _) → error "erased"
-    Sorry → pure $ MConst VPanic
-    Pi{} → error "TODO"
-    Concat{} → error "TODO"
+    Sorry → pure $ CConst VPanic
+    Pi{} → pure $ CConst VPanic -- TODO
+    Concat{} → pure $ CConst VPanic -- TODO
     ExVar{} → error "erased"
     UniVar{} → error "erased"
 
-type CompileResult = ((HashMap Ident Word64, HashMap TagSet Word64), Vector Instr)
+type CompileResult = ((HashMap Ident Word64, HashMap TagSet Word64), Vector (Vector Instr))
 
-compile ∷ Term → CompileResult
-compile term =
-  let (tags, (tagSets, m)) = run $ runState @(HashMap Ident Word64) (curry pure) mempty $ runState @(HashMap TagSet Word64) (curry pure) mempty $ compile' term
-   in ((tags, tagSets), execCodeGen [] $ toCodeGen m)
+compileModule ∷ Module → CompileResult
+compileModule (Module m) =
+  let (tags, (tagSets, codes)) = run $ runState @(HashMap Ident Word64) (curry pure) mempty $ runState @(HashMap TagSet Word64) (curry pure) mempty $ for m (compile' . erase [])
+   in ((tags, tagSets), execCodeGen [] . toCodeGen <$> codes)
 
-decompile ∷ CompileResult → Maybe Term
-decompile ((tags0, tagSets0), instrs00) =
+decompileModule ∷ CompileResult → Maybe Module
+decompileModule ((tags0, tagSets0), instrs00) =
   run
     $ runEmpty (pure Nothing) (pure . Just)
-    $ evalState @(Vector Instr) instrs00
-    $ evalState @(Vector (Maybe Term)) [] scope
+    $ evalState @UsedNames emptyUsedNames
+    $ Module
+    <$> for instrs00 \i →
+      evalState @(Vector Instr) i
+        $ evalState @(Vector (Maybe Term)) [] scope
  where
   tags = IM.fromList $ (\(a, b) → (fromIntegral b, a)) <$> toList tags0
   tagSets = IM.fromList $ (\(a, b) → (fromIntegral b, a)) <$> toList tagSets0
@@ -304,6 +311,7 @@ decompile ((tags0, tagSets0), instrs00) =
     VPanic → pure $ Term Sorry
     VTag t → decompileTag t
     VRecord tIdx values → mkRecord tIdx =<< traverse decompileValue values
+    VImport x → pure $ Term $ Import (Just $ fromIntegral x) (pack $ show x)
   subdecompile (stack ∷ Vector (Maybe Term)) instrs = do
     (stack0 ∷ Vector (Maybe Term), instrs0 ∷ Vector Instr) ← (,) <$> get <*> get
     put stack *> put instrs
@@ -319,8 +327,9 @@ decompile ((tags0, tagSets0), instrs00) =
           scope
         IPushVar → do
           val ← popStackVal
+          n ← freshIdent
           res ←
-            Term . Block . BlockLet QNorm Nothing Nothing val . Lambda <$> do
+            Term . Block . BlockLet QNorm (Just n) Nothing val . Lambda <$> do
               ctx0 ← get @(Vector (Maybe Term))
               put $ ctx0 |> Nothing
               scope <* put ctx0
@@ -346,10 +355,11 @@ decompile ((tags0, tagSets0), instrs00) =
           scope
         IClosure capturesN argsN lamInstrs → do
           captures ← popStackValLastN capturesN
-          res ←
-            flip (foldl' @[] \t _c → Term $ Lam QNorm Nothing $ Lambda t) [1 .. argsN]
-              <$> let lamStack = fmap Just captures <> replicate (fromIntegral argsN) Nothing
-                   in subdecompile lamStack lamInstrs
+          body0 ←
+            let lamStack = fmap Just captures <> replicate (fromIntegral argsN) Nothing
+             in subdecompile lamStack lamInstrs
+          argNames ← for @Vector [1 .. argsN] \_ → freshIdent
+          let res = foldr' (\n → Term . Lam QNorm (Just n) . Lambda) body0 argNames
           pushStack $ Just res
           scope
         IIfElse tInstr fInstr → do
@@ -632,7 +642,7 @@ decompile ((tags0, tagSets0), instrs00) =
 -- compileFile ∷ FilePath → IO ()
 -- compileFile file = do
 --   parsed ← parseFile file
---   let (tags, unmerged) = runIdentity $ runState @(HashMap Ident Int) (curry pure) mempty $ execWriter @(Vector Instr) $ compile' parsed
+--   let (tags, unmerged) = runIdentity $ runState @(HashMap Ident Int) (curry pure) CEmpty $ execWriter @(Vector Instr) $ compile' parsed
 --   let (profiles, merged) = merge unmerged
 --   writeFileBinary (fromMaybe file (stripSuffix ".fad" file) <> ".fadobj") $ S.runPut do
 --     S.putListOf (\(Ident n op) → putB n *> S.put op) $ registryToList tags

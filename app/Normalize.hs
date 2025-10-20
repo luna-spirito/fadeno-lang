@@ -6,17 +6,22 @@ module Normalize where
 import Arithmetic (normalizePoly)
 import Control.Algebra
 import Control.Carrier.Empty.Church (runEmpty)
+import Control.Carrier.Reader (ReaderC, runReader)
 import Control.Carrier.State.Church (StateC, evalState, put, runState)
 import Control.Effect.Empty (empty)
+import Control.Effect.Reader (Reader, ask)
 import Control.Effect.State (State, get, modify, state)
 import Data.Bitraversable (bimapM)
 import Data.ByteString.Char8 (pack)
+import Data.Foldable (foldlM)
 import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, ifoldr, splitAt, take, viewl, viewr, zip, (!?), (<|), (|>))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, nestedByP, nestedByP', pTerm, parse, recordGet, render, traverseTermF)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), Module (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, nestedByP, nestedByP', pTerm, parse, recordGet, render, traverseTermF)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, take, to, toList, try, zip)
 
 -- TODO: Erasure is wrong... Verify for \f. f @4
+-- TODO: Add `Thunk` Term, make `normalize` have a pure-heart with the capability to delay normalizing of subterms as `Thunk ctx`
+-- Basically, we need to enrich term with information when it's needed, and `normalize` shouldn't normalize the term fully, instead just injecting Thunk's.
 
 -- | Intensional equality.
 data EqRes
@@ -39,7 +44,8 @@ data Scopes = Scopes !(Vector Binding) !(Vector (Epoch, Vector EEntry)) !(Vector
 
 data Dyn = Dyn !Epoch !Term
 
-type Context = State Scopes
+newtype Imports = Imports (Vector (Term, Term)) -- (module, module type)
+type Context = Reader Imports :+: State Scopes
 
 -- | Perform an effectful operation, comitting changes after the operation iff not aborted and EqYes.
 transactContext ∷ (Has Context sig m) ⇒ StateC Scopes m EqRes → m EqRes
@@ -47,8 +53,8 @@ transactContext act = do
   ctx0 ∷ Scopes ← get
   runState (\ctx res → when (res == EqYes) (put ctx) $> res) ctx0 act
 
-runContext' ∷ (Applicative m) ⇒ StateC Scopes m a → m a
-runContext' = evalState (Scopes [] [(Epoch 0, [])] [])
+runSubContext ∷ (Applicative m) ⇒ Imports → ReaderC Imports (StateC Scopes m) a → m a
+runSubContext i = evalState (Scopes [] [(Epoch 0, [])] []) . runReader i
 
 withBinding ∷ (Has Context sig m) ⇒ Binding → m a → m a
 withBinding b act = do
@@ -125,6 +131,8 @@ isEq' tryInst = \l0 r0 → transactContext $ go l0 r0
       (_, Lam QEra _ _) → undefined
       (BuiltinsVar, _) → undefined
       (_, BuiltinsVar) → undefined
+      (Import{}, _) → undefined
+      (_, Import{}) → undefined
       (ExVar i, _) → inst i r0
       (_, ExVar i) → inst i l0
       (Var a, Var b)
@@ -210,7 +218,7 @@ isEq' tryInst = \l0 r0 → transactContext $ go l0 r0
       x → pure x
 
 isEq ∷ Term → Term → EqRes
-isEq a b = run $ runContext' $ runEmpty (pure EqUnknown) pure $ isEq' (\_ _ → empty) a b
+isEq a b = run $ runSubContext (Imports []) $ runEmpty (pure EqUnknown) pure $ isEq' (\_ _ → empty) a b
 
 -- | Produces a non-dependent concat (of normalized terms)
 concat ∷ Term → Term → Term
@@ -255,10 +263,13 @@ numDecDispatch (NumDesc signed bits) f inf = case (signed, bits) of
 
 data ListDropRes = TDFound !(Vector' Term) | TDMissing | TDUnknown
 
+-- TODO: Switch to monadic
+
 -- | Processes application of `f` onto `a`.
 postApp ∷ Term → Term → Term
 postApp f0 a0 = case (unTerm f0, a0) of
-  (Lam QNorm _ bod, a) → run $ runContext' $ applyLambda bod a -- TODO: This is wrong. Do we need fuel or something?
+  (Lam QNorm _ bod, a) → run $ runSubContext (Imports []) $ applyLambda bod a -- TODO: This is wrong. Do we need fuel or something?
+  -- TODO: This is obviously wrong since no rewrites?
   (App (Term (Builtin RecordGet)) name1, a) →
     let
       search a' = case unconsField a' of
@@ -280,7 +291,7 @@ postApp f0 a0 = case (unTerm f0, a0) of
       (nTM, nV) = unplus n
      in
       -- TODO: causes constant re-normalization of `int+_fold` args.
-      (if nV > 0 then run . runContext' . normalize else id) -- TODO: This is wrong again?
+      (if nV > 0 then run . runSubContext (Imports []) . normalize else id) -- TODO: This is wrong again?
         $ repeat nV (Term . App step)
         $ case nTM of
           Nothing → start
@@ -368,7 +379,7 @@ tryRewrite (Rewrite forallsCount lfromto) t = do
           )
           rs
       inst = curry \case
-        ((scopeId2, foral), with) | scopeId2 == scopeId, foral < 0 → (inst' foral with) $> True
+        ((scopeId2, foral), with) | scopeId2 == scopeId, foral < 0 → inst' foral with $> True
         _ → pure False
     isEq' inst from t >>= \case
       EqYes → Just <$> normalize to
@@ -445,6 +456,9 @@ traverseNormTermF c locals t0 = rewr =<< trav
       case valtyM of
         Just (Left val) → pure $ uncurry nestedByP' val $ length locals + (length globals - i) -- no -1 because of ridiculous scope counting
         _ → pure $ Term $ ExVar (i, subi)
+    Import (fromMaybe (error "Unresolved import") → n) _ → do
+      Imports imps ← ask
+      pure $ maybe (error "Incomplete context") fst $ imps !? n
     _ → Term <$> traverseTermF (c locals) (fmap Lambda . c (locals |> Nothing) . unLambda) t0
   countErasedLocals = countErased locals
   countErased = foldl' (\acc e → if isJust e then acc + 1 else acc) 0
@@ -485,7 +499,7 @@ termQQ =
           term ← case parse ((QNorm,) . fst <$> scope) (pack s) of
             Left e → fail $ "termQQ: Parse error: " ++ show e
             Right t → pure t
-          let normed = run $ runContext' $ normalize' (Just . snd <$> scope) term
+          let normed = run $ runSubContext (Imports []) $ normalize' (Just . snd <$> scope) term
           ⟦normed⟧
       , quotePat = error "termQQ: No pattern support"
       , quoteType = error "termQQ: No type support"
@@ -495,7 +509,13 @@ termQQ =
 normalizeSource ∷ ByteString → IO ()
 normalizeSource x = do
   let t = either (error . show) id $ parse [] x
-  render $ pTerm [] $ run $ runContext' $ normalize t
+  render $ pTerm [] $ run $ runSubContext (Imports []) $ normalize t
 
 normalizeFile ∷ FilePath → IO ()
 normalizeFile x = normalizeSource =<< readFileBinary x
+
+normalizeModule ∷ Module → Term
+normalizeModule = \(Module m) →
+  fst $ maybe (error "module must be non-empty") snd $ viewr $ run $ foldlM normSubModule [] m
+ where
+  normSubModule xs x = (xs |>) . (,Term $ Builtin Any') <$> runSubContext (Imports xs) (normalize x)

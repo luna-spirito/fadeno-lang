@@ -1,13 +1,15 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 {-# HLINT ignore "Use const" #-}
-module Main where
 
+module Main (main, parseFile, formatFile, formatModule, loadModule, normalizeModule, checkModule, checkModuleDebug, compileModule, decompileModule) where
+
+import Compiler (compileModule, decompileModule)
 import Control.Algebra
 import Control.Carrier.Error.Church (ErrorC, runError)
 import Control.Carrier.Fresh.Church (FreshC, evalFresh)
 import Control.Carrier.Reader (ReaderC, runReader)
-import Control.Carrier.State.Church (StateC)
+import Control.Carrier.State.Church (State, StateC, evalState)
 import Control.Carrier.Writer.Church (WriterC, runWriter)
 import Control.Effect.Error (throwError)
 import Control.Effect.Fresh (Fresh, fresh)
@@ -18,13 +20,14 @@ import Control.Effect.Throw (Throw)
 import Control.Effect.Writer (Writer, censor, tell)
 import Data.Bitraversable (bimapM)
 import Data.ByteString.Char8 (pack)
+import Data.Foldable (foldlM)
 import Data.List (find)
 import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, replicate, splitAt, take, unzip, viewl, viewr, zip, (!?), (|>))
 import Data.Type.Equality (type (~))
 import GHC.Exts (IsList (..))
 import NameGen
-import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Rewrite (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', numDecDispatch, runContext', splitAt3, termQQ, withBinding, withMarked)
-import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parse, render, rowOf, traverseTermF, typ, typOf, pattern IntND, pattern Op2)
+import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Imports (..), Rewrite (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', normalizeModule, numDecDispatch, runSubContext, splitAt3, termQQ, withBinding, withMarked)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), Module (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parse, parseFile, render, rowOf, traverseTermF, typ, typOf, pattern IntND, pattern Op2)
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, replicate, runReader, take, to, toList, zip)
@@ -33,7 +36,7 @@ import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, repli
 -- TODO: Concat uncomfortably replicates Pi.
 -- TODO: There are few deadly sins (Infer → Check conversions) that should be removed. Infer should never invoke check! (Pi/inferList/???)
 
-type Checker = Context :+: Fresh :+: StackLog :+: Throw (Doc AnsiStyle)
+type Checker = Context :+: Fresh :+: State UsedNames :+: StackLog :+: Throw (Doc AnsiStyle)
 
 -- | Debug stack
 data StackLog m a where
@@ -183,9 +186,6 @@ scopedUniVar mapTerm ty act = do
   res ← act (Term $ UniVar (scope1, sub1) ty) >>= mapTerm ensureNotOcc
   modify @Scopes \(Scopes bs es rs) → Scopes bs (adjust' scope1 (fmap $ maybe (error "impossible") fst . viewr) es) rs
   pure res
-
-freshIdent ∷ (Has Fresh sig m) ⇒ m Ident
-freshIdent = (`Ident` False) . ("/" <>) . pack . show <$> fresh
 
 scopedExVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → Term → (Term → m a) → m a
 scopedExVar mapTerm ty0 act = do
@@ -358,11 +358,6 @@ withEra act = do
       rs
   pure res
 
--- mapTermFor ∷ (Applicative f) ⇒ InferMode a → ((Term → f Term) → a → f a)
--- mapTermFor = \case
---   Infer → id
---   Check _ → const pure
-
 -- | Check, instantly unwrapping a layer
 pattern CheckL ∷ () ⇒ (a2 ~ ()) ⇒ TermF Dyn → (Epoch, InferMode a2)
 pattern CheckL x ← (e, Check (fDyn e → x))
@@ -416,7 +411,7 @@ rowGet mapTerm tag cont = go -- tag is source term
     withMono
       ( \f → \case
           LookupFound a → LookupFound <$> mapTerm f a
-          LookupMissing a → pure $ LookupMissing a -- erased anyway, no point of mapping
+          LookupMissing tags → LookupMissing <$> for tags (dyn <=< f <=< fetchT) -- TODO: needed?
           LookupUnknown → pure LookupUnknown
       )
       ( do
@@ -536,6 +531,9 @@ infer = logAndRunInfer $ \case
     withBlockLog inner case mode of
       (_, Infer) → fInto $ infer inner Infer
       (e, Check ty) → fInto $ infer inner . Check =<< normalize =<< fetchT (Dyn e ty)
+  (Import (fromMaybe (error "unresolved import") → n) _, InferL) → do
+    Imports imps ← ask
+    pure $ maybe (error "Incomplete context") snd $ imps !? n
   (Lam q1 n1 bod, CheckL (Pi q2 n2 inT outT)) | q1 == q2 → checkDepLam q1 (n1 <|> n2) bod inT outT
   (term, CheckL (Pi QEra _ xTy yT)) → do
     xTy' ← fetchT xTy
@@ -682,7 +680,6 @@ infer = logAndRunInfer $ \case
         pure (scopeid, ty')
     nestBinding exScope ty
   (Sorry, (_, Check k)) → stackLog \p → annotate (color Yellow) $ "sorry :" <+> p k
-  (t, (_, Infer)) → stackError \p → p $ Term t
   (t, (e, Check c)) → stackScope (\p → "check via infer" <+> p (Term t) <+> ":" <+> p c) do
     ty ← infer (Term t) Infer
     (ty `subtype`) =<< fetchT (Dyn e c)
@@ -899,16 +896,20 @@ subtype = \a b →
           EqYes → pure ()
           _ → stackError \p → "Subtype check failed, no rule applies for:" <+> p t1 <+> "<:" <+> p t2
 
-runChecker' ∷ (Applicative m) ⇒ FreshC (ErrorC e (StateC Scopes m)) a → m (Either e a)
-runChecker' =
-  runContext'
-    . runError (pure . Left) (pure . Right)
+runChecker' ∷ (Applicative m) ⇒ UsedNames → StateC UsedNames (FreshC (ErrorC e m)) a → m (Either e a)
+runChecker' n =
+  runError (pure . Left) (pure . Right)
     . evalFresh 0
+    . evalState n
 
-checkSource ∷ ByteString → IO ()
-checkSource source = do
-  term ← either (fail . show) pure $ parse [] source
-  (stacks, res) ← runStackAccC $ runChecker' $ infer term Infer
+checkModule' ∷ (Has (State UsedNames :+: Throw (Doc AnsiStyle) :+: Fresh :+: StackLog) sig m) ⇒ Module → m Term
+checkModule' = \(Module m) → snd . maybe (error "module must be non-empty") snd . viewr <$> foldlM checkSubModule [] m
+ where
+  checkSubModule xs x = (xs |>) <$> runSubContext (Imports xs) ((,) <$> normalize x <*> infer x Infer)
+
+checkModule ∷ (UsedNames, Module) → IO ()
+checkModule (names, m) = do
+  (stacks, res) ← runStackAccC $ runChecker' names $ checkModule' m
   render case res of
     Left e →
       pStacks stacks
@@ -917,19 +918,12 @@ checkSource source = do
         <> e
     Right r → pTerm [] r
 
-checkSourceDebug ∷ ByteString → IO ()
-checkSourceDebug source = do
-  term ← either (fail . show) pure $ parse [] source
-  res ← runStackPrintC $ runChecker' $ infer term Infer
+checkModuleDebug ∷ (UsedNames, Module) → IO ()
+checkModuleDebug (names, m) = do
+  res ← runStackPrintC $ runChecker' names $ checkModule' m
   render case res of
     Left e → annotate (color Red) "error: " <> e
     Right r → pTerm [] r
-
-checkFile ∷ FilePath → IO ()
-checkFile file = checkSource =<< readFileBinary file
-
-checkFileDebug ∷ FilePath → IO ()
-checkFileDebug file = checkSourceDebug =<< readFileBinary file
 
 main ∷ IO ()
 main = pure ()

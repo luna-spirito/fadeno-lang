@@ -1,0 +1,4 @@
+unpack ./std. _+_
+in \x y.
+  z = 4 + y
+  in \w. w + z + x

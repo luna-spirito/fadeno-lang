@@ -39,7 +39,9 @@ executable fadeno-lang
         template-haskell >= 2,
         hashable >= 1.5,
         rrb-vector >= 0.2,
-        cereal >= 0.5
+        cereal >= 0.5,
+        filepath >= 1.5,
+        file-io >= 0.1.5
     hs-source-dirs:   app
     default-language: GHC2021
 

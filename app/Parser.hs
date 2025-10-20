@@ -10,6 +10,7 @@ module Parser (
   Fields (..),
   Ident (..),
   Lambda (..),
+  Module (..),
   NumDesc (..),
   Quant (..),
   Term (..),
@@ -18,8 +19,11 @@ module Parser (
   builtinsList,
   eqOf,
   formatFile,
+  formatModule,
+  freshIdent,
   identOfBuiltin,
   intercept,
+  loadModule,
   nested,
   nestedBy',
   nestedByP,
@@ -43,23 +47,28 @@ module Parser (
 
 import Control.Algebra
 import Control.Carrier.Empty.Church (runEmpty)
-import Control.Carrier.Reader (runReader)
-import Control.Carrier.State.Church (evalState, get, modify)
+import Control.Carrier.Lift (sendIO)
+import Control.Carrier.Reader (ReaderC, runReader)
+import Control.Carrier.State.Church (State, StateC, evalState, execState, get, modify, runState)
 import Control.Carrier.Writer.Church (Writer, censor, listen)
 import Control.Effect.Empty qualified as E
 import Control.Effect.Reader qualified as R
 import Data.ByteString.Char8 qualified as BS
 import Data.Functor.Classes (Eq1, Ord1)
 import Data.Kind (Type)
-import Data.RRBVector (Vector, findIndexR, (!?), (|>))
-import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfyAscii, skipSome, string, try)
+import Data.RRBVector (Vector, findIndexR, zip, (!?), (|>))
+import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfy, satisfyAscii, skipMany, skipSatisfy, skipSatisfyAscii, skipSome, string, try)
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (Lift (..))
 import Language.Haskell.TH.Syntax qualified as TH
-import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, encloseSep, layoutSmart, line, nest, softline, (<+>))
+import NameGen qualified as N
+import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, encloseSep, layoutSmart, line, nest, softline, vsep, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
-import RIO hiding (Reader, Vector, ask, local, runReader, toList, try)
+import RIO hiding (Reader, Vector, ask, local, runReader, toList, try, zip)
+import RIO.HashMap qualified as HM
+import System.File.OsPath (readFile')
+import System.OsPath (OsPath, encodeUtf, takeDirectory, unsafeEncodeUtf, (</>))
 
 -- TODO ASAP: assocativity for operators. YeAh, TuRns oUT wE NeEd iT, wHo coUlD hAvE GuESseD?
 -- (6 - 4 - 2 ≠ 6 - (4 - 2))
@@ -231,6 +240,7 @@ data TermF a
   | -- Erased
     AppErased !a !a -- TODO: Maybe
   | Block !(BlockF a)
+  | Import !(Maybe Int {- resolved -}) !ByteString -- Erased from the perspective of `normalize`, kept by `compile`
   | -- Type-level
     Pi !Quant !(Maybe Ident) !a !(Lambda a) -- TODO: Demote Pi and Concat to builtins?
   | Concat !a !(Fields a (Maybe Ident, Lambda a))
@@ -293,8 +303,8 @@ number = token do
 
 -- TODO: block words from ident' as well?.. probably not.
 -- TODO: Convert blocklists to functions
-identSym ∷ Parser' Char
-identSym = satisfy \x → x `notElem` (" \\/\n(){}[].:|" ∷ String)
+identSym ∷ Parser' ()
+identSym = skipSatisfy \x → x `notElem` (" \\/\n(){}[].:|" ∷ Vector Char)
 
 -- Returns the identifier and whether it's an operator
 -- Expect the ident to start RIGHT NOW.
@@ -358,12 +368,19 @@ findVar name = do
        in pure $ Just (length vars - ind - 1, q, eOp)
     Nothing → pure Nothing
 
+localPathSym ∷ Parser' ()
+localPathSym = skipSatisfyAscii \x → x `elem` ("abcdefghijklmnopqrstuvwxyz/" ∷ Vector Char)
+
 -- 7
 parsePrim ∷ Parser' Term
 parsePrim = token do
   prim ←
     (Term . NumLit <$> number)
-      <|> (Term . TagLit <$> ($(char '.') *> (maybe failed pure =<< identRightNow)))
+      <|> ( $(char '.')
+              *> ( ($(char '/') *> (Term . Import Nothing <$> byteStringOf (skipSome localPathSym)))
+                    <|> (Term . TagLit <$> (maybe failed pure =<< identRightNow))
+                 )
+          )
       <|> (Term . BoolLit <$> notFollowedBy ((True <$ $(string "true")) <|> (False <$ $(string "false"))) identSym)
       <|> ( do
               -- Record parsing
@@ -569,6 +586,7 @@ traverseTermF c cNest = \case
   AppErased f a → AppErased <$> c f <*> c a
   Block (BlockLet q name ty val into) → Block <$> (BlockLet q name <$> traverse c ty <*> c val <*> cNest into)
   Block (BlockRewrite prf into) → Block <$> (BlockRewrite <$> c prf <*> c into)
+  Import resI x → pure $ Import resI x
   Pi q n inT outT → Pi q n <$> c inT <*> cNest outT
   Concat a b →
     Concat <$> c a <*> case b of
@@ -644,6 +662,7 @@ isSimple =
                  )
           App f a → complexity f *> complexity a
           AppErased f a → complexity f *> complexity a
+          Import _ _ → ping
           NumLit _ → ping
           TagLit _ → ping
           BoolLit _ → ping
@@ -768,6 +787,7 @@ pTerm' (fuse, oldPrec, vars) t0 =
             )
       ListLit vec → (5, encloseSep "[" "]" " | " $ pTerm' (FNo, 0, vars) <$> toList vec)
       Var x → (5, maybe ("#" <> pretty x) (\(_, i) → maybe "_" pIdent i) (vars !? (length vars - x - 1)))
+      Import _ x → (5, "./" <> pBS x)
       ExVar (s, i) → (5, "(exi#" <> pretty s <> "/" <> pretty i <> ")")
       UniVar (s, i) t → (5, "(uni#" <> pretty s <> "/" <> pretty i <+> ":" <+> pTerm' (FNo, 0, vars) t <> ")")
 
@@ -783,8 +803,8 @@ parse vars inp = case runParser (parseTop <* eof) vars 0 inp of
 parseSource ∷ ByteString → IO Term
 parseSource x = pure $ either (error . show) id $ parse [] x
 
-parseFile ∷ FilePath → IO Term
-parseFile = parseSource <=< readFileBinary
+parseFile ∷ OsPath → IO Term
+parseFile = parseSource <=< readFile'
 
 render ∷ Doc AnsiStyle → IO ()
 render x = renderIO stdout $ layoutSmart defaultLayoutOptions $ x <> line
@@ -792,8 +812,53 @@ render x = renderIO stdout $ layoutSmart defaultLayoutOptions $ x <> line
 formatSource ∷ ByteString → IO ()
 formatSource = render . pTerm [] <=< parseSource
 
-formatFile ∷ FilePath → IO ()
-formatFile = formatSource <=< readFileBinary
+formatFile ∷ OsPath → IO ()
+formatFile = formatSource <=< readFile'
+
+type LoaderC = StateC (HashMap OsPath Int) (StateC N.UsedNames (StateC (Vector Term) IO))
+newtype Module = Module (Vector Term) -- non-empty
+
+-- TODO: disallow trailing `/` in Import syntax!
+loadModule ∷ FilePath → IO (N.UsedNames, Module)
+loadModule = encodeUtf >=> runState (\t u → pure (u, Module t)) [] . execState N.emptyUsedNames . evalState mempty . new
+ where
+  new ∷ OsPath → LoaderC ()
+  new path = do
+    t0 ← sendIO $ parseFile $ path <> unsafeEncodeUtf ".fad"
+    t ← runReader path $ subload t0
+    modify (|> t)
+    get @(Vector Term) >>= \ms → modify @(HashMap OsPath Int) $ HM.insert path $ length ms - 1
+  subload ∷ Term → ReaderC OsPath LoaderC Term
+  subload =
+    unTerm >>> \case
+      Import Nothing subpath → do
+        dir ← R.ask
+        let path = takeDirectory dir </> unsafeEncodeUtf (BS.unpack subpath)
+        loaded ← get
+        i ← case HM.lookup path loaded of
+          Just i → pure i
+          Nothing → do
+            RIO.lift $ new path
+            (\x → length x - 1) <$> get @(Vector Term)
+        pure $ Term $ Import (Just i) subpath
+      t → do
+        let
+          label = case t of
+            Block (BlockLet _ (Just (Ident n False)) _ _ _) → Just n
+            Lam _ (Just (Ident n False)) _ → Just n
+            Pi _ (Just (Ident n False)) _ _ → Just n
+            Concat _ (FRow (Just (Ident n False), _)) → Just n
+            _ → Nothing
+        for_ label $ modify . N.use
+        Term <$> traverseTermF subload (fmap Lambda . subload . unLambda) t
+
+formatModule ∷ Module → IO ()
+formatModule (Module m) =
+  render
+    $ vsep
+    $ fmap
+      (\(i, t) → "/" <> pretty i <> nest 1 (line <> pTerm [] t))
+      (toList $ zip [0 .. length m - 1] m)
 
 parseQQ ∷ QuasiQuoter
 parseQQ =
@@ -807,3 +872,6 @@ parseQQ =
     , quoteType = error "parseQQ: No type support"
     , quoteDec = error "parseQQ: No declaration support"
     }
+
+freshIdent ∷ (Has (State N.UsedNames) sig m) ⇒ m Ident
+freshIdent = (`Ident` False) <$> N.genM
