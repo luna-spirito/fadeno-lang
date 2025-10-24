@@ -42,7 +42,6 @@ module Parser (
   typ,
   typOf,
   traverseTermF,
-  pattern IntND,
   pattern Op2,
 ) where
 
@@ -86,9 +85,9 @@ instance Hashable Ident
 data Quant = QEra | QNorm
   deriving (Show, Eq, Ord, Lift)
 
-data Bits = Bits8 | Bits16 | Bits32 | Bits64 | BitsInf
+data Bits = Bits8 | Bits16 | Bits32 | Bits64
   deriving (Show, Eq, Ord, Lift)
-data NumDesc = NumDesc !Bool {- ≥ 0 -} !Bits
+data NumDesc = NumFin !Bool {- ≥ 0 -} !Bits | NumInf
   deriving (Show, Eq, Ord, Lift)
 
 data BuiltinT
@@ -104,7 +103,7 @@ data BuiltinT
   | RecordDropFields
   | ListLength
   | ListIndexL
-  | NatFold
+  | Fix'
   | If -- TODO: Make Choice counterpart for Record
   | IntGte0
   | IntEq
@@ -122,15 +121,13 @@ data BuiltinT
 
 builtinsList ∷ Vector BuiltinT
 builtinsList =
-  [Tag, RowPlus, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, NatFold, If, IntGte0, IntEq, TagEq, W, Wrap, Unwrap, Never, Any']
+  [Tag, RowPlus, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, Fix', If, IntGte0, IntEq, TagEq, W, Wrap, Unwrap, Never, Any']
     <> (Num <$> nd)
-    <> (Add <$> ndSansIntP)
-    <> (Mul <$> ndSansIntP)
-    <> (IntNeg <$> ndSansIntP)
+    <> (Add <$> nd)
+    <> (Mul <$> nd)
+    <> (IntNeg <$> nd)
  where
-  ndFins = NumDesc <$> [False, True] <*> [Bits8, Bits16, Bits32, Bits64]
-  ndSansIntP = ndFins <> [NumDesc False BitsInf]
-  nd = ndSansIntP <> [NumDesc True BitsInf]
+  nd = (NumFin <$> [False, True] <*> [Bits8, Bits16, Bits32, Bits64]) <> [NumInf]
 
 identOfBuiltin ∷ BuiltinT → Ident
 identOfBuiltin = \case
@@ -150,7 +147,7 @@ identOfBuiltin = \case
   RecordDropFields → r "record_drop_fields"
   ListLength → r "list_length"
   ListIndexL → r "list_indexl"
-  NatFold → r "~int+_fold"
+  Fix' → r "rec"
   If → r "if"
   IntGte0 → r "int_>=0"
   IntEq → r "int_=="
@@ -161,21 +158,19 @@ identOfBuiltin = \case
   Never → r "Never"
   Any' → r "Any"
  where
-  numDesc upper (NumDesc nonneg bits) =
+  numDesc upper desc =
     (if upper then "I" else "i")
-      <> ( case bits of
+      <> case desc of
+        NumFin nonneg bits →
+          case bits of
             Bits8 → "8"
             Bits16 → "16"
             Bits32 → "32"
             Bits64 → "64"
-            BitsInf → "nt"
-         )
-      <> (if nonneg then "+" else mempty)
+            <> (if nonneg then "+" else mempty)
+        NumInf → "nt"
   -- \| regular
   r x = x `Ident` False
-
-pattern IntND ∷ NumDesc
-pattern IntND = NumDesc False BitsInf
 
 pattern Op2 ∷ BuiltinT → Term → Term → TermF Term
 pattern Op2 f a b = Term (Term (Builtin f) `App` a) `App` b

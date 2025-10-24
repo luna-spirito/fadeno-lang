@@ -246,20 +246,21 @@ repeat n f = case n of
 -- TODO: Really simple, expand upon.
 unplus ∷ Term → (Maybe Term, Integer)
 unplus (unTerm → NumLit n) | n >= 0 = (Nothing, n)
-unplus (unTerm → (Term (Term (Builtin (Add (NumDesc True BitsInf))) `App` a) `App` Term (NumLit n))) = (+ n) <$> unplus a
+unplus (unTerm → (Term (Term (Builtin (Add NumInf)) `App` a) `App` Term (NumLit n))) = (+ n) <$> unplus a
 unplus x = (Just x, 0)
 
-numDecDispatch ∷ NumDesc → (∀ x. (Integral x, Bounded x) ⇒ Proxy x → a) → (Bool → a) → a
-numDecDispatch (NumDesc signed bits) f inf = case (signed, bits) of
-  (False, Bits8) → f (Proxy @Int8)
-  (True, Bits8) → f (Proxy @Word8)
-  (False, Bits16) → f (Proxy @Int16)
-  (True, Bits16) → f (Proxy @Word16)
-  (False, Bits32) → f (Proxy @Int32)
-  (True, Bits32) → f (Proxy @Word32)
-  (False, Bits64) → f (Proxy @Int64)
-  (True, Bits64) → f (Proxy @Word64)
-  (_, BitsInf) → inf signed
+numDecDispatch ∷ NumDesc → (∀ x. (Integral x, Bounded x) ⇒ Proxy x → a) → a → a
+numDecDispatch desc f inf = case desc of
+  NumFin signed bits → case (signed, bits) of
+    (False, Bits8) → f (Proxy @Int8)
+    (True, Bits8) → f (Proxy @Word8)
+    (False, Bits16) → f (Proxy @Int16)
+    (True, Bits16) → f (Proxy @Word16)
+    (False, Bits32) → f (Proxy @Int32)
+    (True, Bits32) → f (Proxy @Word32)
+    (False, Bits64) → f (Proxy @Int64)
+    (True, Bits64) → f (Proxy @Word64)
+  NumInf → inf
 
 data ListDropRes = TDFound !(Vector' Term) | TDMissing | TDUnknown
 
@@ -286,16 +287,8 @@ postApp f0 a0 = case (unTerm f0, a0) of
   (f@(Term (Term (Builtin ListIndexL) `App` Term (ListLit (Vector' vals))) `App` Term (NumLit i)), a) → case vals !? fromIntegral i of
     Just v → v
     Nothing → Term $ App (Term f) a
-  (Term (Term (Builtin NatFold) `App` start) `App` step, n) →
-    let
-      (nTM, nV) = unplus n
-     in
-      -- TODO: causes constant re-normalization of `int+_fold` args.
-      (if nV > 0 then run . runSubContext (Imports []) . normalize else id) -- TODO: This is wrong again?
-        $ repeat nV (Term . App step)
-        $ case nTM of
-          Nothing → start
-          Just nT → Term $ Term (Term (Term (Builtin NatFold) `App` start) `App` step) `App` nT
+  (Term (Builtin Fix') `App` f, i) →
+    run $ runSubContext (Imports []) $ normalize $ Term $ Term (f `App` f0) `App` i
   (Term (Term (Builtin If) `App` (Term (BoolLit cond))) `App` thenBranch, elseBranch) →
     if cond then thenBranch else elseBranch
   (Builtin IntGte0, Term (NumLit x)) → Term $ BoolLit $ x >= 0
@@ -305,9 +298,9 @@ postApp f0 a0 = case (unTerm f0, a0) of
   -- Add
   (Term (Builtin (Add d)) `App` a, Term (NumLit b))
     | b == 0 → a
-    | Term (NumLit a') ← a → Term $ NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a' + fromIntegral b) (\_ → a' + b)
+    | Term (NumLit a') ← a → Term $ NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a' + fromIntegral b) (a' + b)
   -- Sub
-  (Builtin (IntNeg d), Term (NumLit x)) → Term $ NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ -fromIntegral x) (\_ → -x)
+  (Builtin (IntNeg d), Term (NumLit x)) → Term $ NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ -fromIntegral x) (-x)
   (f, a) → normalizePoly $ Term $ App (Term f) a
  where
   -- Drop `x` from ListLit.
@@ -492,7 +485,7 @@ termQQ =
     scope ∷ Vector (Maybe Ident, Term)
     scope =
       ((\b → (Just $ identOfBuiltin b, Term $ Builtin b)) <$> builtinsList)
-        <> [(Just $ Ident "+" True, Term $ Builtin $ Add $ NumDesc False BitsInf), (Just $ Ident "Where" False, wher)]
+        <> [(Just $ Ident "+" True, Term $ Builtin $ Add NumInf), (Just $ Ident "Where" False, wher)]
    in
     QuasiQuoter
       { quoteExp = \s → do

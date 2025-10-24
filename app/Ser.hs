@@ -149,7 +149,7 @@ putBuiltin = \case
   RecordDropFields → S.putWord8 9
   ListLength → S.putWord8 10
   ListIndexL → S.putWord8 11
-  NatFold → S.putWord8 12
+  Fix' → S.putWord8 12
   If → S.putWord8 13
   IntGte0 → S.putWord8 14
   IntEq → S.putWord8 15
@@ -180,7 +180,7 @@ getBuiltin = do
     9 → pure RecordDropFields
     10 → pure ListLength
     11 → pure ListIndexL
-    12 → pure NatFold
+    12 → pure Fix'
     13 → pure If
     14 → pure IntGte0
     15 → pure IntEq
@@ -196,13 +196,21 @@ getBuiltin = do
     25 → IntNeg <$> getNumDesc
     _ → fail "Unknown builtin tag"
 
+-- TODO: More dense?
 putNumDesc ∷ NumDesc → S.Put
-putNumDesc (NumDesc nonNeg bits) = do
-  putBool8 nonNeg
-  putBits bits
+putNumDesc = \case
+  NumFin nonNeg bits → do
+    S.putWord8 0
+    putBool8 nonNeg
+    putBits bits
+  NumInf → S.putWord8 1
 
 getNumDesc ∷ S.Get NumDesc
-getNumDesc = NumDesc <$> getBool8 <*> getBits
+getNumDesc =
+  S.getWord8 >>= \case
+    0 → NumFin <$> getBool8 <*> getBits
+    1 → pure NumInf
+    _ → fail "Unknown num desc"
 
 putBits ∷ Bits → S.Put
 putBits =
@@ -211,7 +219,6 @@ putBits =
     Bits16 → 1
     Bits32 → 2
     Bits64 → 3
-    BitsInf → 4
 
 getBits ∷ S.Get Bits
 getBits = do
@@ -221,7 +228,6 @@ getBits = do
     1 → pure Bits16
     2 → pure Bits32
     3 → pure Bits64
-    4 → pure BitsInf
     _ → fail "Unknown bits tag"
 
 putIdent ∷ Ident → S.Put

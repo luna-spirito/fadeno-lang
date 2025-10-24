@@ -1,5 +1,5 @@
-unpack fadeno. Type^ Int+ Int Tag List Bool Eq refl Row^ list_length list_indexl
-if W int_>=0 wrap unwrap ~int+_fold Never Any int_neg tag_==
+unpack fadeno. Type^ Int Tag List Bool Eq refl Row^ list_length list_indexl
+if W int_>=0 wrap unwrap rec Never Any int_neg tag_==
 
 _+_ = fadeno.int_add
 _-_ = \a b. a + (int_neg b)
@@ -33,69 +33,63 @@ Not = \A. Fun (A) -> Never
 /: Fun (Bool) -> Type
 Where = \x. Eq x true
 
-// All non-proof arguments erased, all other proofs explicit?
-/: Fun {a : Int+} {b : Int+} -> Where (int_>=0 (a + b))
-~sum_pos = SORRY
-
-/: Fun (i : Int) {_ : Where (int_>=0 i)} -> Int+
-to_int+ = \i @_.
-  /: Eq Int+ Int
-  e = SORRY
-  in rewrite e in i
-
-/: Fun (Int+) (Int+) -> Int+
-_++_ = \a b. to_int+ (a + b) @~sum_pos
-
-/: Fun {Acc} (Acc) (Fun (Int+) (Acc) -> Acc) (Int+) -> Acc
-int+_fold = \@Acc. ~int+_fold @(\_. Acc)
-
 /: Fun {a : Any} {b : Any} (Eq a b) -> Eq b a
 ~sym = SORRY
 
-/: Fun (i : Int+) (n : Int+) {_ : Where (i < n)} -> Int+
-inv_index = \i n @prf. to_int+ (n - (i + 1)) @prf
+///: Fun (i : Int+) (n : Int+) {_ : Where (i < n)} -> Int+
+//inv_index = \i n @prf. to_int+ (n - (i + 1)) @prf
 
-/: Fun {i : Int+} {n : Int+} -> Where (n - (i + 1) < n)
-~inv_index_bounded = SORRY
+///: Fun {i : Int+} {n : Int+} -> Where (n - (i + 1) < n)
+//~inv_index_bounded = SORRY
 
-//// To remake eventually
-/: Fun {Acc : Fun (Int+) -> Any} (n : Int+) (Fun (i : Int+) {_ : Where (i < n)} (Acc (i ++ 1)) -> Acc i) (Acc n) -> Acc 0
-~int+_unfold = \@Accf n step final.
+////// To remake eventually
+///: Fun {Acc : Fun (Int+) -> Any} (n : Int+) (Fun (i : Int+) {_ : Where (i < n)} (Acc (i ++ 1)) -> Acc i) (Acc n) -> Acc 0
+//~int+_unfold = \@Accf n step final.
 
-  /: Fun {i : Int} (Where (i + 1 <= n)) -> Where (i <= n)
-  ~smaller = SORRY
+//  /: Fun {i : Int} (Where (i + 1 <= n)) -> Where (i <= n)
+//  ~smaller = SORRY
 
-  in ~int+_fold @(\i. Fun {prf : Where (i <= n)} -> Accf (to_int+ (n - i) @prf))
-    (\@_. final)
-    (\i rec @~i+1<=n.
-      step (inv_index i n @~i+1<=n) @(~inv_index_bounded @i @n) (rec @(~smaller @i ~i+1<=n))
-    )
-    n @refl
+//  in ~int+_fold @(\i. Fun {prf : Where (i <= n)} -> Accf (to_int+ (n - i) @prf))
+//    (\@_. final)
+//    (\i rec @~i+1<=n.
+//      step (inv_index i n @~i+1<=n) @(~inv_index_bounded @i @n) (rec @(~smaller @i ~i+1<=n))
+//    )
+//    n @refl
 
-/: Fun {Acc} (n : Int+) (Fun (i : Int+) {_ : Where (i < n)} (Acc) -> Acc) (Acc) -> Acc
-int+_unfold = \@Acc. ~int+_unfold @(\_. Acc)
+///: Fun {Acc} (n : Int+) (Fun (i : Int+) {_ : Where (i < n)} (Acc) -> Acc) (Acc) -> Acc
+//int+_unfold = \@Acc. ~int+_unfold @(\_. Acc)
 
-/: Fun {u} (tag : Tag) (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
-find-case = \@u tag l. int+_unfold @(Row^ u)
-    (list_length l)
-    (\i @bounded rec.
-    case = list_indexl i l @bounded
-    in if (tag_== tag case.k)
-        (case.v)
-        rec
-    )
-    {( .never = Never )}
+//Iterator = \T. Fun {R} (Fun (T) (Fun ({()}) -> R) -> R) -> R
 
-/: Fun {u : Int+} (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
-U = \cases. {( .tag = Tag )} \meta/ find-case meta.tag cases
+///: Fn {A} (List A) -> Iterator A
+//list_iter = \l @R. fix @ @R @
+//  ()
+//  0
 
-/: Fun {u : Int+} (A : Type^ u) -> Row^ u
-Opt = \A. U [ .none => Unit | .some => {( .val = A )} ]
+///: Fun {u} (tag : Tag) (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
+//find-case = \@u tag l. SORRY
 
-/: Fun (u : Int+) -> Type^ (u + 1)
-Dyn^ = \u. {( .Ty = Type^ u )} \self/ {( .val = self.Ty )}
+///: Fun {u} (tag : Tag) (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
+//find-case = \@u tag l. int+_unfold @(Row^ u)
+//    (list_length l)
+//    (\i @bounded rec.
+//    case = list_indexl i l @bounded
+//    in if (tag_== tag case.k)
+//        (case.v)
+//        rec
+//    )
+//    {( .never = Never )}
 
-/: Fun (u : Int+) (Fun (Type^ u) -> Type^ u) -> Type^ (u + 1)
-Church = \u F. Fun {X : Type^ u} (Fun (F X) -> X) -> X
+///: Fun {u : Int+} (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
+//U = \cases. {( .tag = Tag )} \meta/ find-case meta.tag cases
 
-in { ._+_ = _+_ }
+///: Fun {u : Int+} (A : Type^ u) -> Row^ u
+//Opt = \A. U [ .none => Unit | .some => {( .val = A )} ]
+
+///: Fun (u : Int+) -> Type^ (u + 1)
+//Dyn^ = \u. {( .Ty = Type^ u )} \self/ {( .val = self.Ty )}
+
+///: Fun (u : Int+) (Fun (Type^ u) -> Type^ u) -> Type^ (u + 1)
+//Church = \u F. Fun {X : Type^ u} (Fun (F X) -> X) -> X
+
+in rec

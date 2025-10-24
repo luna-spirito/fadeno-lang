@@ -6,7 +6,7 @@ import Data.Foldable1 (foldl1')
 import Data.Functor.Classes (Ord1 (liftCompare))
 import Data.RRBVector (Vector, viewl, viewr)
 import GHC.IsList (IsList (..))
-import Parser (BuiltinT (..), Fields (..), Lambda (..), Quant (..), Term (..), TermF (..), pattern IntND, pattern Op2)
+import Parser (BuiltinT (..), Fields (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), pattern Op2)
 import RIO hiding (Vector, toList)
 
 compareTerm ∷ Term → Term → Ordering
@@ -110,7 +110,7 @@ instance Semigroup DupPoly where
 mulDupPoly ∷ DupPoly → DupPoly → DupPoly
 mulDupPoly (DupPoly as ac) (DupPoly bs bc) =
   let poly = (`DupPoly` 0)
-   in poly ((\(c1, t1) (c2, t2) → (c1 * c2, Term $ Op2 (Mul IntND) t1 t2)) <$> as <*> bs) -- as * bs
+   in poly ((\(c1, t1) (c2, t2) → (c1 * c2, Term $ Op2 (Mul NumInf) t1 t2)) <$> as <*> bs) -- as * bs
         <> poly (first (* bc) <$> as) -- as * bc
         <> poly (first (* ac) <$> bs) -- ac * bs
         <> DupPoly [] (ac * bc)
@@ -119,24 +119,24 @@ termToDupPoly ∷ Term → DupPoly
 termToDupPoly =
   unTerm >>> \case
     NumLit n → DupPoly [] n
-    Op2 (Add IntND) a b → termToDupPoly a <> termToDupPoly b
-    Op2 (Mul IntND) a b → termToDupPoly a `mulDupPoly` termToDupPoly b
-    (unTerm → Builtin (IntNeg IntND)) `App` a → (\(DupPoly ress resc) → DupPoly (first (\x → -x) <$> ress) (-resc)) $ termToDupPoly a
+    Op2 (Add NumInf) a b → termToDupPoly a <> termToDupPoly b
+    Op2 (Mul NumInf) a b → termToDupPoly a `mulDupPoly` termToDupPoly b
+    (unTerm → Builtin (IntNeg NumInf)) `App` a → (\(DupPoly ress resc) → DupPoly (first (\x → -x) <$> ress) (-resc)) $ termToDupPoly a
     x → DupPoly [(1, Term x)] 0
 
 dupPolyToTerm ∷ DupPoly → Term
 dupPolyToTerm = \(DupPoly origXs origXc) → case toTerm =<< dedupPoly (toList origXs) of
   (x : xs) →
-    let polyPart = foldl1' (\a b → Term $ Op2 (Add IntND) a b) (x :| xs)
+    let polyPart = foldl1' (\a b → Term $ Op2 (Add NumInf) a b) (x :| xs)
      in if origXc == 0
           then polyPart
-          else Term $ Op2 (Add IntND) polyPart $ Term $ NumLit origXc
+          else Term $ Op2 (Add NumInf) polyPart $ Term $ NumLit origXc
   _ → Term $ NumLit origXc
  where
   toTerm = \case
     (0, _) → []
     (1, x) → [x]
-    (n, x) → [Term $ Op2 (Mul IntND) (Term $ NumLit n) x]
+    (n, x) → [Term $ Op2 (Mul NumInf) (Term $ NumLit n) x]
   dedupPoly = \case
     (a : b : xs)
       | EQ ← compareTerm (snd a) (snd b) → dedupPoly $ (fst a + fst b, snd a) : xs
