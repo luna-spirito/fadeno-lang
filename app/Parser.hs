@@ -17,6 +17,7 @@ module Parser (
   TermF (..),
   Vector' (..),
   builtinsList,
+  dotvar,
   eqOf,
   formatFile,
   formatModule,
@@ -236,13 +237,19 @@ data TermF a
   | -- Erased
     AppErased !a !a -- TODO: Maybe
   | Block !(BlockF a)
-  | Import !(Maybe Int {- resolved -}) !ByteString -- Erased from the perspective of `normalize`, kept by `compile`
+  | -- | Refine !Ident !(Either () _)
+    Import !(Maybe Int {- resolved -}) !ByteString -- Erased from the perspective of `normalize`, kept by `compile`
   | -- Type-level
     Pi !Quant !(Maybe Ident) !a !(Lambda a) -- TODO: Demote Pi and Concat to builtins?
-  | Concat !a !(Fields a (Maybe Ident, Lambda a))
+  | Concat !a !(Fields a (Lambda a))
   | ExVar !(Int, Int)
   | UniVar !(Int, Int) !a
-  deriving (Show, Eq, Lift)
+  deriving
+    ( -- | ErasedAnn !Ident !Bool {\- postfix? -\} !a !(Lambda a) -- ^ Prefix erased overlay @|k : A| B
+      Show
+    , Eq
+    , Lift
+    )
 
 newtype Term = Term {unTerm ∷ TermF Term}
   deriving (Show, Eq, Lift)
@@ -367,6 +374,10 @@ findVar name = do
 localPathSym ∷ Parser' ()
 localPathSym = skipSatisfyAscii \x → x `elem` ("abcdefghijklmnopqrstuvwxyz/" ∷ Vector Char)
 
+-- Standalone `.` can be a variable introduced by the compiler.
+dotvar ∷ Ident
+dotvar = Ident "." False
+
 -- 7
 parsePrim ∷ Parser' Term
 parsePrim = token do
@@ -401,7 +412,8 @@ parsePrim = token do
       <|> ( Term . Var <$> do
               -- Variable parsing
               -- TODO: { x = 4 }
-              Ident iName iOp ← maybe failed pure =<< notFollowedBy ident parseEq
+              let asDotvar = dotvar <$ notFollowedBy $(char '.') identSym
+              Ident iName iOp ← asDotvar <|> (maybe failed pure =<< notFollowedBy ident parseEq)
               findVar iName >>= \case
                 Just (_, QEra, _) → empty -- TODO: Still a crutch.
                 Just (n, QNorm, eOp) → case (eOp, iOp) of
@@ -470,15 +482,17 @@ parseTy =
     <|> ( do
             -- Fused: parseApp <|> (\/)
             left ← parseApp
-            ( do
-                iM ← token do
-                  $(char '\\')
-                  optional identRightNow <* $(char '/')
-                Term . Concat left <$> case iM of
-                  Nothing → FRecord <$> parseTy
-                  Just i → FRow . (i,) . Lambda <$> local (|> (QNorm, i)) parseTy
-              )
-              <|> pure left
+            let
+              asConcat = do
+                space *> $(char '\\')
+                Term
+                  . Concat left
+                  <$> ( $(char '/')
+                          *> (FRecord <$> parseTy)
+                          <|> $(string "./")
+                          *> (FRow . Lambda <$> local (|> (QNorm, Just dotvar)) parseTy)
+                      )
+            asConcat <|> pure left
         )
 
 -- -- 4
@@ -587,7 +601,7 @@ traverseTermF c cNest = \case
   Concat a b →
     Concat <$> c a <*> case b of
       FRecord b' → FRecord <$> c b'
-      FRow (i, b') → FRow . (i,) <$> cNest b'
+      FRow b' → FRow <$> cNest b'
   ExVar i → pure $ ExVar i
   UniVar i t → UniVar i <$> c t
 
@@ -670,7 +684,7 @@ isSimple =
           Concat a b →
             complexity a *> complexity case b of
               FRecord b' → b'
-              FRow (_, b') → unLambda b'
+              FRow b' → unLambda b'
           Builtin _ → ping
           BuiltinsVar → ping
           ExVar _ → ping
@@ -753,7 +767,7 @@ pTerm' (fuse, oldPrec, vars) t0 =
         , pTerm' (FNo, 4, vars) a
             <+> annotate (color Cyan) "\\" <> case b of
               FRecord b' → annotate (color Cyan) "/" <+> pTerm' (FNo, 3, vars) b'
-              FRow (n, b') → maybe "_" pIdent n <> annotate (color Cyan) "/" <+> pTerm' (FNo, 3, vars |> (QNorm, n)) (unLambda b')
+              FRow b' → "." <> annotate (color Cyan) "/" <+> pTerm' (FNo, 3, vars |> (QNorm, Just dotvar)) (unLambda b')
         )
       Sorry → (5, "SORRY!")
       App (unTerm → App (unTerm → Builtin RecordGet) (unTerm → TagLit tag)) rec →
@@ -844,7 +858,6 @@ loadModule' = runState (\t u → pure (u, Module t)) [] . execState N.emptyUsedN
             Block (BlockLet _ (Just (Ident n False)) _ _ _) → Just n
             Lam _ (Just (Ident n False)) _ → Just n
             Pi _ (Just (Ident n False)) _ _ → Just n
-            Concat _ (FRow (Just (Ident n False), _)) → Just n
             _ → Nothing
         for_ label $ modify . N.use
         Term <$> traverseTermF subload (fmap Lambda . subload . unLambda) t

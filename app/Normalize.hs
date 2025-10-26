@@ -432,7 +432,7 @@ traverseNormTermF c locals t0 = rewr =<< trav
     Block (BlockRewrite _prf into) → c locals into
     Concat a b → case b of
       FRecord b' → concat <$> c locals a <*> c locals b'
-      FRow (name, b') → Term <$> (Concat <$> c locals a <*> (FRow . (name,) . Lambda <$> c (locals |> Nothing) (unLambda b')))
+      FRow b' → Term <$> (Concat <$> c locals a <*> (FRow . Lambda <$> c (locals |> Nothing) (unLambda b')))
     ExVar (i, subi) → do
       Scopes globals exs _ ← get @Scopes
       let valtyM = do

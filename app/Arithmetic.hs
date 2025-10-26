@@ -81,7 +81,7 @@ compareTerm = \(Term a) (Term b) →
     (Pi{}, _) → undefined
     (Concat t1 f1, Concat t2 f2) →
       compareTerm t1 t2
-        <> compareFields compareTerm (\(_, b1) (_, b2) → compareTerm (unLambda b1) (unLambda b2)) f1 f2
+        <> compareFields compareTerm (\b1 b2 → compareTerm (unLambda b1) (unLambda b2)) f1 f2
     (Concat _ _, _) → undefined
     (ExVar (a1, b1), ExVar (a2, b2)) → compare a1 a2 <> compare b1 b2
     (ExVar{}, _) → undefined

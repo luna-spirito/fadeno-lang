@@ -15,7 +15,7 @@ extra-doc-files:    CHANGELOG.md
 -- extra-source-files:
 
 common warnings
-    ghc-options: -Wall -fmax-pmcheck-models=60
+    ghc-options: -Wall -fmax-pmcheck-models=120
 
 executable fadeno-lang
     import:           warnings

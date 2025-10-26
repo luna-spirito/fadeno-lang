@@ -25,7 +25,7 @@ import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, re
 import GHC.Exts (IsList (..))
 import NameGen
 import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Imports (..), Rewrite (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', normalizeModule, numDecDispatch, runSubContext, splitAt3, termQQ, withBinding, withMarked)
-import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), Module (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, loadModule', nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parseFile, render, rowOf, traverseTermF, typ, typOf, pattern Op2)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), Module (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, loadModule', nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parseFile, render, rowOf, traverseTermF, typ, typOf, pattern Op2)
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, replicate, runReader, take, to, toList, zip)
@@ -36,6 +36,7 @@ import System.OsPath (encodeUtf, replaceExtension, unsafeEncodeUtf)
 -- TODO: Permit inference of dependent Pis?
 -- TODO: Concat uncomfortably replicates Pi.
 -- TODO: There are few deadly sins (Infer → Check conversions) that should be removed. Infer should never invoke check! (Pi/inferList/???)
+-- TODO: `3 \/ 4` shouldn't probably typecheck.
 
 type Checker = Context :+: Fresh :+: State UsedNames :+: StackLog :+: Throw (Doc AnsiStyle)
 
@@ -419,7 +420,7 @@ rowGet mapTerm tag cont = go -- tag is source term
           u ← subExVar $ Term $ Builtin Any'
           head ← subExVar $ typOf u
           tail ← subExVar $ rowOf u
-          pure $ Term $ Concat (Term $ FieldsLit (FRow ()) [(tag, head)]) (FRow (Nothing, Lambda tail))
+          pure $ Term $ Concat (Term $ FieldsLit (FRow ()) [(tag, head)]) (FRow $ Lambda tail) -- Introduces new variable ?! And in few other places.
       )
       ( \t →
           getEpoch >>= \e → case t of
@@ -434,7 +435,7 @@ rowGet mapTerm tag cont = go -- tag is source term
                 )
                 (pure $ LookupMissing $ fst <$> l)
                 l
-            (fDyn e → Concat l (FRow (_, r))) → do
+            (fDyn e → Concat l (FRow r)) → do
               inL ← (`go` record) =<< fetchT l
               case inL of
                 LookupMissing visited1 → do
@@ -581,9 +582,9 @@ infer = logAndRunInfer $ \case
     Term
       <$> ( Concat
               <$> infer l Infer
-              <*> (FRow . (Nothing,) . Lambda . nested <$> infer r Infer)
+              <*> (FRow . Lambda . nested <$> infer r Infer)
           )
-  (Concat l (FRecord r), CheckL (Concat lT (FRow (_, rT)))) → do
+  (Concat l (FRecord r), CheckL (Concat lT (FRow rT))) → do
     infer l . Check =<< fetchT lT
     l' ← normalize l
     infer r . Check =<< (`applyLambda` l') =<< fetchLambda rT
@@ -616,16 +617,16 @@ infer = logAndRunInfer $ \case
     for_ flds \(n, _) → infer n $ Check $ Term $ Builtin Tag
     checkList (snd <$> flds) ty
   -- TODO Ctrl+C & Ctrl+V hell, rewrite somehow..
-  (Concat l (FRow (i, r)), (e, Check (unTerm → App (isTypePlus → True) (Dyn e → u)))) → do
+  (Concat l (FRow r), (e, Check (unTerm → App (isTypePlus → True) (Dyn e → u)))) → do
     infer l . Check . rowOf =<< fetchT u
     l' ← normalize l
     fetchT u
-      >>= scopedVar (const pure) (QNorm, i, Nothing, l')
+      >>= scopedVar (const pure) (QNorm, Just dotvar, Nothing, l')
       . infer (unLambda r)
       . Check
       . rowOf
       . nested
-  (Concat l (FRow (i, r)), InferL) → do
+  (Concat l (FRow r), InferL) → do
     infer l Infer
       >>= withMono
         id
@@ -634,7 +635,7 @@ infer = logAndRunInfer $ \case
             getEpoch >>= \e → case unTerm t0 of
               App (unTerm → Builtin RowPlus) (Dyn e → lT) → do
                 l' ← normalize l
-                fetchT lT >>= scopedVar (const pure) (QNorm, i, Nothing, l') . infer (unLambda r) . Check . rowOf . nested
+                fetchT lT >>= scopedVar (const pure) (QNorm, Just dotvar, Nothing, l') . infer (unLambda r) . Check . rowOf . nested
                 rowOf <$> fetchT lT
               _ → stackError \p → p l <+> "is not a row"
         )
@@ -772,10 +773,10 @@ instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) �
                     <$> (instMeta' locs =<< fetchT a)
                     <*> (FRecord <$> (instMeta' locs =<< fetchT b))
                 )
-        (fDyn e → Concat a (FRow (i, b))) → do
+        (fDyn e → Concat a (FRow b)) → do
           a' ← instMeta' locs =<< fetchT a
           b' ← instMeta' (locs + 1) . unLambda =<< fetchLambda b -- resolve' 1 exs $ unLambda b
-          pure $ Term $ Concat a' $ FRow (i, Lambda b')
+          pure $ Term $ Concat a' $ FRow $ Lambda b'
         (fDyn e → Var x) → pure $ Term $ Var x -- TODO: I hope this is correct, but needs to be rechecked.
         (fDyn e → Builtin x) → pure $ Term $ Builtin x
         (fDyn e → BoolLit x) → pure $ Term $ BoolLit x
@@ -888,10 +889,10 @@ subtype = \a b →
           )
           fields1
           fields2
-      -- n : l1 \/ r1  <:  n : l2 \/ r2
-      (fDyn e → Concat l1 (FRow (n1, lr1)), fDyn e → Concat l2 (FRow (n2, lr2))) → do
+      -- l1 \./ r1  <:  n : l2 \./ r2
+      (fDyn e → Concat l1 (FRow lr1), fDyn e → Concat l2 (FRow lr2)) → do
         uncurry subtype =<< ((,) <$> fetchT l1 <*> fetchT l2)
-        fetchT l1 >>= \l1' → scopedVar (const pure) (QNorm, n1 <|> n2, Nothing, l1') do
+        fetchT l1 >>= \l1' → scopedVar (const pure) (QNorm, Just dotvar, Nothing, l1') do
           body1' ← fetchLambda lr1
           body2' ← fetchLambda lr2
           subtype (unLambda body1') (unLambda body2')

@@ -86,8 +86,8 @@ Where = \x. Eq x true
 ///: Fun {u : Int+} (A : Type^ u) -> Row^ u
 //Opt = \A. U [ .none => Unit | .some => {( .val = A )} ]
 
-///: Fun (u : Int+) -> Type^ (u + 1)
-//Dyn^ = \u. {( .Ty = Type^ u )} \self/ {( .val = self.Ty )}
+/: Fun (u : Int) -> Type^ (u + 1)
+Dyn^ = \u. {( .Ty = Type^ u )} \./ {( .val = ..Ty )}
 
 ///: Fun (u : Int+) (Fun (Type^ u) -> Type^ u) -> Type^ (u + 1)
 //Church = \u F. Fun {X : Type^ u} (Fun (F X) -> X) -> X
