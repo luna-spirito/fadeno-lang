@@ -364,9 +364,6 @@ withEra act = do
 pattern CheckL ∷ () ⇒ (a2 ~ ()) ⇒ TermF Dyn → (Epoch, InferMode a2)
 pattern CheckL x ← (e, Check (fDyn e → x))
 
-pattern InferL ∷ () ⇒ (a2 ~ Term) ⇒ (a1, InferMode a2)
-pattern InferL ← (_, Infer)
-
 inferApp ∷ (Has Checker sig m) ⇒ Quant → Term → Term → m Term
 inferApp q f a = do
   let norm = q == QNorm
@@ -533,7 +530,7 @@ infer = logAndRunInfer $ \case
     withBlockLog inner case mode of
       (_, Infer) → fInto $ infer inner Infer
       (e, Check ty) → fInto $ infer inner . Check =<< normalize =<< fetchT (Dyn e ty)
-  (Import (fromMaybe (error "unresolved import") → n) _, InferL) → do
+  (Import (fromMaybe (error "unresolved import") → n) _, (_, Infer)) → do
     Imports imps ← ask
     pure $ maybe (error "Incomplete context") snd $ imps !? n
   (Lam q1 n1 bod, CheckL (Pi q2 n2 inT outT)) | q1 == q2 → checkDepLam q1 (n1 <|> n2) bod inT outT
@@ -541,11 +538,12 @@ infer = logAndRunInfer $ \case
     xTy' ← fetchT xTy
     scopedUniVar (const pure) xTy' \uni →
       infer (Term term) . Check =<< (`applyLambda` uni) =<< fetchLambda yT
-  (Lam QNorm n bod, InferL) →
+  (Lam QNorm n bod, (_, Infer)) →
     scopedExVar id (Term $ Builtin Any') $ dyn >=> \inT → do
       outT ← fetchT inT >>= \inT' → scopedVar id (QNorm, n, Nothing, inT') $ infer (unLambda bod) Infer
       fetchT inT <&> \inT' → Term $ Pi QNorm Nothing inT' $ Lambda $ nested outT
-  (AppErased f a, InferL) → inferApp QEra f a
+  (Lam QEra _ _, (_, Infer)) → stackError \_ → "Cannot infer a type of an erased lambda" -- Probably we could, but the idea overall is oxymoron.
+  (AppErased f a, (_, Infer)) → inferApp QEra f a
   (App (unTerm → App (unTerm → Builtin RecordGet) tag) record, mode) → do
     infer tag $ Check $ Term $ Builtin Tag
     tag' ← normalize tag
@@ -569,8 +567,8 @@ infer = logAndRunInfer $ \case
         for d fetchT >>= \d' → stackError \p →
           "Couldn't find field" <+> p tag' <+> "among" <+> list (p <$> toList d')
       LookupUnknown → stackError \_ → "Can't check if tag is equal"
-  (App f a, InferL) → inferApp QNorm f a
-  (FieldsLit (FRecord ()) flds, InferL) → do
+  (App f a, (_, Infer)) → inferApp QNorm f a
+  (FieldsLit (FRecord ()) flds, (_, Infer)) → do
     rowFields ← for flds \(n, v) → do
       infer n $ Check $ Term $ Builtin Tag
       vTy ← infer v Infer
@@ -592,16 +590,16 @@ infer = logAndRunInfer $ \case
     if x `numFitsInto` d
       then pure ()
       else stackError \_ → "Number literal " <> pretty x <> " does not fit into " <> pIdent (identOfBuiltin $ Num d)
-  (NumLit x, InferL) →
+  (NumLit x, (_, Infer)) →
     pure
       $ Term
       $ Builtin
       $ Num
       $ let candidates = NumFin False <$> [Bits8, Bits16, Bits32, Bits64]
          in fromMaybe NumInf $ find @[] (x `numFitsInto`) candidates
-  (TagLit _, InferL) → pure $ Term $ Builtin Tag
-  (BoolLit _, InferL) → pure $ Term $ Builtin Bool
-  (Var i, InferL) → do
+  (TagLit _, (_, Infer)) → pure $ Term $ Builtin Tag
+  (BoolLit _, (_, Infer)) → pure $ Term $ Builtin Bool
+  (Var i, (_, Infer)) → do
     Scopes binds _ _ ← get @Scopes
     let scope = length binds - i - 1
     case binds !? scope of
@@ -610,7 +608,7 @@ infer = logAndRunInfer $ \case
         nestBinding scope ty
       _ → stackError \_ → "Unknown var #" <> pretty i
   -- Type-level
-  (FieldsLit (FRow ()) (Vector' flds), InferL) → do
+  (FieldsLit (FRow ()) (Vector' flds), (_, Infer)) → do
     for_ flds \(n, _) → infer n $ Check $ Term $ Builtin Tag
     inferList (snd <$> flds) >>= withMonoUniverse id (pure . rowOf) . fromMaybe typ
   (FieldsLit (FRow ()) (Vector' flds), (e, Check (unTerm → App (isTypePlus → True) (Dyn e . typOf → ty)))) → do
@@ -626,7 +624,7 @@ infer = logAndRunInfer $ \case
       . Check
       . rowOf
       . nested
-  (Concat l (FRow r), InferL) → do
+  (Concat l (FRow r), (_, Infer)) → do
     infer l Infer
       >>= withMono
         id
@@ -648,7 +646,7 @@ infer = logAndRunInfer $ \case
       . Check
       . typOf
       . nested
-  (Pi _q i inTy outTy, InferL) → do
+  (Pi _q i inTy outTy, (_, Infer)) → do
     infer inTy Infer
       >>= withMonoUniverse
         id
@@ -657,16 +655,16 @@ infer = logAndRunInfer $ \case
             fetchT u >>= scopedVar (const pure) (QNorm, i, Nothing, inTy') . infer (unLambda outTy) . Check . typOf . nested
             typOf <$> fetchT u
         )
-  (Builtin x, InferL) → pure $ typOfBuiltin x
-  (BuiltinsVar, InferL) →
+  (Builtin x, (_, Infer)) → pure $ typOfBuiltin x
+  (BuiltinsVar, (_, Infer)) →
     pure
       $ Term
       $ FieldsLit (FRow ())
       $ Vector'
       $ (\b → (Term $ TagLit $ identOfBuiltin b, typOfBuiltin b))
       <$> builtinsList
-  (UniVar _ ty, InferL) → pure ty
-  (ExVar (scopeid, subid), InferL) → do
+  (UniVar _ ty, (_, Infer)) → pure ty
+  (ExVar (scopeid, subid), (_, Infer)) → do
     Scopes _ exs _ ← get @Scopes
     let
       (exScope, ty) = fromMaybe (error "Ex not found in scope") do
@@ -682,6 +680,7 @@ infer = logAndRunInfer $ \case
         pure (scopeid, ty')
     nestBinding exScope ty
   (Sorry, (_, Check k)) → stackLog \p → annotate (color Yellow) $ "sorry :" <+> p k
+  (Sorry, (_, Infer)) → stackError \_ → "sorry"
   (t, (e, Check c)) → stackScope (\p → "check via infer" <+> p (Term t) <+> ":" <+> p c) do
     ty ← infer (Term t) Infer
     (ty `subtype`) =<< fetchT (Dyn e c)
