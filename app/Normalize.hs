@@ -16,7 +16,7 @@ import Data.ByteString.Char8 (pack)
 import Data.Foldable (foldlM)
 import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, ifoldr, splitAt, take, viewl, viewr, zip, (!?), (<|), (|>))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), Module (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, nestedByP, nestedByP', pTerm, parse, recordGet, render, traverseTermF)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), NumDesc (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, nestedByP, nestedByP', pTerm, parse, recordGet, render, traverseTermF)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, take, to, toList, try, zip)
 
 -- TODO: Erasure is wrong... Verify for \f. f @4
@@ -127,6 +127,10 @@ isEq' tryInst = \l0 r0 → transactContext $ go l0 r0
       (_, Block{}) → undefined
       (AppErased{}, _) → undefined
       (_, AppErased{}) → undefined
+      (Refine (RefinePost{}), _) → undefined
+      (Refine (RefinePre{}), _) → undefined
+      (_, Refine (RefinePost{})) → undefined
+      (_, Refine (RefinePre{})) → undefined
       (Lam QEra _ _, _) → undefined
       (_, Lam QEra _ _) → undefined
       (BuiltinsVar, _) → undefined
@@ -151,9 +155,16 @@ isEq' tryInst = \l0 r0 → transactContext $ go l0 r0
       (_, App{}) → pure EqUnknown
       (Sorry, _) → pure EqUnknown
       (_, Sorry) → pure EqUnknown
+      (RefineGet e1 (skips1, f1M), RefineGet e2 (skips2, f2M))
+        | Just f1 ← f1M
+        , Just f2 ← f2M →
+            pure $ if e1 == e2 && skips1 == skips2 && f1 == f2 then EqYes else EqUnknown
+        | otherwise → undefined
+      (RefineGet{}, _) → pure EqUnknown
+      (_, RefineGet{}) → pure EqUnknown
       -- Literals
-      (Lam QNorm i bod1, Lam QNorm _ bod2) →
-        withBinding (QNorm, i, Nothing, Term $ Builtin Any')
+      (Lam QNorm i1 bod1, Lam QNorm i2 bod2) →
+        withBinding (QNorm, i1 <|> i2, Nothing, Term $ Builtin Any')
           $ isEqD (unLambda <$> fetchLambda bod1) (unLambda <$> fetchLambda bod2)
       (Lam QNorm _ _, _) → pure EqNot
       (NumLit a, NumLit b)
@@ -175,7 +186,15 @@ isEq' tryInst = \l0 r0 → transactContext $ go l0 r0
               inT1' ← fetchT inT1
               withBinding (QNorm, i1 <|> i2, Nothing, inT1') $ isEqD (unLambda <$> fetchLambda outT1) (unLambda <$> fetchLambda outT2)
       (Pi{}, _) → pure EqNot
-      (Concat _ _, _) → error "TODO isEq Concat"
+      (Refine (RefinePreTy i1 ann1 base1), Refine (RefinePreTy i2 ann2 base2)) →
+        force (isEqD (fetchT ann1) (fetchT ann2))
+          $ withBinding (QNorm, i1 <|> i2, Nothing, Term $ Builtin Any')
+          $ isEqD (unLambda <$> fetchLambda base1) (unLambda <$> fetchLambda base2)
+      (Refine (RefinePostTy base1 i1 ann1), Refine (RefinePostTy base2 i2 ann2)) →
+        force (isEqD (fetchT base1) (fetchT base2))
+          $ withBinding (QNorm, i1 <|> i2, Nothing, Term $ Builtin Any')
+          $ isEqD (unLambda <$> fetchLambda ann1) (unLambda <$> fetchLambda ann2)
+      (Refine{}, _) → pure EqNot
       (ListLit (Vector' as), ListLit (Vector' bs)) →
         if length as /= length bs
           then pure EqNot
@@ -400,6 +419,24 @@ traverseNormTermF c locals t0 = rewr =<< trav
       )
       (pure res)
       rs00
+  travVar globalI =
+    -- TODO: deduplicate.
+    if globalI < length locals
+      then
+        pure
+          $ let
+              (_, b, potentiallyErasable) = splitAt3 (length locals - 1 - globalI) locals
+              updatedGlobalI = globalI - countErased potentiallyErasable
+             in
+              case b of
+                Just (Just v) → nestedByP v updatedGlobalI
+                _ → Term $ Var updatedGlobalI
+      else do
+        Scopes globals _ _ ← get @Scopes
+        let updatedGlobalI = globalI - countErasedLocals
+        pure case globals !? (length globals - 1 - (globalI - length locals)) of
+          Just (_, _, Just raw, _) → nestedByP raw updatedGlobalI
+          _ → Term $ Var updatedGlobalI
   trav = case t0 of
     BuiltinsVar → pure builtinsVar
     Lam QEra _ body → c (locals |> Just undefined) $ unLambda body -- TODO: Total?
@@ -407,25 +444,17 @@ traverseNormTermF c locals t0 = rewr =<< trav
       f' ← c locals f
       a' ← c locals a
       pure $ postApp f' a'
-    Var globalI →
-      -- TODO: deduplicate.
-      if globalI < length locals
-        then
-          pure
-            $ let
-                (_, b, potentiallyErasable) = splitAt3 (length locals - 1 - globalI) locals
-                updatedGlobalI = globalI - countErased potentiallyErasable
-               in
-                case b of
-                  Just (Just v) → nestedByP v updatedGlobalI
-                  _ → Term $ Var updatedGlobalI
-        else do
-          Scopes globals _ _ ← get @Scopes
-          let updatedGlobalI = globalI - countErasedLocals
-          pure case globals !? (length globals - 1 - (globalI - length locals)) of
-            Just (_, _, Just raw, _) → nestedByP raw updatedGlobalI
-            _ → Term $ Var updatedGlobalI
+    Var globalI → travVar globalI
     AppErased f _a → c locals f
+    Refine (RefinePre _ann base) → c locals base
+    Refine (RefinePost base _ann) → c locals base
+    RefineGet oldX (_, Nothing) → travVar oldX
+    RefineGet oldX (skips1, final1) → do
+      termX ← travVar oldX
+      pure $ Term $ case unTerm termX of
+        Var x → RefineGet x (skips1, final1)
+        RefineGet x (skips2, Nothing) → RefineGet x (skips1 + skips2, Nothing)
+        _ → error "Internal error: cannot substitute into a RefineGet"
     Block (BlockLet _q _name _ty val into) → do
       val' ← c locals val
       c (locals |> Just val') $ unLambda into

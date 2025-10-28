@@ -1,4 +1,16 @@
-unpack ./std. _+_
-in \x y.
-  z = 4 + y
-  in \w. w + z + x
+unpack fadeno. Any Int refl
+unpack ./std. _>=_ Where Type
+
+/: Any
+Int+ = Int @|positive : Where(. >= 0)|
+
+/: Int+
+example = (1) @|refl|
+
+/: @|Ty : Type| Ty
+a = @|Int| 4
+
+/: Fun {A} (A) -> A
+id = \x. x
+
+in id a

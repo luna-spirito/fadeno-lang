@@ -6,7 +6,7 @@ import Data.Foldable1 (foldl1')
 import Data.Functor.Classes (Ord1 (liftCompare))
 import Data.RRBVector (Vector, viewl, viewr)
 import GHC.IsList (IsList (..))
-import Parser (BuiltinT (..), Fields (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), pattern Op2)
+import Parser (BuiltinT (..), FieldsK (..), Lambda (..), NumDesc (..), Quant (..), Term (..), TermF (..), pattern Op2)
 import RIO hiding (Vector, toList)
 
 compareTerm ∷ Term → Term → Ordering
@@ -30,15 +30,17 @@ compareTerm = \(Term a) (Term b) →
     App{} → 8
     Var{} → 9
     Sorry → 10
-    AppErased{} → undefined
     Block{} → undefined
-    Pi{} → 13
-    Concat{} → 14
-    ExVar{} → 15
-    UniVar{} → 16
-    Import{} → 17
+    AppErased{} → undefined
+    Refine{} → undefined
+    RefineGet{} → 14
+    Pi{} → 15
+    Concat{} → 16
+    ExVar{} → 17
+    UniVar{} → 18
+    Import{} → 19
 
-  compareFields ∷ (x → x → Ordering) → (y → y → Ordering) → Fields x y → Fields x y → Ordering
+  compareFields ∷ (x → x → Ordering) → (y → y → Ordering) → FieldsK x y → FieldsK x y → Ordering
   compareFields cmpX cmpY = curry \case
     (FRecord x1, FRecord x2) → cmpX x1 x2
     (FRecord _, FRow _) → LT
@@ -50,6 +52,7 @@ compareTerm = \(Term a) (Term b) →
     (Block _, _) → undefined
     (BuiltinsVar, _) → undefined
     (AppErased{}, _) → undefined
+    (Refine{}, _) → undefined
     (Lam QEra _ _, _) → undefined
     --
     (NumLit n1, NumLit n2) → compare n1 n2
@@ -72,6 +75,8 @@ compareTerm = \(Term a) (Term b) →
     (App{}, _) → undefined
     (Var n1, Var n2) → compare n1 n2
     (Var _, _) → undefined
+    (RefineGet etag1 a1, RefineGet etag2 a2) → compare etag1 etag2 <> compare a1 a2
+    (RefineGet{}, _) → undefined
     (Import _ a, Import _ b) → compare a b
     (Import{}, _) → undefined
     (Sorry, Sorry) → EQ

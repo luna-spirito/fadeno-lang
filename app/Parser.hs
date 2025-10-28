@@ -3,15 +3,17 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 {-# HLINT ignore "Use const" #-}
+{-# HLINT ignore "Use join" #-}
 module Parser (
   Bits (..),
   BlockF (..),
   BuiltinT (..),
-  Fields (..),
+  FieldsK (..),
   Ident (..),
   Lambda (..),
   Module (..),
   NumDesc (..),
+  RefineK (..),
   Quant (..),
   Term (..),
   TermF (..),
@@ -64,7 +66,7 @@ import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (Lift (..))
 import Language.Haskell.TH.Syntax qualified as TH
 import NameGen qualified as N
-import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, encloseSep, layoutSmart, line, nest, softline, vsep, (<+>))
+import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, encloseSep, hcat, layoutSmart, line, nest, softline, vsep, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
 import RIO hiding (Reader, Vector, ask, local, runReader, toList, try, zip)
 import RIO.HashMap qualified as HM
@@ -199,7 +201,14 @@ data BlockF f
   | BlockRewrite !f !f
   deriving (Show, Eq, Lift)
 
-data Fields a b = FRecord !a | FRow !b
+data FieldsK a b = FRecord !a | FRow !b
+  deriving (Show, Eq, Lift)
+
+data RefineK a
+  = RefinePre !a !a
+  | RefinePreTy !(Maybe Ident) !a !(Lambda a)
+  | RefinePost !a !a
+  | RefinePostTy !a !(Maybe Ident) !(Lambda a)
   deriving (Show, Eq, Lift)
 
 {-
@@ -227,7 +236,7 @@ data TermF a
   | TagLit !Ident
   | BoolLit !Bool
   | ListLit !(Vector' a)
-  | FieldsLit !(Fields () ()) !(Vector' (a, a))
+  | FieldsLit !(FieldsK () ()) !(Vector' (a, a))
   | BuiltinsVar
   | Builtin !BuiltinT
   | Lam !Quant !(Maybe Ident) !(Lambda a)
@@ -235,13 +244,14 @@ data TermF a
   | Var !Int
   | Sorry
   | -- Erased
-    AppErased !a !a -- TODO: Maybe
-  | Block !(BlockF a)
-  | -- | Refine !Ident !(Either () _)
-    Import !(Maybe Int {- resolved -}) !ByteString -- Erased from the perspective of `normalize`, kept by `compile`
+    Block !(BlockF a)
+  | AppErased !a !a -- TODO: Maybe
+  | Refine !(RefineK a)
+  | RefineGet !Int !(Int, Maybe Ident)
+  | Import !(Maybe Int {- resolved -}) !ByteString -- Erased from the perspective of `normalize`, kept by `compile`
   | -- Type-level
     Pi !Quant !(Maybe Ident) !a !(Lambda a) -- TODO: Demote Pi and Concat to builtins?
-  | Concat !a !(Fields a (Lambda a))
+  | Concat !a !(FieldsK a (Lambda a))
   | ExVar !(Int, Int)
   | UniVar !(Int, Int) !a
   deriving
@@ -320,6 +330,7 @@ identRightNow = do
         _ → (rawResult, False)
   guard $ not $ BS.null result
   guard $ not $ "@" `BS.isPrefixOf` result
+  -- TODO: Doesn't start with a number?
   guard $ result `notElem` (["Fun", "=", "in", "->", "unpack", "fadeno", "rewrite", "true", "false"] ∷ [ByteString])
   pure if result == "_" then Nothing else Just (Ident result isOp)
 
@@ -409,18 +420,26 @@ parsePrim = token do
           )
       <|> (Term BuiltinsVar <$ notFollowedBy $(string "fadeno") identSym)
       <|> (Term Sorry <$ notFollowedBy ($(string "SORRY") <* many ($(char '!') <|> $(char '1'))) identSym)
-      <|> ( Term . Var <$> do
-              -- Variable parsing
+      <|> ( Term <$> do
+              -- Variable <|> RefineGet
               -- TODO: { x = 4 }
               let asDotvar = dotvar <$ notFollowedBy $(char '.') identSym
-              Ident iName iOp ← asDotvar <|> (maybe failed pure =<< notFollowedBy ident parseEq)
-              findVar iName >>= \case
-                Just (_, QEra, _) → empty -- TODO: Still a crutch.
-                Just (n, QNorm, eOp) → case (eOp, iOp) of
-                  (True, False) → empty -- TODO: this is a crutch to stop user-defined operators from crashing the parser.
-                  (False, True) → err =<< getPos
-                  _ → pure n
-                Nothing → err =<< getPos -- TODO: better errors, overall
+              Ident iName iOp ← asDotvar <|> (maybe failed pure =<< notFollowedBy identRightNow parseEq)
+              i ←
+                findVar iName >>= \case
+                  Just (_, QEra, _) → empty -- TODO: Still a crutch.
+                  Just (n, QNorm, eOp) → case (eOp, iOp) of
+                    (True, False) → empty -- TODO: this is a crutch to stop user-defined operators from crashing the parser.
+                    (False, True) → err =<< getPos
+                    _ → pure n
+                  Nothing → err =<< getPos -- TODO: better errors, overall
+              let
+                refineGets = do
+                  skips ← many $ $(string ".@_")
+                  final ← optional $ $(string ".@") *> (maybe failed pure =<< identRightNow)
+                  when (null skips && isNothing final) failed
+                  pure (length skips, final)
+              (RefineGet i <$> refineGets) <|> pure (Var i)
           )
       <|> ( $(char '(') -- Parentheses parsing
               *> parseTop
@@ -457,43 +476,81 @@ parseApp = parsePrim >>= infxl'
 -- 5
 parseTy ∷ Parser' Term
 parseTy =
-  ( do
-      token $(string "Fun")
+  let
+    parseAnn onTy onTerm = do
+      token $(string "@|")
       let
-        getArg = do
-          q ← token $ ($(char '(') $> QNorm) <|> ($(char '{') $> QEra)
-          (n, t) ←
-            ((,) <$> (ident <* token $(char ':')) <*> parseTop)
-              <|> case q of
-                QNorm → (Nothing,) <$> parseTop
-                QEra → (,Term $ Builtin Any') . Just <$> (maybe failed pure =<< ident)
-          token $ case q of
-            QNorm → $(char ')')
-            QEra → $(char '}')
-          pure (q, n, t)
-        getArgs1 = do
-          (q, n, t) ← getArg
-          Term . Pi q n t . Lambda <$> local (|> (QNorm, n)) getArgs
-        getArgs =
-          ($(string "->") *> parseApp)
-            <|> getArgs1
-      getArgs1
-  )
-    <|> ( do
-            -- Fused: parseApp <|> (\/)
-            left ← parseApp
-            let
-              asConcat = do
-                space *> $(char '\\')
-                Term
-                  . Concat left
-                  <$> ( $(char '/')
-                          *> (FRecord <$> parseTy)
-                          <|> $(string "./")
-                          *> (FRow . Lambda <$> local (|> (QNorm, Just dotvar)) parseTy)
+        asTy = do
+          etag ← ident
+          token $(char ':')
+          onTy etag
+      res ← asTy <|> onTerm
+      token $(char '|')
+      pure res
+   in
+    ( do
+        token $(string "Fun")
+        let
+          getArg = do
+            q ← token $ ($(char '(') $> QNorm) <|> ($(char '{') $> QEra)
+            (n, t) ←
+              ((,) <$> (ident <* token $(char ':')) <*> parseTop)
+                <|> case q of
+                  QNorm → (Nothing,) <$> parseTop
+                  QEra → (,Term $ Builtin Any') . Just <$> (maybe failed pure =<< ident)
+            token $ case q of
+              QNorm → $(char ')')
+              QEra → $(char '}')
+            pure (q, n, t)
+          getArgs1 = do
+            (q, n, t) ← getArg
+            Term . Pi q n t . Lambda <$> local (|> (QNorm, n)) getArgs
+          getArgs =
+            ($(string "->") *> parseApp)
+              <|> getArgs1
+        getArgs1
+    )
+      <|> Term
+      . Refine
+      <$> do
+        act ←
+          parseAnn
+            ( \etag → do
+                annTy ← parseTop
+                pure do
+                  base ← Lambda <$> local (|> (QNorm, etag)) parseTy
+                  pure $ RefinePreTy etag annTy base
+            )
+            ( do
+                ann ← parseTop
+                pure $ RefinePre ann <$> parseTy
+            )
+        act
+      <|> ( do
+              -- Fused: parseApp <|> (\/) <|> (\./) <|> `parseApp @|...|`
+              left ← parseApp
+              space
+              let
+                asConcat = do
+                  $(char '\\')
+                  Term
+                    . Concat left
+                    <$> ( $(char '/')
+                            *> (FRecord <$> parseTy)
+                            <|> $(string "./")
+                            *> (FRow . Lambda <$> local (|> (QNorm, Just dotvar)) parseTy)
+                        )
+                asPostAnn =
+                  Term
+                    . Refine
+                    <$> parseAnn
+                      ( \etag → do
+                          annTy ← Lambda <$> local (|> (QNorm, Just dotvar)) parseTop
+                          pure $ RefinePostTy left etag annTy
                       )
-            asConcat <|> pure left
-        )
+                      (RefinePost left <$> parseTop)
+              asConcat <|> asPostAnn <|> pure left
+          )
 
 -- -- 4
 parseInfixOps ∷ Parser' Term
@@ -593,8 +650,15 @@ traverseTermF c cNest = \case
   App f a → App <$> c f <*> c a
   Var i → pure $ Var i
   Sorry → pure Sorry
-  AppErased f a → AppErased <$> c f <*> c a
   Block (BlockLet q name ty val into) → Block <$> (BlockLet q name <$> traverse c ty <*> c val <*> cNest into)
+  AppErased f a → AppErased <$> c f <*> c a
+  Refine r →
+    Refine <$> case r of
+      RefinePre a b → RefinePre <$> c a <*> c b
+      RefinePreTy n a b → RefinePreTy n <$> c a <*> cNest b
+      RefinePost a b → RefinePost <$> c a <*> c b
+      RefinePostTy a n b → RefinePostTy <$> c a <*> pure n <*> cNest b
+  RefineGet b a → pure $ RefineGet b a
   Block (BlockRewrite prf into) → Block <$> (BlockRewrite <$> c prf <*> c into)
   Import resI x → pure $ Import resI x
   Pi q n inT outT → Pi q n <$> c inT <*> cNest outT
@@ -655,12 +719,17 @@ withPrec oldPrec (newPrec, bod) =
 complexThreshold ∷ Int → Bool
 complexThreshold = (>= 5)
 
+-- TODO: Stop it. Just count real symbols.
 isSimple ∷ Term → Bool
 isSimple =
   let ping = do
         modify @Int (+ 1)
         curr ← get
         when (complexThreshold curr) E.empty
+      tlComplexity =
+        complexity . \case
+          FRecord b' → b'
+          FRow b' → unLambda b'
       complexity =
         unTerm >>> \case
           Lam _ _ (Lambda x) → ping *> complexity x
@@ -672,6 +741,12 @@ isSimple =
                  )
           App f a → complexity f *> complexity a
           AppErased f a → complexity f *> complexity a
+          Refine r → case r of
+            RefinePre a b → complexity a *> complexity b
+            RefinePreTy _ a b → ping *> complexity a *> complexity (unLambda b)
+            RefinePost a b → complexity a *> complexity b
+            RefinePostTy a _ b → ping *> complexity a *> complexity (unLambda b)
+          RefineGet _ _ → ping
           Import _ _ → ping
           NumLit _ → ping
           TagLit _ → ping
@@ -681,10 +756,7 @@ isSimple =
           ListLit vs → ping *> traverse_ complexity vs
           FieldsLit _ fields → ping *> traverse_ (\(k, v) → complexity k *> complexity v) fields
           Pi _ _ b c → ping *> complexity b *> complexity (unLambda c)
-          Concat a b →
-            complexity a *> complexity case b of
-              FRecord b' → b'
-              FRow b' → unLambda b'
+          Concat a b → complexity a *> tlComplexity b
           Builtin _ → ping
           BuiltinsVar → ping
           ExVar _ → ping
@@ -703,6 +775,7 @@ data Fuse = FNo | FLam | FPi | FBlock !(Maybe Term) deriving (Eq)
 pTerm' ∷ (Fuse, Int, ParserContext) → Term → Doc AnsiStyle
 pTerm' (fuse, oldPrec, vars) t0 =
   let
+    pvar x = maybe ("#" <> pretty x) (\(_, i) → maybe "_" pIdent i) (vars !? (length vars - x - 1))
     prefixf = case (fuse, unTerm t0) of
       (FNo, _) → id
       (FLam, Lam{}) → id
@@ -769,7 +842,24 @@ pTerm' (fuse, oldPrec, vars) t0 =
               FRecord b' → annotate (color Cyan) "/" <+> pTerm' (FNo, 3, vars) b'
               FRow b' → "." <> annotate (color Cyan) "/" <+> pTerm' (FNo, 3, vars |> (QNorm, Just dotvar)) (unLambda b')
         )
+      Refine r →
+        let
+          pBase fvars = pTerm' (FNo, 3, fvars vars)
+          pATy n fvars t = maybe "_" pIdent n <+> annotate (color Cyan) ":" <+> pTerm' (FNo, 0, fvars vars) t
+          pATerm fvars = pTerm' (FNo, 0, fvars vars)
+          pAnn x = annotate (color Cyan) "@|" <> x <> annotate (color Cyan) "|"
+         in
+          ( 3
+          , case r of
+              RefinePre ann base → pAnn (pATerm id ann) <+> pBase id base
+              RefinePreTy n annTy base → pAnn (pATy n id annTy) <+> pBase (|> (QNorm, n)) (unLambda base)
+              RefinePost base ann → pBase id base <+> pAnn (pATerm id ann)
+              RefinePostTy base n annTy → pBase id base <+> pAnn (pATy n (|> (QNorm, Just dotvar)) $ unLambda annTy)
+          )
       Sorry → (5, "SORRY!")
+      RefineGet x (skips, final) →
+        let skips' = hcat $ replicate skips ".@_"
+         in (5, pvar x <> annotate (color Blue) (skips' <> maybe mempty (\final' → ".@" <> pIdent final') final))
       App (unTerm → App (unTerm → Builtin RecordGet) (unTerm → TagLit tag)) rec →
         (5, pTerm' (FNo, 5, vars) rec <> annotate (color Blue) ("." <> pIdent tag))
       App lam arg2 → case lam of
@@ -796,7 +886,7 @@ pTerm' (fuse, oldPrec, vars) t0 =
                 (fmap (\(n, v) → pTerm' (FNo, 5, vars) n <+> annotate (color Cyan) "=" <+> pTerm' (FNo, 0, vars) v) (toList fields))
             )
       ListLit vec → (5, encloseSep "[" "]" " | " $ pTerm' (FNo, 0, vars) <$> toList vec)
-      Var x → (5, maybe ("#" <> pretty x) (\(_, i) → maybe "_" pIdent i) (vars !? (length vars - x - 1)))
+      Var x → (5, pvar x)
       Import _ x → (5, "./" <> pBS x)
       ExVar (s, i) → (5, "(exi#" <> pretty s <> "/" <> pretty i <> ")")
       UniVar (s, i) t → (5, "(uni#" <> pretty s <> "/" <> pretty i <+> ":" <+> pTerm' (FNo, 0, vars) t <> ")")
@@ -808,7 +898,7 @@ parse ∷ ParserContext → ByteString → Either Text Term
 parse vars inp = case runParser (parseTop <* eof) vars 0 inp of
   OK x _ "" → Right x
   Err e → Left $ "Unable to parse at " <> tshow (posLineCols inp [e])
-  _ → Left "Internal error:  failure"
+  _ → Left "Internal error: parser failure"
 
 parseSource ∷ ByteString → IO Term
 parseSource x = pure $ either (error . show) id $ parse [] x

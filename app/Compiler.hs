@@ -16,7 +16,7 @@ import Data.RRBVector (Vector, drop, ifoldl, imap, replicate, reverse, splitAt, 
 import GHC.Exts (IsList (..))
 import NameGen (UsedNames, emptyUsedNames)
 import Normalize (splitAt3)
-import Parser (BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), Module (..), Quant (..), Term (..), TermF (..), Vector' (..), freshIdent, nestedByP, traverseTermF)
+import Parser (BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), Quant (..), Term (..), TermF (..), Vector' (..), freshIdent, nestedByP, traverseTermF)
 import RIO hiding (Vector, ask, drop, local, replicate, reverse, runReader, take, toList, zip)
 import RIO.HashMap qualified as HM
 

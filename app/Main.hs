@@ -25,7 +25,7 @@ import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, re
 import GHC.Exts (IsList (..))
 import NameGen
 import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Imports (..), Rewrite (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', normalizeModule, numDecDispatch, runSubContext, splitAt3, termQQ, withBinding, withMarked)
-import Parser (Bits (..), BlockF (..), BuiltinT (..), Fields (..), Ident (..), Lambda (..), Module (..), NumDesc (..), Quant (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, loadModule', nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parseFile, render, rowOf, traverseTermF, typ, typOf, pattern Op2)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), NumDesc (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, loadModule', nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parseFile, render, rowOf, traverseTermF, typ, typOf, pattern Op2)
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, replicate, runReader, take, to, toList, zip)
@@ -37,6 +37,8 @@ import System.OsPath (encodeUtf, replaceExtension, unsafeEncodeUtf)
 -- TODO: Concat uncomfortably replicates Pi.
 -- TODO: There are few deadly sins (Infer → Check conversions) that should be removed. Infer should never invoke check! (Pi/inferList/???)
 -- TODO: `3 \/ 4` shouldn't probably typecheck.
+-- TODO: I've earlier declared converting Infers to Checks a sin. However, I'm starting to believe that, instead, converting Checks to Infers is sin and
+-- must be avoided at all costs.
 
 type Checker = Context :+: Fresh :+: State UsedNames :+: StackLog :+: Throw (Doc AnsiStyle)
 
@@ -276,8 +278,8 @@ subExVar ty = do
 
 withMono' ∷
   (Has Checker sig m) ⇒
-  -- | Unwrap Foralls
-  Bool →
+  -- | Unwrap Pis?, unwrap Refine?
+  (Bool, Bool) →
   ((Term → m Term) → a → m a) →
   -- | onMeta
   ReaderC Int (WriterC (Vector (Int, Term)) m) Term →
@@ -285,7 +287,7 @@ withMono' ∷
   (Term → m a) →
   Term →
   m a
-withMono' foralls mapTerm onMeta onOther = go
+withMono' (pis, refines) mapTerm onMeta onOther = go
  where
   go =
     unTerm >>> \case
@@ -295,12 +297,20 @@ withMono' foralls mapTerm onMeta onOther = go
         writeMeta (scope, sub) (0, res)
         onOther res
       Pi QEra _n x y
-        | foralls →
+        | pis →
             stackScope (\_ → "(unwrapped forall)")
               $ scopedExVar
                 mapTerm
                 x
                 (go <=< applyLambda y)
+      Refine (RefinePreTy _ ann base)
+        | refines →
+            stackScope (\_ → "(unwrapped @|...|)")
+              $ scopedUniVar
+                mapTerm
+                ann
+                (go <=< applyLambda base)
+      Refine (RefinePostTy base _ _) | refines → go base
       r → onOther $ Term r
 
 withMono ∷
@@ -310,7 +320,7 @@ withMono ∷
   (Term → m a) →
   Term →
   m a
-withMono = withMono' True
+withMono = withMono' (True, True)
 
 data InferMode a where
   Infer ∷ InferMode Term
@@ -369,7 +379,7 @@ inferApp q f a = do
   let norm = q == QNorm
   infer f Infer
     >>= withMono'
-      norm
+      (norm, True)
       id
       ( if norm
           then Term <$> (Pi QNorm Nothing <$> subExVar (Term $ Builtin Any') <*> (Lambda <$> subExVar (Term $ Builtin Any')))
@@ -392,6 +402,12 @@ checkDepLam q i bod inT outT = do
     $ infer (unLambda bod)
     $ Check
     $ unLambda outT'
+
+checkDepPair ∷ ∀ sig m. (Has Checker sig m) ⇒ (Term, Term) → (Dyn, Lambda Dyn) → m ()
+checkDepPair (l, r) (lT, rT) = do
+  infer l . Check =<< fetchT lT
+  l' ← normalize l
+  infer r . Check =<< (`applyLambda` l') =<< fetchLambda rT
 
 data LookupRes a
   = LookupFound !a
@@ -449,6 +465,31 @@ rowGet mapTerm tag cont = go -- tag is source term
             x → notARow x
       )
       row
+
+-- TODO: PRECISE ENUMERATION! So that `refineGet` uses concrete indices instead of relying on names.
+
+refineGet ∷ (Has Checker sig m) ⇒ Int → (Int, Maybe Ident) → Term → m Term
+refineGet var (skips0, etagSearched) = go skips0
+ where
+  go skipped ty =
+    if skipped >= skips0 && isNothing etagSearched
+      then pure ty
+      else
+        withMono'
+          (True, False)
+          id
+          (stackError \_ → "Cannot get erased refinement of unknown")
+          ( unTerm >>> \case
+              -- TODO: If we're being honest, `applyLambda` here is a horrible hack, since we apply a NON-NORMALIZED value to the lambda.
+              Refine (RefinePreTy etagCurr ann base)
+                | skipped >= skips0, Just es ← etagSearched, Just es == etagCurr → pure ann
+                | otherwise → go (skipped + 1) =<< applyLambda base (Term $ RefineGet var (skipped, etagCurr))
+              Refine (RefinePostTy base etagCurr ann)
+                | skipped >= skips0, Just es ← etagSearched, Just es == etagCurr → applyLambda ann (Term $ RefineGet var (skipped + 1, Nothing))
+                | otherwise → go (skipped + 1) base
+              _ → stackError \_ → "TODO couldn't execute .@"
+          )
+          ty
 
 checkList ∷ (Has Checker sig m) ⇒ Vector Term → Dyn → m ()
 checkList els ty = for_ els \el → infer el . Check =<< fetchT ty
@@ -542,7 +583,7 @@ infer = logAndRunInfer $ \case
     scopedExVar id (Term $ Builtin Any') $ dyn >=> \inT → do
       outT ← fetchT inT >>= \inT' → scopedVar id (QNorm, n, Nothing, inT') $ infer (unLambda bod) Infer
       fetchT inT <&> \inT' → Term $ Pi QNorm Nothing inT' $ Lambda $ nested outT
-  (Lam QEra _ _, (_, Infer)) → stackError \_ → "Cannot infer a type of an erased lambda" -- Probably we could, but the idea overall is oxymoron.
+  (Lam QEra _ _, (_, Infer)) → stackError \_ → "TODO Cannot infer a type of an erased lambda" -- Probably we could, but the idea overall is oxymoron.
   (AppErased f a, (_, Infer)) → inferApp QEra f a
   (App (unTerm → App (unTerm → Builtin RecordGet) tag) record, mode) → do
     infer tag $ Check $ Term $ Builtin Tag
@@ -567,6 +608,13 @@ infer = logAndRunInfer $ \case
         for d fetchT >>= \d' → stackError \p →
           "Couldn't find field" <+> p tag' <+> "among" <+> list (p <$> toList d')
       LookupUnknown → stackError \_ → "Can't check if tag is equal"
+  (Refine (RefinePre ann base), CheckL (Refine (RefinePreTy _n annT baseT))) → checkDepPair (ann, base) (annT, baseT)
+  (Refine (RefinePost base ann), CheckL (Refine (RefinePostTy baseT _n annT))) → checkDepPair (base, ann) (baseT, annT)
+  (Refine (RefinePre{}), (_, Infer)) → stackError \_ → "TODO Cannot infer a type of an erased annotation"
+  (Refine (RefinePost{}), (_, Infer)) → stackError \_ → "TODO Cannot infer a type of an erased annotation"
+  (RefineGet i path, (_, Infer)) → do
+    iT ← infer (Term $ Var i) Infer
+    refineGet i path iT
   (App f a, (_, Infer)) → inferApp QNorm f a
   (FieldsLit (FRecord ()) flds, (_, Infer)) → do
     rowFields ← for flds \(n, v) → do
@@ -582,10 +630,7 @@ infer = logAndRunInfer $ \case
               <$> infer l Infer
               <*> (FRow . Lambda . nested <$> infer r Infer)
           )
-  (Concat l (FRecord r), CheckL (Concat lT (FRow rT))) → do
-    infer l . Check =<< fetchT lT
-    l' ← normalize l
-    infer r . Check =<< (`applyLambda` l') =<< fetchLambda rT
+  (Concat l (FRecord r), CheckL (Concat lT (FRow rT))) → checkDepPair (l, r) (lT, rT)
   (NumLit x, CheckL (Builtin (Num d))) →
     if x `numFitsInto` d
       then pure ()
@@ -785,8 +830,9 @@ instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) �
           inT' ← instMeta' locs =<< fetchT inT
           outT' ← instMeta' (locs + 1) . unLambda =<< fetchLambda outT
           pure $ Term $ Pi QNorm n inT' $ Lambda outT'
-        x → stackError \p → "instMeta (of" <+> pretty (scope1, sub1) <> ")" <+> p x
    in
+    -- x → stackError \p → "instMeta (of" <+> pretty (scope1, sub1) <> ")" <+> p x
+
     \val →
       let r = writeMeta (scope1, sub1) . (0,) =<< instMeta' 0 val
        in case val of
