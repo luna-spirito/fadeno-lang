@@ -1,4 +1,7 @@
 -- This is absolutely horrfying and has strict limits which aren't even checked properly
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+
+{-# HLINT ignore "Use const" #-}
 module Compiler where
 
 import Control.Algebra
@@ -16,7 +19,7 @@ import Data.RRBVector (Vector, drop, ifoldl, imap, replicate, reverse, splitAt, 
 import GHC.Exts (IsList (..))
 import NameGen (UsedNames, emptyUsedNames)
 import Normalize (splitAt3)
-import Parser (BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), Quant (..), Term (..), TermF (..), Vector' (..), freshIdent, nestedByP, traverseTermF)
+import Parser (BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), freshIdent, nestedByP, traverseTermF)
 import RIO hiding (Vector, ask, drop, local, replicate, reverse, runReader, take, toList, zip)
 import RIO.HashMap qualified as HM
 
@@ -26,9 +29,14 @@ erase ∷ Vector Bool → Term → Term
 erase reals =
   unTerm >>> \case
     Lam QEra _ body → erase (reals |> False) $ unLambda body
-    AppErased f _ → erase reals f
+    Block (BlockLet QEra _ _ _ into) → erase (reals |> False) $ unLambda into
     Block (BlockRewrite _ into) → erase reals into
+    AppErased f _ → erase reals f
     Var x → Term $ Var $ x - foldl' (\erased isReal → if isReal then erased else erased + 1) 0 (drop (length reals - x) reals)
+    RefineGet i (_, Nothing) → erase reals $ Term $ Var i
+    RefineGet _ (_, Just _) → Term $ FieldsLit (FRecord ()) []
+    Refine (RefinePre _ann base) → erase reals base
+    Refine (RefinePost base _ann) → erase reals base
     x → Term $ run $ traverseTermF (Identity . erase reals) (Identity . Lambda . erase (reals |> True) . unLambda) x
 
 listCaptures ∷ Word8 → Lambda Term → IntSet
@@ -190,6 +198,15 @@ toTagM = \case
 compile' ∷ (Has Compile sig m) ⇒ Term → m Code
 compile' =
   unTerm >>> \case
+    Block (BlockLet QEra _ _ _ _) → undefined
+    Block (BlockRewrite _ _) → undefined
+    ExVar{} → undefined
+    UniVar{} → undefined
+    Lam QEra _ _ → undefined
+    AppErased{} → undefined
+    RefineGet{} → undefined
+    Refine (RefinePre{}) → undefined
+    Refine (RefinePost{}) → undefined
     NumLit x → pure $ CConst $ VNum $ fromIntegral x
     TagLit tag → CConst . VTag <$> registry tag
     BoolLit x → pure $ CConst $ VBool x
@@ -227,7 +244,6 @@ compile' =
             $ execCodeGen closureVars
             $ toCodeGen bodyModule
       pure $ fold captures' <> closure
-    Lam QEra _ _ → error "erased"
     ((unTerm → (unTerm → Term (Builtin If) `App` b) `App` t) `App` f) →
       compile' b >>= \case
         CConst (VBool b') → compile' if b' then t else f
@@ -243,20 +259,17 @@ compile' =
       args' ← for args compile'
       f'' ← compile' f'
       pure $ fold args' <> f'' <> CGen (instr $ IApp $ fromIntegral $ length args)
-    AppErased{} → undefined
     Var x → pure $ CGen $ icopy x
     Block (BlockLet QNorm _n _ty val body) → do
       val' ← compile' val
       body' ← compile' $ unLambda body
       pure $ val' <> CGen (instr IPushVar) <> body' <> CGen (instr IPopVar)
+    Refine (RefinePostTy{}) → pure $ CConst VPanic -- TODO
+    Refine (RefinePreTy{}) → pure $ CConst VPanic -- TODO
     Import (fromMaybe (error "unresolved import") → n) _ → pure $ CConst $ VImport $ fromIntegral n
-    Block (BlockLet QEra _ _ _ _) → error "erased"
-    Block (BlockRewrite _ _) → error "erased"
     Sorry → pure $ CConst VPanic
     Pi{} → pure $ CConst VPanic -- TODO
     Concat{} → pure $ CConst VPanic -- TODO
-    ExVar{} → error "erased"
-    UniVar{} → error "erased"
 
 type CompileResult = ((HashMap Ident Word64, HashMap TagSet Word64), Vector (Vector Instr))
 
