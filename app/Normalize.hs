@@ -9,14 +9,14 @@ import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.Reader (ReaderC, runReader)
 import Control.Carrier.State.Church (StateC, evalState, put, runState)
 import Control.Effect.Empty (empty)
-import Control.Effect.Reader (Reader, ask)
+import Control.Effect.Reader (Reader, ask, local)
 import Control.Effect.State (State, get, modify, state)
 import Data.Bitraversable (bimapM)
 import Data.ByteString.Char8 (pack)
 import Data.Foldable (foldlM)
 import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, ifoldr, splitAt, take, viewl, viewr, zip, (!?), (<|), (|>))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), NumDesc (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedByP, nestedByP', pTerm, parse, recordGet, render, traverseTermF)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedByP, nestedByP', pTerm, parse, recordGet, render, traverseTermF)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, take, to, toList, try, zip)
 
 -- TODO: Erasure is wrong... Verify for \f. f @4
@@ -45,7 +45,7 @@ data Scopes = Scopes !(Vector Binding) !(Vector (Epoch, Vector EEntry)) !(Vector
 data Dyn = Dyn !Epoch !Term
 
 newtype Imports = Imports (Vector (Term, Term)) -- (module, module type)
-type Context = Reader Imports :+: State Scopes
+type Context = Reader IsErased :+: Reader Imports :+: State Scopes
 
 -- | Perform an effectful operation, comitting changes after the operation iff not aborted and EqYes.
 transactContext ∷ (Has Context sig m) ⇒ StateC Scopes m EqRes → m EqRes
@@ -53,8 +53,8 @@ transactContext act = do
   ctx0 ∷ Scopes ← get
   runState (\ctx res → when (res == EqYes) (put ctx) $> res) ctx0 act
 
-runSubContext ∷ (Applicative m) ⇒ Imports → ReaderC Imports (StateC Scopes m) a → m a
-runSubContext i = evalState (Scopes [] [(Epoch 0, [])] []) . runReader i
+runSubContext ∷ (Applicative m) ⇒ Imports → ReaderC IsErased (ReaderC Imports (StateC Scopes m)) a → m a
+runSubContext i = evalState (Scopes [] [(Epoch 0, [])] []) . runReader i . runReader (IsErased False)
 
 withBinding ∷ (Has Context sig m) ⇒ Binding → m a → m a
 withBinding b act = do
@@ -135,6 +135,8 @@ isEq' tryInst = \l0 r0 → transactContext $ go l0 r0
       (Refine (RefinePre{}), _) → undefined
       (_, Refine (RefinePost{})) → undefined
       (_, Refine (RefinePre{})) → undefined
+      (RefineGet _ (_, Nothing), _) → undefined
+      (_, RefineGet _ (_, Nothing)) → undefined
       (Import{}, _) → undefined
       (_, Import{}) → undefined
       (ExVar i, _) → inst i r0
@@ -158,8 +160,6 @@ isEq' tryInst = \l0 r0 → transactContext $ go l0 r0
       (_, Sorry) → pure EqUnknown
       (RefineGet e1 (skips1, Just f1), RefineGet e2 (skips2, Just f2)) →
         pure $ if e1 == e2 && skips1 == skips2 && f1 == f2 then EqYes else EqUnknown
-      (RefineGet _ (_, Nothing), _) → undefined
-      (_, RefineGet _ (_, Nothing)) → undefined
       (RefineGet{}, _) → pure EqUnknown
       (_, RefineGet{}) → pure EqUnknown
       (Concat a1 (FRecord b1), Concat a2 (FRecord b2)) →
@@ -217,8 +217,8 @@ isEq' tryInst = \l0 r0 → transactContext $ go l0 r0
               inT1' ← fetchT inT1
               withBinding (QNorm, i1 <|> i2, Nothing, inT1') $ isEqD (unLambda <$> fetchLambda outT1) (unLambda <$> fetchLambda outT2)
       (Pi{}, _) → pure EqNot
-      (Refine (RefinePreTy i1 ann1 base1), Refine (RefinePreTy i2 ann2 base2)) → goDepPair (i1 <|> i2) (ann1, base1) (ann2, base2)
-      (Refine (RefinePostTy base1 i1 ann1), Refine (RefinePostTy base2 i2 ann2)) → goDepPair (i1 <|> i2) (base1, ann1) (base2, ann2)
+      (Refine (RefinePreTy i1 ann1 base1), Refine (RefinePreTy _i2 ann2 base2)) → goDepPair (Just i1) (ann1, base1) (ann2, base2)
+      (Refine (RefinePostTy base1 i1 ann1), Refine (RefinePostTy base2 _i2 ann2)) → goDepPair (Just i1) (base1, ann1) (base2, ann2)
       (Refine{}, _) → pure EqNot
       (Concat l1 (FRow r1), Concat l2 (FRow r2)) → goDepPair (Just dotvar) (l1, r1) (l2, r2)
       (Concat _ (FRow _), _) → pure EqNot
@@ -459,7 +459,6 @@ traverseNormTermF c locals t0 = rewr =<< trav
       termX ← travVar oldX
       pure $ Term $ case unTerm termX of
         Var x → RefineGet x (skips1, final1)
-        RefineGet x (skips2, Nothing) → RefineGet x (skips1 + skips2, Nothing)
         _ → error "Internal error: cannot substitute into a RefineGet"
     Block (BlockLet _q _name _ty val into) → do
       val' ← c locals val
@@ -509,6 +508,27 @@ normalize = normalize' []
 applyLambda ∷ (Has Context sig m) ⇒ Lambda Term → Term → m Term
 applyLambda bod val = normalize' [Just val] $ unLambda bod
 
+-- | Apply `x.@_@_@_...` to a lambda.
+applyLambdaRefineGetSkip ∷ Int → Int → Lambda Term → Term
+applyLambdaRefineGetSkip binding newSkips =
+  unLambda
+    >>> let
+          shift currI = do
+            -- True on match
+            locs ← ask
+            pure $ case compare currI locs of
+              LT → (currI, False)
+              EQ → (binding + locs, True)
+              GT → (currI - 1, False)
+         in
+          run . runReader @Int 0 . fix \rec →
+            unTerm >>> fmap Term . \case
+              Var currI → Var . fst <$> shift currI
+              RefineGet currI (skips, Just f) → do
+                (newI, match) ← shift currI
+                pure $ RefineGet newI (if match then skips + newSkips else skips, Just f)
+              x → traverseTermF rec (fmap Lambda . local @Int (+ 1) . rec . unLambda) x
+
 {- | Parse builtin
 Just a variation of parseQQ that has all the builtins in scope from the start.
 -}
@@ -524,7 +544,7 @@ termQQ =
    in
     QuasiQuoter
       { quoteExp = \s → do
-          term ← case parse ((QNorm,) . fst <$> scope) (pack s) of
+          term ← case parse (ParserContext (IsErased False) $ (QNorm,) . fst <$> scope) (pack s) of
             Left e → fail $ "termQQ: Parse error: " ++ show e
             Right t → pure t
           let normed = run $ runSubContext (Imports []) $ normalize' (Just . snd <$> scope) term
@@ -536,7 +556,7 @@ termQQ =
 
 normalizeSource ∷ ByteString → IO ()
 normalizeSource x = do
-  let t = either (error . show) id $ parse [] x
+  let t = either (error . show) id $ parse (ParserContext (IsErased False) []) x
   render $ pTerm [] $ run $ runSubContext (Imports []) $ normalize t
 
 normalizeFile ∷ FilePath → IO ()

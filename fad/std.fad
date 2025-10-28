@@ -33,8 +33,11 @@ Not = \A. Fun (A) -> Never
 /: Fun (Bool) -> Type
 Where = \x. Eq x true
 
+/: Type
+Int+ = Int @|pos : Where (. > 0)|
+
 /: Fun {a : Any} {b : Any} (Eq a b) -> Eq b a
-~sym = SORRY
+~sym = \@_ @_ aToB. rewrite aToB in refl
 
 ///: Fun (i : Int+) (n : Int+) {_ : Where (i < n)} -> Int+
 //inv_index = \i n @prf. to_int+ (n - (i + 1)) @prf
@@ -92,4 +95,4 @@ Dyn^ = \u. {( .Ty = Type^ u )} \./ {( .val = ..Ty )}
 ///: Fun (u : Int+) (Fun (Type^ u) -> Type^ u) -> Type^ (u + 1)
 //Church = \u F. Fun {X : Type^ u} (Fun (F X) -> X) -> X
 
-in id id//{ ._>=_ = _>=_ | .Where = Where | .Type = Type}
+in { ._>=_ = _>=_ | ._>_ = _>_ | .Where = Where | .Type = Type}

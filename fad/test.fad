@@ -1,16 +1,29 @@
 unpack fadeno. Any Int refl
-unpack ./std. _>=_ Where Type
+unpack ./std. _>=_ Where Type _>_
 
-/: Type
-Int+ = Int @|positive : Where(. >= 0)|
+/: Fun (Int) (B : Int) {_ : Where (B > 0)} -> Int
+div = SORRY
 
-/: Int+
-example = (1) @|refl|
+Int+ = Int @|greater0 : Where (. > 0)|
 
-/: @|Ty : Type| Ty
-a = @|Int| 4
+/: Fun (Int) (Int+) -> Int
+testdiv = \a b.
+  div a b.@_ @(b.@greater0)
 
-/: Fun {A} (A) -> A
-id = \x. x
+/: Int @|greaterGood : Where (. > 0)|
+vau = 4 @|refl|
 
-in id a
+
+/: Fun (A : Int) {_ : Where (A > 0)} -> Int+
+pack = \a @b. a @|b|
+
+test1 @= vau.@greaterGood
+test2 = testdiv 3 vau
+
+/: @|T : Type| T
+test3 = 4
+
+/: Int
+test4 = vau
+
+in {}
