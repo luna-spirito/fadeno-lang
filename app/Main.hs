@@ -25,7 +25,7 @@ import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, re
 import GHC.Exts (IsList (..))
 import NameGen
 import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Imports (..), Rewrite (..), Scopes (..), applyLambda, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', normalizeModule, numDecDispatch, runSubContext, splitAt3, termQQ, withBinding, withMarked)
-import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), NumDesc (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, loadModule', nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parseFile, render, rowOf, traverseTermF, typ, typOf, pattern Op2)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), NumDesc (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, loadModule', maxOf, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parseFile, render, rowOf, traverseTermF, typ, typOf, pattern Op2)
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, replicate, runReader, take, to, toList, zip)
@@ -191,6 +191,7 @@ scopedUniVar mapTerm ty act = do
   modify @Scopes \(Scopes bs es rs) → Scopes bs (adjust' scope1 (fmap $ maybe (error "impossible") fst . viewr) es) rs
   pure res
 
+-- TODO: Why scopedExVar doesn't Dyn?
 scopedExVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → Term → (Term → m a) → m a
 scopedExVar mapTerm ty0 act = do
   scopeId ← getScopeId
@@ -466,8 +467,6 @@ rowGet mapTerm tag cont = go -- tag is source term
       )
       row
 
--- TODO: PRECISE ENUMERATION! So that `refineGet` uses concrete indices instead of relying on names.
-
 refineGet ∷ (Has Checker sig m) ⇒ Int → (Int, Maybe Ident) → Term → m Term
 refineGet var (skips0, etagSearched) = go skips0
  where
@@ -500,6 +499,7 @@ inferList tts = for (viewl tts) \(t, ts) → do
   checkList ts tT
   fetchT tT
 
+-- TODO: Remove? Was previously used for Pi ?
 -- match Row^ and Type^, since any Row^ is Type^
 isTypePlus ∷ Term → Bool
 isTypePlus =
@@ -507,6 +507,32 @@ isTypePlus =
     Builtin TypePlus → True
     Builtin RowPlus → True
     _ → False
+
+-- | Pi, Concat, Refine
+checkT2 ∷ (Has Checker sig m) ⇒ Maybe Ident → Term → Lambda Term → (Term → Term) → Dyn → m ()
+checkT2 i a b con u = do
+  infer a . Check . con =<< fetchT u
+  a' ← normalize a
+  scopedVar (const pure) (QNorm, i, Nothing, a')
+    . infer (unLambda b)
+    . Check
+    . con
+    . nested
+    =<< fetchT u
+
+inferT2 ∷ (Has Checker sig m) ⇒ Maybe Ident → Term → Lambda Term → (Term → Term) → m Term
+inferT2 i a b con =
+  scopedExVar id (Term $ Builtin $ Num NumInf) $ dyn >=> \u1 →
+    scopedExVar id (Term $ Builtin $ Num NumInf) $ dyn >=> \u2 → do
+      infer a . Check . con =<< fetchT u1
+      a' ← normalize a
+      scopedVar (const pure) (QNorm, i, Nothing, a')
+        . infer (unLambda b)
+        . Check
+        . con
+        . nested
+        =<< fetchT u2
+      normalize . con =<< (maxOf <$> fetchT u1 <*> fetchT u2)
 
 -- | Accepts a term and lifts it into the current scope.
 nestBinding ∷ (Has Checker sig m) ⇒ Int → Term → m Term
@@ -574,6 +600,43 @@ infer = logAndRunInfer $ \case
   (Import (fromMaybe (error "unresolved import") → n) _, (_, Infer)) → do
     Imports imps ← ask
     pure $ maybe (error "Incomplete context") snd $ imps !? n
+  -- main
+  (NumLit x, CheckL (Builtin (Num d))) →
+    if x `numFitsInto` d
+      then pure ()
+      else stackError \_ → "Number literal " <> pretty x <> " does not fit into " <> pIdent (identOfBuiltin $ Num d)
+  (NumLit x, (_, Infer)) →
+    pure
+      $ Term
+      $ Builtin
+      $ Num
+      $ let candidates = NumFin False <$> [Bits8, Bits16, Bits32, Bits64]
+         in fromMaybe NumInf $ find @[] (x `numFitsInto`) candidates
+  (TagLit _, (_, Infer)) → pure $ Term $ Builtin Tag
+  (BoolLit _, (_, Infer)) → pure $ Term $ Builtin Bool
+  (ListLit (Vector' values), (e, Check (Term (App (Term (Builtin List)) (Dyn e → ty))))) → checkList values ty
+  (ListLit (Vector' values), (_, Infer)) → Term . App (Term $ Builtin List) . fromMaybe (Term $ Builtin Never) <$> inferList values
+  (FieldsLit (FRecord ()) flds, (_, Infer)) → do
+    rowFields ← for flds \(n, v) → do
+      infer n $ Check $ Term $ Builtin Tag
+      vTy ← infer v Infer
+      pure (n, vTy)
+    pure $ Term $ FieldsLit (FRow ()) rowFields
+  (FieldsLit (FRow ()) (Vector' flds), (_, Infer)) → do
+    -- TODO: use maxOf chain
+    for_ flds \(n, _) → infer n $ Check $ Term $ Builtin Tag
+    inferList (snd <$> flds) >>= withMonoUniverse id (pure . rowOf) . fromMaybe typ
+  (FieldsLit (FRow ()) (Vector' flds), (e, Check (unTerm → App (isTypePlus → True) (Dyn e . typOf → ty)))) → do
+    for_ flds \(n, _) → infer n $ Check $ Term $ Builtin Tag
+    checkList (snd <$> flds) ty
+  (BuiltinsVar, (_, Infer)) →
+    pure
+      $ Term
+      $ FieldsLit (FRow ())
+      $ Vector'
+      $ (\b → (Term $ TagLit $ identOfBuiltin b, typOfBuiltin b))
+      <$> builtinsList
+  (Builtin x, (_, Infer)) → pure $ typOfBuiltin x
   (Lam q1 n1 bod, CheckL (Pi q2 n2 inT outT)) | q1 == q2 → checkDepLam q1 (n1 <|> n2) bod inT outT
   (term, CheckL (Pi QEra _ xTy yT)) → do
     xTy' ← fetchT xTy
@@ -584,7 +647,6 @@ infer = logAndRunInfer $ \case
       outT ← fetchT inT >>= \inT' → scopedVar id (QNorm, n, Nothing, inT') $ infer (unLambda bod) Infer
       fetchT inT <&> \inT' → Term $ Pi QNorm Nothing inT' $ Lambda $ nested outT
   (Lam QEra _ _, (_, Infer)) → stackError \_ → "TODO Cannot infer a type of an erased lambda" -- Probably we could, but the idea overall is oxymoron.
-  (AppErased f a, (_, Infer)) → inferApp QEra f a
   (App (unTerm → App (unTerm → Builtin RecordGet) tag) record, mode) → do
     infer tag $ Check $ Term $ Builtin Tag
     tag' ← normalize tag
@@ -608,42 +670,7 @@ infer = logAndRunInfer $ \case
         for d fetchT >>= \d' → stackError \p →
           "Couldn't find field" <+> p tag' <+> "among" <+> list (p <$> toList d')
       LookupUnknown → stackError \_ → "Can't check if tag is equal"
-  (Refine (RefinePre ann base), CheckL (Refine (RefinePreTy _n annT baseT))) → checkDepPair (ann, base) (annT, baseT)
-  (Refine (RefinePost base ann), CheckL (Refine (RefinePostTy baseT _n annT))) → checkDepPair (base, ann) (baseT, annT)
-  (Refine (RefinePre{}), (_, Infer)) → stackError \_ → "TODO Cannot infer a type of an erased annotation"
-  (Refine (RefinePost{}), (_, Infer)) → stackError \_ → "TODO Cannot infer a type of an erased annotation"
-  (RefineGet i path, (_, Infer)) → do
-    iT ← infer (Term $ Var i) Infer
-    refineGet i path iT
   (App f a, (_, Infer)) → inferApp QNorm f a
-  (FieldsLit (FRecord ()) flds, (_, Infer)) → do
-    rowFields ← for flds \(n, v) → do
-      infer n $ Check $ Term $ Builtin Tag
-      vTy ← infer v Infer
-      pure (n, vTy)
-    pure $ Term $ FieldsLit (FRow ()) rowFields
-  (ListLit (Vector' values), (e, Check (Term (App (Term (Builtin List)) (Dyn e → ty))))) → checkList values ty
-  (ListLit (Vector' values), (_, Infer)) → Term . App (Term $ Builtin List) . fromMaybe (Term $ Builtin Never) <$> inferList values
-  (Concat l (FRecord r), (_, Infer)) →
-    Term
-      <$> ( Concat
-              <$> infer l Infer
-              <*> (FRow . Lambda . nested <$> infer r Infer)
-          )
-  (Concat l (FRecord r), CheckL (Concat lT (FRow rT))) → checkDepPair (l, r) (lT, rT)
-  (NumLit x, CheckL (Builtin (Num d))) →
-    if x `numFitsInto` d
-      then pure ()
-      else stackError \_ → "Number literal " <> pretty x <> " does not fit into " <> pIdent (identOfBuiltin $ Num d)
-  (NumLit x, (_, Infer)) →
-    pure
-      $ Term
-      $ Builtin
-      $ Num
-      $ let candidates = NumFin False <$> [Bits8, Bits16, Bits32, Bits64]
-         in fromMaybe NumInf $ find @[] (x `numFitsInto`) candidates
-  (TagLit _, (_, Infer)) → pure $ Term $ Builtin Tag
-  (BoolLit _, (_, Infer)) → pure $ Term $ Builtin Bool
   (Var i, (_, Infer)) → do
     Scopes binds _ _ ← get @Scopes
     let scope = length binds - i - 1
@@ -652,62 +679,31 @@ infer = logAndRunInfer $ \case
         stackLog \p → "var" <+> pretty i <+> ":" <+> p ty
         nestBinding scope ty
       _ → stackError \_ → "Unknown var #" <> pretty i
-  -- Type-level
-  (FieldsLit (FRow ()) (Vector' flds), (_, Infer)) → do
-    for_ flds \(n, _) → infer n $ Check $ Term $ Builtin Tag
-    inferList (snd <$> flds) >>= withMonoUniverse id (pure . rowOf) . fromMaybe typ
-  (FieldsLit (FRow ()) (Vector' flds), (e, Check (unTerm → App (isTypePlus → True) (Dyn e . typOf → ty)))) → do
-    for_ flds \(n, _) → infer n $ Check $ Term $ Builtin Tag
-    checkList (snd <$> flds) ty
-  -- TODO Ctrl+C & Ctrl+V hell, rewrite somehow..
-  (Concat l (FRow r), (e, Check (unTerm → App (isTypePlus → True) (Dyn e → u)))) → do
-    infer l . Check . rowOf =<< fetchT u
-    l' ← normalize l
-    fetchT u
-      >>= scopedVar (const pure) (QNorm, Just dotvar, Nothing, l')
-      . infer (unLambda r)
-      . Check
-      . rowOf
-      . nested
-  (Concat l (FRow r), (_, Infer)) → do
-    infer l Infer
-      >>= withMono
-        id
-        (rowOf <$> subExVar (Term $ Builtin Any'))
-        ( \t0 →
-            getEpoch >>= \e → case unTerm t0 of
-              App (unTerm → Builtin RowPlus) (Dyn e → lT) → do
-                l' ← normalize l
-                fetchT lT >>= scopedVar (const pure) (QNorm, Just dotvar, Nothing, l') . infer (unLambda r) . Check . rowOf . nested
-                rowOf <$> fetchT lT
-              _ → stackError \p → p l <+> "is not a row"
-        )
-  (Pi _q i inTy outTy, (e, Check (unTerm → App (isTypePlus → True) (Dyn e → u)))) → do
-    infer inTy . Check . typOf =<< fetchT u
-    inTy' ← normalize inTy
-    fetchT u
-      >>= scopedVar (const pure) (QNorm, i, Nothing, inTy')
-      . infer (unLambda outTy)
-      . Check
-      . typOf
-      . nested
-  (Pi _q i inTy outTy, (_, Infer)) → do
-    infer inTy Infer
-      >>= withMonoUniverse
-        id
-        ( dyn >=> \u → do
-            inTy' ← normalize inTy
-            fetchT u >>= scopedVar (const pure) (QNorm, i, Nothing, inTy') . infer (unLambda outTy) . Check . typOf . nested
-            typOf <$> fetchT u
-        )
-  (Builtin x, (_, Infer)) → pure $ typOfBuiltin x
-  (BuiltinsVar, (_, Infer)) →
-    pure
-      $ Term
-      $ FieldsLit (FRow ())
-      $ Vector'
-      $ (\b → (Term $ TagLit $ identOfBuiltin b, typOfBuiltin b))
-      <$> builtinsList
+  (Sorry, (_, Check k)) → stackLog \p → annotate (color Yellow) $ "sorry :" <+> p k
+  (Sorry, (_, Infer)) → stackError \_ → "sorry"
+  (RefineGet i path, (_, Infer)) → do
+    iT ← infer (Term $ Var i) Infer
+    refineGet i path iT
+  (AppErased f a, (_, Infer)) → inferApp QEra f a
+  (Refine (RefinePre ann base), CheckL (Refine (RefinePreTy _n annT baseT))) → checkDepPair (ann, base) (annT, baseT)
+  (Refine (RefinePost base ann), CheckL (Refine (RefinePostTy baseT _n annT))) → checkDepPair (base, ann) (baseT, annT)
+  (Refine (RefinePre{}), (_, Infer)) → stackError \_ → "TODO Cannot infer a type of an erased annotation"
+  (Refine (RefinePost{}), (_, Infer)) → stackError \_ → "TODO Cannot infer a type of an erased annotation"
+  (Concat l (FRecord r), (_, Infer)) →
+    Term
+      <$> ( Concat
+              <$> infer l Infer
+              <*> (FRow . Lambda . nested <$> infer r Infer)
+          )
+  -- type
+  (Refine (RefinePreTy i annT baseT), CheckL (App (Dyn _ (unTerm → Builtin TypePlus)) u)) → checkT2 i annT baseT typOf u
+  (Refine (RefinePreTy i annT baseT), (_, Infer)) → inferT2 i annT baseT typOf
+  (Refine (RefinePostTy baseT _ annT), CheckL (App (Dyn _ (unTerm → Builtin TypePlus)) u)) → checkT2 (Just dotvar) baseT annT typOf u
+  (Refine (RefinePostTy baseT _ annT), (_, Infer)) → inferT2 (Just dotvar) baseT annT typOf
+  (Pi _q i inTy outTy, CheckL (App (Dyn _ (unTerm → Builtin TypePlus)) u)) → checkT2 i inTy outTy typOf u
+  (Pi _q i inTy outTy, (_, Infer)) → inferT2 i inTy outTy typOf
+  (Concat l (FRow r), CheckL (App (Dyn _ (isTypePlus → True)) u)) → checkT2 (Just dotvar) l r rowOf u
+  (Concat l (FRow r), (_, Infer)) → inferT2 (Just dotvar) l r rowOf
   (UniVar _ ty, (_, Infer)) → pure ty
   (ExVar (scopeid, subid), (_, Infer)) → do
     Scopes _ exs _ ← get @Scopes
@@ -724,8 +720,6 @@ infer = logAndRunInfer $ \case
         EVar _ (Right ty') ← scope !? i
         pure (scopeid, ty')
     nestBinding exScope ty
-  (Sorry, (_, Check k)) → stackLog \p → annotate (color Yellow) $ "sorry :" <+> p k
-  (Sorry, (_, Infer)) → stackError \_ → "sorry"
   (t, (e, Check c)) → stackScope (\p → "check via infer" <+> p (Term t) <+> ":" <+> p c) do
     ty ← infer (Term t) Infer
     (ty `subtype`) =<< fetchT (Dyn e c)
@@ -767,10 +761,11 @@ typOfBuiltin = \case
   opd d = Term $ Pi QNorm Nothing (Term $ Builtin $ Num d) $ Lambda $ Term $ Builtin $ Num d
   op2d d = Term $ Pi QNorm Nothing (Term $ Builtin $ Num d) $ Lambda $ opd d
 
+-- | Instantiate meta to a normalized value
 instMeta ∷ ∀ sig m. (Has Checker sig m) ⇒ (Int, Int) → Term → m ()
 instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) →
   let
-    getCurrPos (scopeI, subI) = do
+    getOrd (scopeI, subI) = do
       Scopes _ exs _ ← get @Scopes
       pure $ (scopeI,) $ fromMaybe (error "Ex not found in scope") do
         (_, scope) ← exs !? scopeI
@@ -784,55 +779,68 @@ instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) �
           scope
     instMeta' ∷ Int → Term → m Term
     instMeta' locs t0 =
-      getEpoch >>= \e → case t0 of
-        (fDyn e → ExVar (scope2, sub2)) → do
-          (pos1, pos2) ← (,) <$> getCurrPos (scope1, sub1) <*> getCurrPos (scope2, sub2)
-          if pos2 <= pos1
+      getEpoch >>= \e → case fDyn e t0 of
+        ExVar (scope2, sub2) → do
+          (ord1, ord2) ← (,) <$> getOrd (scope1, sub1) <*> getOrd (scope2, sub2)
+          if ord2 <= ord1
             then pure $ Term $ ExVar (scope2, sub2)
             else do
               u ← fresh
               Scopes _ exs _ ← get @Scopes
               let
                 t2 = fromMaybe (error "Ex not found in scope") do
-                  (_, scope) ← exs !? fst pos2
-                  EVar _ (Right ty) ← scope !? snd pos2
+                  (_, scope) ← exs !? fst ord2
+                  EVar _ (Right ty) ← scope !? snd ord2
                   pure ty
-              writeExBefore [(u, t2)] pos1
+              writeExBefore [(u, t2)] (scope1, sub1)
               writeMeta (scope2, sub2) (locs, Term $ ExVar (scope1, u))
               pure $ Term $ ExVar (scope1, u)
-        uni@(fDyn e → UniVar uni2 _) → do
-          (pos1, pos2) ← (,) <$> getCurrPos (scope1, sub1) <*> getCurrPos uni2
-          if pos2 <= pos1
-            then pure uni
+        UniVar uni2 _ → do
+          (ord1, ord2) ← (,) <$> getOrd (scope1, sub1) <*> getOrd uni2
+          if ord2 <= ord1
+            then pure t0
             else stackError \_ → "Attempting to assign existential to later introduced universal"
-        Term (App (Term (Builtin W)) a) → pure $ Term $ Term (Builtin W) `App` a
-        (fDyn e → App f a) → do
+        App (Dyn _ (Term (Builtin W))) (Dyn _ a) → pure $ Term $ Term (Builtin W) `App` a
+        -- Literals
+        NumLit x → pure $ Term $ NumLit x
+        TagLit x → pure $ Term $ TagLit x
+        BoolLit x → pure $ Term $ BoolLit x
+        FieldsLit fi flds → Term . FieldsLit fi <$> traverse (bitraverse (instMeta' locs <=< fetchT) (instMeta' locs <=< fetchT)) flds
+        Builtin x → pure $ Term $ Builtin x
+        Lam QNorm i a → Term . Lam QNorm i . Lambda <$> (instMeta' (locs + 1) . unLambda =<< fetchLambda a)
+        App f a → do
           f' ← instMeta' locs =<< fetchT f
           a' ← instMeta' locs =<< fetchT a
           pure $ Term $ App f' a'
-        (fDyn e → FieldsLit fi flds) → Term . FieldsLit fi <$> traverse (bitraverse (instMeta' locs <=< fetchT) (instMeta' locs <=< fetchT)) flds
-        (fDyn e → Concat a (FRecord b)) →
+        Var x → pure $ Term $ Var x
+        Sorry → pure $ Term Sorry -- questionable
+        RefineGet i (skips, Just f) → pure $ Term $ RefineGet i (skips, Just f)
+        Refine (RefinePreTy n annTy base) →
+          Term
+            . Refine
+            <$> (RefinePreTy n <$> (instMeta' locs =<< fetchT annTy) <*> fmap Lambda (instMeta' (locs + 1) . unLambda =<< fetchLambda base))
+        Refine (RefinePostTy base n annTy) →
+          Term
+            . Refine
+            <$> (RefinePostTy <$> (instMeta' locs =<< fetchT base) <*> pure n <*> fmap Lambda (instMeta' (locs + 1) . unLambda =<< fetchLambda annTy))
+        Pi QNorm n inT outT → do
+          inT' ← instMeta' locs =<< fetchT inT
+          outT' ← instMeta' (locs + 1) . unLambda =<< fetchLambda outT
+          pure $ Term $ Pi QNorm n inT' $ Lambda outT'
+        Concat a (FRecord b) →
           Term
             <$> ( Concat
                     <$> (instMeta' locs =<< fetchT a)
                     <*> (FRecord <$> (instMeta' locs =<< fetchT b))
                 )
-        (fDyn e → Concat a (FRow b)) → do
-          a' ← instMeta' locs =<< fetchT a
-          b' ← instMeta' (locs + 1) . unLambda =<< fetchLambda b -- resolve' 1 exs $ unLambda b
-          pure $ Term $ Concat a' $ FRow $ Lambda b'
-        (fDyn e → Var x) → pure $ Term $ Var x -- TODO: I hope this is correct, but needs to be rechecked.
-        (fDyn e → Builtin x) → pure $ Term $ Builtin x
-        (fDyn e → BoolLit x) → pure $ Term $ BoolLit x
-        (fDyn e → NumLit x) → pure $ Term $ NumLit x
-        (fDyn e → TagLit x) → pure $ Term $ TagLit x
-        (fDyn e → Pi QNorm n inT outT) → do
-          inT' ← instMeta' locs =<< fetchT inT
-          outT' ← instMeta' (locs + 1) . unLambda =<< fetchLambda outT
-          pure $ Term $ Pi QNorm n inT' $ Lambda outT'
+        Concat a (FRow b) →
+          Term
+            <$> ( Concat
+                    <$> (instMeta' locs =<< fetchT a)
+                    <*> (FRow . Lambda <$> (instMeta' (locs + 1) . unLambda =<< fetchLambda b))
+                )
+        _ → stackError \p → "instMeta (of" <+> pretty (scope1, sub1) <> ")" <+> p t0
    in
-    -- x → stackError \p → "instMeta (of" <+> pretty (scope1, sub1) <> ")" <+> p x
-
     \val →
       let r = writeMeta (scope1, sub1) . (0,) =<< instMeta' 0 val
        in case val of
@@ -854,18 +862,18 @@ subtype = \a b →
   subtype' ∷ Term → Term → m ()
   subtype' t10 t20 =
     getEpoch >>= \e → case (t10, t20) of
-      -- Existential Variables (?a <: ?b, ?a <: T, T <: ?a)
-      (fDyn e → ExVar ex1, fDyn e → ExVar ex2) | ex1 == ex2 → pure ()
-      (fDyn e → ExVar ex1, t2) → instMeta ex1 t2
-      (t1, fDyn e → ExVar ex) → instMeta ex t1
-      -- Universal Variables (u1 <: u2) - Must be identical.
-      (fDyn e → UniVar id1 _, fDyn e → UniVar id2 _) | id1 == id2 → pure ()
       -- T <: Pi QEra x:K. Body  => Introduce UniVar for x
       (t, unTerm → Pi QEra (Just _n) inT outT) →
         scopedUniVar (const pure) inT (subtype t <=< applyLambda outT)
       -- Pi QEra x:K. Body <: T => Introduce ExVar for x
       (unTerm → Pi QEra (Just n) inT outT, t) →
         scopedExVar (\_ _ → stackError \_ → "Unresolved existential" <+> pIdent n) inT ((`subtype` t) <=< applyLambda outT)
+      -- Existential Variables (?a <: ?b, ?a <: T, T <: ?a)
+      (fDyn e → ExVar ex1, fDyn e → ExVar ex2) | ex1 == ex2 → pure ()
+      (fDyn e → ExVar ex1, t2) → instMeta ex1 t2
+      (t1, fDyn e → ExVar ex) → instMeta ex t1
+      -- Universal Variables (u1 <: u2) - Must be identical.
+      (fDyn e → UniVar id1 _, fDyn e → UniVar id2 _) | id1 == id2 → pure ()
       -- Function Types (Πx:T1.U1 <: Πy:T2.U2)
       (fDyn e → Pi q1 n1 inT1 outT1, fDyn e → Pi q2 n2 inT2 outT2) | q1 == q2 → do
         -- Input types are contravariant (T2 <: T1)
@@ -974,7 +982,7 @@ build ∷ FilePath → IO ()
 build path = do
   path' ← encodeUtf path
   (names, m) ← loadModule' path'
-  checkModule (names, m)
+  checkModuleDebug (names, m)
   writeFile' (path' `replaceExtension` (unsafeEncodeUtf ".fadobj"))
     $ serializeCompileResult
     $ compileModule m

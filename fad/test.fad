@@ -1,7 +1,7 @@
 unpack fadeno. Any Int refl
 unpack ./std. _>=_ Where Type
 
-/: Any
+/: Type
 Int+ = Int @|positive : Where(. >= 0)|
 
 /: Int+

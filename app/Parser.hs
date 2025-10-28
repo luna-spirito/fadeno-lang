@@ -32,6 +32,7 @@ module Parser (
   nestedBy',
   nestedByP,
   nestedByP',
+  maxOf,
   parseQQ,
   pIdent,
   pQuant,
@@ -116,9 +117,9 @@ data BuiltinT
   | Unwrap
   | Never
   | Any'
+  | Num !NumDesc
   | Add !NumDesc
   | Mul !NumDesc
-  | Num !NumDesc
   | IntNeg !NumDesc
   deriving (Show, Eq, Ord, Lift)
 
@@ -134,10 +135,6 @@ builtinsList =
 
 identOfBuiltin ∷ BuiltinT → Ident
 identOfBuiltin = \case
-  Add d → r $ numDesc False d <> "_add"
-  IntNeg d → r $ numDesc False d <> "_neg"
-  Mul d → r $ numDesc False d <> "_mul"
-  Num d → r $ numDesc True d
   Tag → r "Tag"
   Bool → r "Bool"
   RowPlus → r "Row^"
@@ -160,6 +157,10 @@ identOfBuiltin = \case
   Unwrap → r "unwrap"
   Never → r "Never"
   Any' → r "Any"
+  Num d → r $ numDesc True d
+  Add d → r $ numDesc False d <> "_add"
+  Mul d → r $ numDesc False d <> "_mul"
+  IntNeg d → r $ numDesc False d <> "_neg"
  where
   numDesc upper desc =
     (if upper then "I" else "i")
@@ -242,16 +243,16 @@ data TermF a
   | Lam !Quant !(Maybe Ident) !(Lambda a)
   | App !a !a
   | Var !Int
-  | Sorry
+  | Sorry -- TODO: Pretty sure it should be destoyed in favour of application-scope existentials.
+  | RefineGet !Int !(Int, Maybe Ident)
   | -- Erased
     Block !(BlockF a)
   | AppErased !a !a -- TODO: Maybe
   | Refine !(RefineK a)
-  | RefineGet !Int !(Int, Maybe Ident)
   | Import !(Maybe Int {- resolved -}) !ByteString -- Erased from the perspective of `normalize`, kept by `compile`
   | -- Type-level
-    Pi !Quant !(Maybe Ident) !a !(Lambda a) -- TODO: Demote Pi and Concat to builtins?
-  | Concat !a !(FieldsK a (Lambda a))
+    Pi !Quant !(Maybe Ident) !a !(Lambda a)
+  | Concat !a !(FieldsK a (Lambda a)) -- TODO: Demote Concat to builtin?
   | ExVar !(Int, Int)
   | UniVar !(Int, Int) !a
   deriving
@@ -278,6 +279,9 @@ typ = typOf $ Term $ NumLit 0
 
 eqOf ∷ Term → Term → Term
 eqOf a b = Term $ Term (Term (Builtin Eq) `App` a) `App` b
+
+maxOf ∷ Term → Term → Term
+maxOf a b = Term (App (Term (App (Term (App (Term (Builtin If)) (Term (App (Term (Builtin IntGte0)) (Term (App (Term (App (Term (Builtin (Add NumInf))) (Term (App (Term (App (Term (Builtin (Mul NumInf))) (Term (NumLit (-1))))) b)))) a)))))) a)) b)
 
 -- parsing
 
@@ -677,16 +681,20 @@ nestedBy' locs0 t00 by =
     $ runEmpty (pure Nothing) (pure . Just)
     $ fix
       ( \rec t0 →
-          Term <$> case unTerm t0 of
-            Var n → do
+          let
+            upd n = do
               locs ← R.ask
               if n >= locs
                 then
                   if n + by >= 0
-                    then pure $ Var $ n + by
+                    then pure $ n + by
                     else E.empty
-                else pure $ Var n
-            t → traverseTermF rec (\t1 → Lambda <$> R.local @Int (+ 1) (rec $ unLambda t1)) t
+                else pure n
+           in
+            Term <$> case unTerm t0 of
+              Var n → Var <$> upd n
+              RefineGet i s → (`RefineGet` s) <$> upd i
+              t → traverseTermF rec (\t1 → Lambda <$> R.local @Int (+ 1) (rec $ unLambda t1)) t
       )
       t00
 
