@@ -364,7 +364,7 @@ splitAt3 i v =
 
 tryRewrite ∷ (Has Context sig m) ⇒ Rewrite → Term → m (Maybe Term)
 tryRewrite (Rewrite forallsCount lfromto) t = do
-  -- traceM $ "rewrite " <> tshow t <> " with " <> tshow lfromto
+  traceM $ "rewrite " <> tshow t <> " with (" <> tshow forallsCount <> ") " <> tshow lfromto
   scopeId ← getScopeId
   let
     foralls = [-1, -2 .. (-forallsCount)]
@@ -535,12 +535,21 @@ Just a variation of parseQQ that has all the builtins in scope from the start.
 termQQ ∷ QuasiQuoter
 termQQ =
   let
-    wher ∷ Term
     wher = Term $ Lam QNorm (Just $ Ident "n" False) $ Lambda $ Term $ Term (Term (Builtin Eq) `App` Term (Var 0)) `App` Term (BoolLit True)
+    sub = Term $ Lam QNorm (Just (Ident "a" False)) (Lambda (Term (Lam QNorm (Just (Ident "b" False)) (Lambda (Term (App (Term (App (Term (Builtin (Add NumInf))) (Term (App (Term (App (Term (Builtin (Mul NumInf))) (Term (NumLit (-1))))) (Term (Var 0)))))) (Term (Var 1))))))))
+    lte = Term{unTerm = Lam QNorm (Just (Ident "a" False)) (Lambda{unLambda = Term{unTerm = Lam QNorm (Just (Ident "b" False)) (Lambda{unLambda = Term{unTerm = App (Term{unTerm = Builtin IntGte0}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Add NumInf)}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Mul NumInf)}) (Term{unTerm = NumLit (-1)})}) (Term{unTerm = Var 1})})}) (Term{unTerm = Var 0})})}})}})}
+    lt = Term{unTerm = Lam QNorm (Just (Ident "a" False)) (Lambda{unLambda = Term{unTerm = Lam QNorm (Just (Ident "b" False)) (Lambda{unLambda = Term{unTerm = App (Term{unTerm = Builtin IntGte0}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Add NumInf)}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Add NumInf)}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Mul NumInf)}) (Term{unTerm = NumLit (-1)})}) (Term{unTerm = Var 1})})}) (Term{unTerm = Var 0})})}) (Term{unTerm = NumLit (-1)})})}})}})}
+    intp = Term{unTerm = Refine (RefinePostTy (Term{unTerm = Builtin (Num NumInf)}) (Ident "pos" False) (Lambda{unLambda = Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin Eq}) (Term{unTerm = App (Term{unTerm = Builtin IntGte0}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Add NumInf)}) (Term{unTerm = Var 0})}) (Term{unTerm = NumLit (-1)})})})}) (Term{unTerm = BoolLit True})}}))}
     scope ∷ Vector (Maybe Ident, Term)
     scope =
       ((\b → (Just $ identOfBuiltin b, Term $ Builtin b)) <$> builtinsList)
-        <> [(Just $ Ident "+" True, Term $ Builtin $ Add NumInf), (Just $ Ident "Where" False, wher)]
+        <> [ (Just $ Ident "+" True, Term $ Builtin $ Add NumInf)
+           , (Just $ Ident "-" True, sub)
+           , (Just $ Ident "Where" False, wher)
+           , (Just $ Ident "<=" True, lte)
+           , (Just $ Ident "<" True, lt)
+           , (Just $ Ident "Int+" False, intp)
+           ]
    in
     QuasiQuoter
       { quoteExp = \s → do

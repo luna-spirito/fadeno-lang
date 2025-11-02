@@ -1,5 +1,5 @@
 unpack fadeno. Type^ Int Tag List Bool Eq refl Row^ list_length list_indexl
-if W int_>=0 wrap unwrap rec Never Any int_neg tag_==
+if W int_>=0 wrap unwrap fix Never Any int_neg tag_==
 
 _+_ = fadeno.int_add
 _-_ = \a b. a + (int_neg b)
@@ -38,6 +38,31 @@ Int+ = Int @|pos : Where (. > 0)|
 
 /: Fun {a : Any} {b : Any} (Eq a b) -> Eq b a
 ~sym = \@_ @_ aToB. rewrite aToB in refl
+
+/: Fun {u} (Row^ u) -> Type^ u
+Opt = \R. {( .has = Bool )} \./ (if ..has R Unit)
+
+/: Fun {u} (Type^ u) (Type^ u) -> Type^ u
+Iter = \ElT T. Fun (T) -> Opt {( .x = ElT | .xs = T)}
+
+FinIter = \ElT T. @|maxsize : Fun (T) -> Int+|
+    Iter ElT T
+    @|dec :
+        Fun (curr : T) {r : Where (. curr).has} ->
+        Where (rewrite r in (maxsize (. curr).xs < maxsize curr)) |
+
+// TODO: rename
+/: Fun {A} {T} {R} (FinIter A T) (T) (R) (Fun (A) (Fun (Unit) -> R) -> R) -> R
+iter_fix = \@A @T @R I it0 base step.
+  fix @T @R @(I.@maxsize) (\it rec.
+    xxs = I it
+    in if xxs.has
+      (\@yes. rewrite yes in step xxs.x (\_unit. rec xxs.xs @SORRY)) //(I.@dec it @refl)))
+      base
+  ) it0
+///: F
+
+//Iterator = \Acc. @|maxsize : Acc -> Int+| (Fun (a : Acc) (_ : Where (maxsize a > 0)) ->
 
 ///: Fun (i : Int+) (n : Int+) {_ : Where (i < n)} -> Int+
 //inv_index = \i n @prf. to_int+ (n - (i + 1)) @prf
@@ -95,4 +120,4 @@ Dyn^ = \u. {( .Ty = Type^ u )} \./ {( .val = ..Ty )}
 ///: Fun (u : Int+) (Fun (Type^ u) -> Type^ u) -> Type^ (u + 1)
 //Church = \u F. Fun {X : Type^ u} (Fun (F X) -> X) -> X
 
-in { ._>=_ = _>=_ | ._>_ = _>_ | .Where = Where | .Type = Type}
+in Iter //_>_ //{ ._>=_ = _>=_ | ._>_ = _>_ | .Where = Where | .Type = Type}

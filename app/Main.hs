@@ -39,6 +39,13 @@ import System.OsPath (encodeUtf, replaceExtension, unsafeEncodeUtf)
 -- TODO: `3 \/ 4` shouldn't probably typecheck.
 -- TODO: I've earlier declared converting Infers to Checks a sin. However, I'm starting to believe that, instead, converting Checks to Infers is sin and
 -- must be avoided at all costs.
+-- TODO: Currently, we do not check if type signatures are sensible. So we could write:
+-- ```fad
+-- /: Fun (u) -> Type^ u
+-- test = \_. Int
+--
+-- in test (-1)
+-- ```
 
 type Checker = Context :+: Fresh :+: State UsedNames :+: StackLog :+: Throw (Doc AnsiStyle)
 
@@ -361,6 +368,11 @@ numFitsInto x d =
 insideEra ∷ (Has Context sig m) ⇒ m a → m a
 insideEra = local @IsErased (\_ → IsErased True)
 
+insideQuant ∷ (Has Checker sig m) ⇒ Quant → m a → m a
+insideQuant q = case q of
+  QEra → insideEra
+  QNorm → id
+
 -- | Check, instantly unwrapping a layer
 pattern CheckL ∷ () ⇒ (a2 ~ ()) ⇒ TermF Dyn → (Epoch, InferMode a2)
 pattern CheckL x ← (e, Check (fDyn e → x))
@@ -512,8 +524,9 @@ checkT2 i a b con u = do
 
 inferT2 ∷ (Has Checker sig m) ⇒ Maybe Ident → Term → Lambda Term → (Term → Term) → m Term
 inferT2 i a b con =
-  scopedExVar id (Term $ Builtin $ Num NumInf) $ dyn >=> \u1 →
-    scopedExVar id (Term $ Builtin $ Num NumInf) $ dyn >=> \u2 → do
+  scopedExVar id (Term $ Builtin Any') $ dyn >=> \u1 →
+    -- TODO: Good enough, or stricter?
+    scopedExVar id (Term $ Builtin Any') $ dyn >=> \u2 → do
       infer a . Check . con =<< fetchT u1
       a' ← normalize a
       scopedVar (const pure) (QNorm, i, Nothing, a')
@@ -542,11 +555,6 @@ withMonoUniverse mapTerm f =
     App (isTypePlus → True) u → f u
     t → stackError \p → p (Term t) <+> "is not a kind"
 
-insideQuant ∷ (Has Checker sig m) ⇒ Quant → m a → m a
-insideQuant q = case q of
-  QEra → local (\_ → IsErased True)
-  QNorm → id
-
 -- | Either infers a normalized type for the value and context, or checks a value against the normalized type.
 infer ∷ ∀ sig m a. (Has Checker sig m) ⇒ Term → InferMode a → m a
 infer = logAndRunInfer $ \case
@@ -572,7 +580,7 @@ infer = logAndRunInfer $ \case
         subty ← fetchT $ Dyn e subty0
         fInto (const pure) $ Check $ nested subty
   (Block (BlockRewrite prf inner), mode) → do
-    prfTy0 ← infer prf Infer
+    prfTy0 ← insideEra $ infer prf Infer
     let
       intoRewr = \case
         Term (Pi QEra _ (Term (Builtin Any')) into) → (\(Rewrite locs lfromto) → Rewrite (locs + 1) lfromto) <$> intoRewr (unLambda into)
@@ -732,9 +740,9 @@ typOfBuiltin = \case
   Tag → [termQQ| Type^ 0 |]
   Bool → [termQQ| Type^ 0 |]
   -- TODO: Int+ alternative here then?
-  RowPlus → [termQQ| Fun (u : Int) -> Type^ u |]
+  RowPlus → [termQQ| Fun (u : Int+) -> Type^ u |]
+  TypePlus → [termQQ| Fun (u : Int+) -> Type^ (u + 1) |]
   List → [termQQ| Fun {u} (Type^ u) -> Type^ u |]
-  TypePlus → [termQQ| Fun (u : Int) -> Type^ (u + 1) |]
   Eq → [termQQ| Fun (Any) (Any) -> Type^ 0 |]
   Refl → [termQQ| Fun {x} -> Eq x x |]
   RecordGet →
@@ -745,8 +753,8 @@ typOfBuiltin = \case
   RecordKeepFields → [termQQ| Fun {u : Int} {row : Row^ u} (List Tag) (row) -> Any |]
   RecordDropFields → [termQQ| Fun {u : Int} {row : Row^ u} (List Tag) (row) -> Any |]
   ListLength → [termQQ| Fun {A} (List A) -> Int |]
-  ListIndexL → [termQQ| Fun {A} (i : Int) (l : List A) {_ : Where (int_>=0 ((list_length l + int_neg i) + -1))} -> A |]
-  Fix' → [termQQ| Fun {I} {O} {mu : Fun (I) -> Int} (Fun (curr : I) (Fun (next : I) {_ : Where (int_>=0 ((mu curr + (int_neg (mu next))) + -1))} -> O) -> O) (I) -> O|]
+  ListIndexL → [termQQ| Fun {A} (i : Int) (l : List A) {_ : Where (i < list_length l)} -> A |]
+  Fix' → [termQQ| Fun {I} {O} {measure : Fun (I) -> Int+} (Fun (curr : I) (Fun (next : I) {_ : Where (measure next < measure curr)} -> O) -> O) (I) -> O|]
   If → [termQQ| Fun {A} (cond : Bool) (Fun {_ : Eq cond true} -> A) (Fun {_ : Eq cond false} -> A) -> A |]
   IntGte0 → [termQQ| Fun (Int) -> Bool |]
   IntEq → [termQQ| Fun (Int) (Int) -> Bool |]
@@ -905,7 +913,7 @@ subtype = \a b →
       -- Type Universes (Type L1 <: Type L2 where L1 <= L2)
       (Term (App (fDyn e → Builtin TypePlus) a0), Term (App (fDyn e → Builtin TypePlus) b0)) → do
         case (a0, b0) of
-          (fDyn e → NumLit 0, _) → pure ()
+          (fDyn e → NumLit 0, _) → pure () -- TODO: Remove?
           -- If one level is existential, unify it with the other level constraint.
           (fDyn e → ExVar ex, b) → instMeta ex b
           (a, fDyn e → ExVar ex) → instMeta ex a

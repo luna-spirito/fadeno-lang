@@ -149,7 +149,7 @@ identOfBuiltin = \case
   RecordDropFields → r "record_drop_fields"
   ListLength → r "list_length"
   ListIndexL → r "list_indexl"
-  Fix' → r "rec"
+  Fix' → r "fix"
   If → r "if"
   IntGte0 → r "int_>=0"
   IntEq → r "int_=="
@@ -616,7 +616,7 @@ parseBlock = do
             )
         <|> ( do
                 token $ $(string "rewrite")
-                rewrite ← parseTop
+                rewrite ← local insideEra parseTop
                 Term . Block . BlockRewrite rewrite <$> manyEntries
             )
     manyEntries =
