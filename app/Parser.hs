@@ -151,7 +151,7 @@ identOfBuiltin = \case
   ListIndexL → r "list_indexl"
   Fix' → r "fix"
   If → r "if"
-  IntGte0 → r "int_>=0"
+  IntGte0 → r "int_>=0" -- TODO: int>=0?
   IntEq → r "int_=="
   TagEq → r "tag_=="
   W → r "W"
@@ -696,7 +696,7 @@ nestedBy' locs0 t00 by =
               locs ← R.ask
               if n >= locs
                 then
-                  if n + by >= 0
+                  if n + by >= locs
                     then pure $ n + by
                     else E.empty
                 else pure n
@@ -794,6 +794,7 @@ pTerm' ∷ (Fuse, Int, Vector (Maybe Ident)) → Term → Doc AnsiStyle
 pTerm' (fuse, oldPrec, vars) t0 =
   let
     pvar x = maybe ("#" <> pretty x) (maybe "_" pIdent) (vars !? (length vars - x - 1))
+    -- pvar x = "$" <> pretty x
     prefixf = case (fuse, unTerm t0) of
       (FNo, _) → id
       (FLam, Lam{}) → id

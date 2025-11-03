@@ -1,0 +1,21 @@
+unpack fadeno. Bool Int if Eq
+
+Opt = \T. {( .has = Bool )} \./ if ..has {( .val = T )} {()}
+
+/: Fun {A} -> Opt A
+none = { .has = false } \/ {}
+
+/: Fun {A} (A) -> Opt A
+some = \val. { .has = true } \/ { .val = val }
+
+/: Opt Int
+x = some 4
+
+/: Fun {A} (Fun (Bool) -> Opt A) (A) -> A
+getOr = \optf d.
+  opt = optf true
+  in if opt.has
+    (\@yes. rewrite yes in opt.val)
+    d
+
+in getOr (\_. x) 8

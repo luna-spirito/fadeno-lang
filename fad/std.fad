@@ -34,7 +34,13 @@ Not = \A. Fun (A) -> Never
 Where = \x. Eq x true
 
 /: Type
-Int+ = Int @|pos : Where (. > 0)|
+Int+ = Int @|>=0 : Where (. >= 0)|
+
+/: Fun (Int) -> Int+
+int->int+ = \x.
+  if @Int+ (x >= 0)
+    (\@yes. x @|yes|)
+    (0 @|refl|)
 
 /: Fun {a : Any} {b : Any} (Eq a b) -> Eq b a
 ~sym = \@_ @_ aToB. rewrite aToB in refl
@@ -42,57 +48,36 @@ Int+ = Int @|pos : Where (. > 0)|
 /: Fun {u} (Row^ u) -> Type^ u
 Opt = \R. {( .has = Bool )} \./ (if ..has R Unit)
 
-/: Fun {u} (Type^ u) (Type^ u) -> Type^ u
-Iter = \ElT T. Fun (T) -> Opt {( .x = ElT | .xs = T)}
+/: Fun {A} -> Opt A
+none = { .has = false } \/ {}
+/: Fun {A} (A) -> Opt A
+some = \val. { .has = true } \/ val
 
-FinIter = \ElT T. @|maxsize : Fun (T) -> Int+|
-    Iter ElT T
-    @|dec :
-        Fun (curr : T) {r : Where (. curr).has} ->
-        Where (rewrite r in (maxsize (. curr).xs < maxsize curr)) |
+///: Fun {u} (Type^ u) (Type^ u) -> Type^ u
+//Iter = \ElT T. Fun (T) -> Opt {( .x = ElT | .xs = T)}
 
-// TODO: rename
-/: Fun {A} {T} {R} (FinIter A T) (T) (R) (Fun (A) (Fun (Unit) -> R) -> R) -> R
-iter_fix = \@A @T @R I it0 base step.
-  fix @T @R @(I.@maxsize) (\it rec.
-    xxs = I it
-    in if xxs.has
-      (\@yes. rewrite yes in step xxs.x (\_unit. rec xxs.xs @SORRY)) //(I.@dec it @refl)))
-      base
-  ) it0
-///: F
+//FinIter = \ElT T. @|maxsize : Fun (T) -> Int+|
+//    Iter ElT T
+//    @|dec :
+//        Fun (curr : T) {r : Where (. curr).has} ->
+//        Where (rewrite r in (maxsize (. curr).xs < maxsize curr)) |
 
-//Iterator = \Acc. @|maxsize : Acc -> Int+| (Fun (a : Acc) (_ : Where (maxsize a > 0)) ->
+/////: Fun {A} (List A) -> FinIter
+////list_iter =
 
-///: Fun (i : Int+) (n : Int+) {_ : Where (i < n)} -> Int+
-//inv_index = \i n @prf. to_int+ (n - (i + 1)) @prf
+///: Fun (until : Int+) -> FinIter (Int+ @|< : Where (. < until)|) Int+
+//iter_int+< = \until. @|\curr. int->int+ (until - curr)| (\curr. some {}) @|SORRY|
 
-///: Fun {i : Int+} {n : Int+} -> Where (n - (i + 1) < n)
-//~inv_index_bounded = SORRY
+//// TODO: rename
+///: Fun {A} {T} {R} (FinIter A T) (T) (R) (Fun (A) (Fun (Unit) -> R) -> R) -> R
+//iter_fix = \@A @T @R I it0 base step.
+//  fix @T @R @(I.@maxsize) (\it rec.
+//    xxs = I it in
+//    if xxs.has
+//      (\@yes. rewrite yes in step xxs.x (\_unit. rec xxs.xs @(I.@dec it @refl)))
+//      base
+//  ) it0
 
-////// To remake eventually
-///: Fun {Acc : Fun (Int+) -> Any} (n : Int+) (Fun (i : Int+) {_ : Where (i < n)} (Acc (i ++ 1)) -> Acc i) (Acc n) -> Acc 0
-//~int+_unfold = \@Accf n step final.
-
-//  /: Fun {i : Int} (Where (i + 1 <= n)) -> Where (i <= n)
-//  ~smaller = SORRY
-
-//  in ~int+_fold @(\i. Fun {prf : Where (i <= n)} -> Accf (to_int+ (n - i) @prf))
-//    (\@_. final)
-//    (\i rec @~i+1<=n.
-//      step (inv_index i n @~i+1<=n) @(~inv_index_bounded @i @n) (rec @(~smaller @i ~i+1<=n))
-//    )
-//    n @refl
-
-///: Fun {Acc} (n : Int+) (Fun (i : Int+) {_ : Where (i < n)} (Acc) -> Acc) (Acc) -> Acc
-//int+_unfold = \@Acc. ~int+_unfold @(\_. Acc)
-
-//Iterator = \T. Fun {R} (Fun (T) (Fun ({()}) -> R) -> R) -> R
-
-///: Fn {A} (List A) -> Iterator A
-//list_iter = \l @R. fix @ @R @
-//  ()
-//  0
 
 ///: Fun {u} (tag : Tag) (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
 //find-case = \@u tag l. SORRY
@@ -120,4 +105,4 @@ Dyn^ = \u. {( .Ty = Type^ u )} \./ {( .val = ..Ty )}
 ///: Fun (u : Int+) (Fun (Type^ u) -> Type^ u) -> Type^ (u + 1)
 //Church = \u F. Fun {X : Type^ u} (Fun (F X) -> X) -> X
 
-in Iter //_>_ //{ ._>=_ = _>=_ | ._>_ = _>_ | .Where = Where | .Type = Type}
+in {}//Iter //_>_ //{ ._>=_ = _>=_ | ._>_ = _>_ | .Where = Where | .Type = Type}

@@ -1,0 +1,6 @@
+//unrelated = \a. a
+
+/: Fun {u} {T : fadeno.Type^ u} (T) -> T
+id = \x. x
+
+in id id

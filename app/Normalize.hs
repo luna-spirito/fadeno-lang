@@ -362,15 +362,16 @@ splitAt3 i v =
    in
     (bef, fst <$> aft, maybe [] snd aft)
 
-tryRewrite ∷ (Has Context sig m) ⇒ Rewrite → Term → m (Maybe Term)
-tryRewrite (Rewrite forallsCount lfromto) t = do
-  traceM $ "rewrite " <> tshow t <> " with (" <> tshow forallsCount <> ") " <> tshow lfromto
+tryRewrite ∷ (Has Context sig m) ⇒ (Int, Rewrite) → Term → m (Maybe Term)
+tryRewrite (nest, Rewrite forallsCount lfromto0) t = do
   scopeId ← getScopeId
   let
     foralls = [-1, -2 .. (-forallsCount)]
     exVars = Just . Term . ExVar . (scopeId,) <$> foralls
   (resolvedForalls, res) ← withMarked ((`EVar` Right (Term $ Builtin Any')) <$> foralls) do
-    (from, to) ← bimapM (normalize' exVars) (normalize' exVars) $ unLambda lfromto
+    (from0, to0) ← bimapM (normalize' exVars) (normalize' exVars) $ unLambda lfromto0
+    let (from, to) = (from0 `nestedByP` nest, to0 `nestedByP` nest)
+    -- traceM $ tshow t <> " : " <> tshow from <> " -> " <> tshow to
     let
       inst' foral with = modify @Scopes \(Scopes bs exs rs) →
         Scopes
@@ -415,11 +416,11 @@ traverseNormTermF c locals t0 = rewr =<< trav
     scope ← getScopeId
     Scopes _ _ rs00 ← get
     ifoldr
-      ( \rewrI (i, Rewrite forallsCount lfromto) rec → do
+      ( \rewrI (oldScope, oldRewr) rec → do
           Scopes _ _ rs0 ← get
           modify \(Scopes bs exs rs) → Scopes bs exs $ take rewrI rs
-          let nest = i - scope + length locals - countErasedLocals
-          replacement ← tryRewrite (Rewrite forallsCount $ Lambda $ bimap (`nestedByP` nest) (`nestedByP` nest) $ unLambda lfromto) res
+          let nest = (scope - oldScope) + (length locals - countErasedLocals)
+          replacement ← tryRewrite (nest, oldRewr) res
           modify \(Scopes bs exs _rs) → Scopes bs exs rs0
           maybe rec pure replacement
       )
@@ -441,7 +442,7 @@ traverseNormTermF c locals t0 = rewr =<< trav
         Scopes globals _ _ ← get @Scopes
         let updatedGlobalI = globalI - countErasedLocals
         pure case globals !? (length globals - 1 - (globalI - length locals)) of
-          Just (_, _, Just raw, _) → nestedByP raw updatedGlobalI
+          Just (_, _, Just raw, _) → nestedByP raw $ updatedGlobalI + 1
           _ → Term $ Var updatedGlobalI
   trav = case t0 of
     BuiltinsVar → pure builtinsVar

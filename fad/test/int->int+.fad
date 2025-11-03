@@ -1,0 +1,11 @@
+unpack fadeno. if Int int_>=0 Eq refl
+
+Int+ = Int @|>=0 : Eq (int_>=0 .) true|
+
+/: Fun (Int) -> Int+
+int->int+ = \x.
+  if (int_>=0 x)
+    (\@yes. x @|yes|)
+    (0 @|refl|)
+
+in int->int+

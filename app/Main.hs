@@ -181,9 +181,9 @@ writeMeta exId0@(scope0, subi0) (valLocals0, valNow0) = do
 
 -- | Introduce new variable/binding.
 scopedVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → (Quant, Maybe Ident, Maybe Term, Term) → m a → m a
-scopedVar mapTerm (bindQ, bindI, bindT, bindTy) act =
-  withBinding (bindQ, bindI, bindT, bindTy) act
-    >>= mapTerm (\t → maybe (stackError \p → "Var leaked in" <+> p t) pure $ nestedBy' 0 t $ -1)
+scopedVar mapTerm (bindQ, bindI, bindT, bindTy) act = do
+  outT ← withBinding (bindQ, bindI, bindT, bindTy) act
+  mapTerm (\t → maybe (stackError \p → "Var leaked in" <+> p t) pure $ nestedBy' 0 t $ -1) outT
 
 scopedUniVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → Term → (Term → m a) → m a
 scopedUniVar mapTerm ty act = do
@@ -329,6 +329,16 @@ withMono ∷
   Term →
   m a
 withMono = withMono' (True, True)
+
+withRewr ∷ (Has Checker sig m) ⇒ Rewrite → m a → m a
+withRewr rewr cont = do
+  i ← getScopeId
+  modify \(Scopes bs es rs) → Scopes bs (adjust' i (fmap (|> ERewrite rewr)) es) (rs |> (i, rewr))
+  cont <* modify \(Scopes bs es rs) →
+    Scopes
+      bs
+      (adjust' i (fmap $ maybe (error "Scope disappeared") fst . viewr) es)
+      (maybe (error "Rewrite disappeared") fst $ viewr rs)
 
 data InferMode a where
   Infer ∷ InferMode Term
@@ -588,18 +598,9 @@ infer = logAndRunInfer $ \case
         t → stackError \p → p t <+> "is not a valid rewrite"
     stackLog \p → "(with rewrite" <+> p prfTy0 <> ")"
     rewr ← intoRewr prfTy0
-    let
-      fInto cont = do
-        i ← getScopeId
-        modify \(Scopes bs es rs) → Scopes bs (adjust' i (fmap (|> ERewrite rewr)) es) (rs |> (i, rewr))
-        cont <* modify \(Scopes bs es rs) →
-          Scopes
-            bs
-            (adjust' i (fmap $ maybe (error "Scope disappeared") fst . viewr) es)
-            (maybe (error "Rewrite disappeared") fst $ viewr rs)
     withBlockLog inner case mode of
-      (_, Infer) → fInto $ infer inner Infer
-      (e, Check ty) → fInto $ infer inner . Check =<< normalize =<< fetchT (Dyn e ty)
+      (_, Infer) → withRewr rewr $ infer inner Infer
+      (e, Check ty) → withRewr rewr $ infer inner . Check =<< normalize =<< fetchT (Dyn e ty)
   (Import (fromMaybe (error "unresolved import") → n) _, (_, Infer)) → do
     Imports imps ← ask
     pure $ maybe (error "Incomplete context") snd $ imps !? n
@@ -652,7 +653,6 @@ infer = logAndRunInfer $ \case
   (Lam QEra _ _, (_, Infer)) → stackError \_ → "TODO Cannot infer a type of an erased lambda" -- Probably we could, but the idea overall is oxymoron.
   (App (unTerm → App (unTerm → Builtin RecordGet) tag) record, mode) → do
     infer tag $ Check $ Term $ Builtin Tag
-    tag' ← normalize tag
     let
       mapTerm ∷ (Term → m Term) → a → m a
       cont ∷ Term → m a
@@ -660,13 +660,15 @@ infer = logAndRunInfer $ \case
         (_, Infer) → (id, pure)
         (e, Check ty2) → (const pure, \ty → subtype ty =<< fetchT (Dyn e ty2))
     row0 ← infer record Infer
+    tag' ← normalize tag
+    record' ← normalize record
     res ←
       rowGet
         mapTerm
         tag'
         cont
         row0
-        record
+        record'
     case res of
       LookupFound x → pure x
       LookupMissing d →
@@ -753,7 +755,7 @@ typOfBuiltin = \case
   RecordKeepFields → [termQQ| Fun {u : Int} {row : Row^ u} (List Tag) (row) -> Any |]
   RecordDropFields → [termQQ| Fun {u : Int} {row : Row^ u} (List Tag) (row) -> Any |]
   ListLength → [termQQ| Fun {A} (List A) -> Int |]
-  ListIndexL → [termQQ| Fun {A} (i : Int) (l : List A) {_ : Where (i < list_length l)} -> A |]
+  ListIndexL → [termQQ| Fun {A} (i : Int+) (l : List A) {_ : Where (i < list_length l)} -> A |]
   Fix' → [termQQ| Fun {I} {O} {measure : Fun (I) -> Int+} (Fun (curr : I) (Fun (next : I) {_ : Where (measure next < measure curr)} -> O) -> O) (I) -> O|]
   If → [termQQ| Fun {A} (cond : Bool) (Fun {_ : Eq cond true} -> A) (Fun {_ : Eq cond false} -> A) -> A |]
   IntGte0 → [termQQ| Fun (Int) -> Bool |]
@@ -774,7 +776,8 @@ instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) �
   let
     getOrd (scopeI, subI) = do
       Scopes _ exs _ ← get @Scopes
-      pure $ (scopeI,) $ fromMaybe (error "Ex not found in scope") do
+      let exsLen = length exs
+      pure $ (scopeI,) $ fromMaybe (error $ "Ex not found in scope: scopeI=" <> show scopeI <> ", subI=" <> show subI <> ", exsLen=" <> show exsLen) do
         (_, scope) ← exs !? scopeI
         findIndexL
           ( \case
@@ -795,11 +798,12 @@ instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) �
               u ← fresh
               Scopes _ exs _ ← get @Scopes
               let
-                t2 = fromMaybe (error "Ex not found in scope") do
+                t2 = fromMaybe (error $ "Ex not found in scope (instMeta'): ord2=" <> show ord2 <> ", exsLen=" <> show (length exs)) do
                   (_, scope) ← exs !? fst ord2
                   EVar _ (Right ty) ← scope !? snd ord2
                   pure ty
-              writeExBefore [(u, t2)] (scope1, sub1)
+              t2' ← instMeta' locs t2 -- TODO RECHECK: gracefully moves t2 to a new location?
+              writeExBefore [(u, t2')] (scope1, sub1)
               writeMeta (scope2, sub2) (locs, Term $ ExVar (scope1, u))
               pure $ Term $ ExVar (scope1, u)
         UniVar uni2 _ → do
@@ -860,6 +864,9 @@ isEqUnify = isEq' (\a b → instMeta a b $> True)
 
 -- -- TODO: Use isEq.
 
+pattern IfT ∷ Term → Term → Term → Term
+pattern IfT cond a b ← Term (App (Term (App (Term (App (Term (Builtin If)) cond)) a)) b)
+
 -- -- | a <: b Check if type `a` is a subtype of type `b`.
 subtype ∷ ∀ sig m. (Has Checker sig m) ⇒ Term → Term → m ()
 subtype = \a b →
@@ -892,10 +899,10 @@ subtype = \a b →
         -- Input types are contravariant (T2 <: T1)
         uncurry subtype =<< (,) <$> fetchT inT2 <*> fetchT inT1
         -- Output types are covariant
-        fetchT inT2 >>= \inT2' → scopedVar (const pure) (QNorm, n1 <|> n2, Nothing, inT2') do
+        fetchT inT2 >>= \inT2' → do
           outT1' ← fetchLambda outT1
           outT2' ← fetchLambda outT2
-          subtype (unLambda outT1') (unLambda outT2')
+          scopedVar (const pure) (QNorm, n1 <|> n2, Nothing, inT2') $ subtype (unLambda outT1') (unLambda outT2')
       (fDyn e → Builtin (Num d1), fDyn e → Builtin (Num d2)) →
         let fits = case (d1, d2) of
               (_, NumInf) → True
@@ -937,9 +944,9 @@ subtype = \a b →
       (Term (App (fDyn e → Builtin RowPlus) a), Term (App (fDyn e → Builtin TypePlus) u)) → subtype (typOf a) (typOf u)
       (fDyn e → FieldsLit (FRow ()) (Vector' fields1), fDyn e → FieldsLit (FRow ()) fields2) →
         foldM_
-          ( \fields1' (tag, ty) →
+          ( \fields1' (tag2, ty2) →
               ifoldr
-                ( \i (tag2, ty2) rec →
+                ( \i (tag, ty) rec →
                     ((,) <$> fetchT tag <*> fetchT tag2) >>= uncurry isEqUnify >>= \case
                       EqYes → do
                         uncurry subtype =<< ((,) <$> fetchT ty <*> fetchT ty2)
@@ -950,7 +957,7 @@ subtype = \a b →
                             stackError \p → "Unable to check field equality when subtyping:" <+> p tag' <+> "?=" <+> p tag2'
                       EqNot → rec
                 )
-                (fetchT tag >>= \tag' → fetchT ty >>= \ty' → stackError \p → "Can't find" <+> p tag' <+> "in" <+> p ty')
+                (fetchT tag2 >>= \tag' → fetchT ty2 >>= \ty' → stackError \p → "Can't find" <+> p tag' <+> "in" <+> p ty')
                 fields1'
           )
           fields1
@@ -958,10 +965,20 @@ subtype = \a b →
       -- l1 \./ r1  <: l2 \./ r2
       (fDyn e → Concat l1 (FRow lr1), fDyn e → Concat l2 (FRow lr2)) → do
         uncurry subtype =<< ((,) <$> fetchT l1 <*> fetchT l2)
-        fetchT l1 >>= \l1' → scopedVar (const pure) (QNorm, Just dotvar, Nothing, l1') do
+        fetchT l1 >>= \l1' → do
           body1' ← fetchLambda lr1
           body2' ← fetchLambda lr2
-          subtype (unLambda body1') (unLambda body2')
+          scopedVar (const pure) (QNorm, Just dotvar, Nothing, l1') do
+            subtype (unLambda body1') (unLambda body2')
+      (a, IfT (Dyn e → cond) (Dyn e → th) (Dyn e → el)) → do
+        let
+          branch assumes br = do
+            cond' ← fetchT cond
+            withRewr (Rewrite 0 $ Lambda (cond', Term $ BoolLit assumes)) do
+              a' ← normalize a
+              subtype a' =<< fetchT br
+        branch True th
+        branch False el
       -- Catch-all: if no rule matches, check equality
       (t1, t2) →
         isEqUnify t1 t2 >>= \case
