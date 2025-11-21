@@ -1,6 +1,12 @@
-//unrelated = \a. a
+unpack fadeno. Type^ Int
 
-/: Fun {u} {T : fadeno.Type^ u} (T) -> T
+/: Fun {T} (T) -> T
 id = \x. x
 
-in id id
+/: @|T : Type^ 0| T
+useful = @|Int| 4
+
+in
+  { .idid = id id
+  | .iduseful = id @(@|T : Type^ 0| T) useful
+  }

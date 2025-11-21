@@ -16,7 +16,7 @@ import Data.ByteString.Char8 (pack)
 import Data.Foldable (foldlM)
 import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, ifoldr, splitAt, take, viewl, viewr, zip, (!?), (<|), (|>))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedByP, nestedByP', pTerm, parse, recordGet, render, traverseTermF)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedByP, nestedByP', pTerm, parse, recordGet, render, splitAt3, traverseTermF)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, take, to, toList, try, zip)
 
 -- TODO: Erasure is wrong... Verify for \f. f @4
@@ -355,13 +355,6 @@ postApp f0 a0 = case (unTerm f0, a0) of
               concat (Term $ FieldsLit (FRecord ()) [(n, v)]) $ recordDropFields tags fields
             TDUnknown → stuck
 
-splitAt3 ∷ Int → Vector a → (Vector a, Maybe a, Vector a)
-splitAt3 i v =
-  let
-    (bef, viewl → aft) = splitAt i v
-   in
-    (bef, fst <$> aft, maybe [] snd aft)
-
 tryRewrite ∷ (Has Context sig m) ⇒ (Int, Rewrite) → Term → m (Maybe Term)
 tryRewrite (nest, Rewrite forallsCount lfromto0) t = do
   scopeId ← getScopeId
@@ -540,7 +533,7 @@ termQQ =
     sub = Term $ Lam QNorm (Just (Ident "a" False)) (Lambda (Term (Lam QNorm (Just (Ident "b" False)) (Lambda (Term (App (Term (App (Term (Builtin (Add NumInf))) (Term (App (Term (App (Term (Builtin (Mul NumInf))) (Term (NumLit (-1))))) (Term (Var 0)))))) (Term (Var 1))))))))
     lte = Term{unTerm = Lam QNorm (Just (Ident "a" False)) (Lambda{unLambda = Term{unTerm = Lam QNorm (Just (Ident "b" False)) (Lambda{unLambda = Term{unTerm = App (Term{unTerm = Builtin IntGte0}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Add NumInf)}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Mul NumInf)}) (Term{unTerm = NumLit (-1)})}) (Term{unTerm = Var 1})})}) (Term{unTerm = Var 0})})}})}})}
     lt = Term{unTerm = Lam QNorm (Just (Ident "a" False)) (Lambda{unLambda = Term{unTerm = Lam QNorm (Just (Ident "b" False)) (Lambda{unLambda = Term{unTerm = App (Term{unTerm = Builtin IntGte0}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Add NumInf)}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Add NumInf)}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Mul NumInf)}) (Term{unTerm = NumLit (-1)})}) (Term{unTerm = Var 1})})}) (Term{unTerm = Var 0})})}) (Term{unTerm = NumLit (-1)})})}})}})}
-    intp = Term{unTerm = Refine (RefinePostTy (Term{unTerm = Builtin (Num NumInf)}) (Ident "pos" False) (Lambda{unLambda = Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin Eq}) (Term{unTerm = App (Term{unTerm = Builtin IntGte0}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Add NumInf)}) (Term{unTerm = Var 0})}) (Term{unTerm = NumLit (-1)})})})}) (Term{unTerm = BoolLit True})}}))}
+    intp = Term{unTerm = Refine (RefinePostTy (Term{unTerm = Builtin (Num NumInf)}) (Ident "pos" False) (Lambda{unLambda = Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin Eq}) (Term{unTerm = App (Term{unTerm = Builtin IntGte0}) (Term{unTerm = Var 0})})}) (Term{unTerm = BoolLit True})}}))}
     scope ∷ Vector (Maybe Ident, Term)
     scope =
       ((\b → (Just $ identOfBuiltin b, Term $ Builtin b)) <$> builtinsList)

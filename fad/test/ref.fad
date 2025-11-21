@@ -14,7 +14,6 @@ testdiv = \a b.
 /: Int @|greaterGood : Where (int_>=0 .)|
 vau = 4 @|refl|
 
-
 /: Fun (A : Int) {_ : Where (int_>=0 A)} -> Int+
 pack = \a @b. a @|b|
 

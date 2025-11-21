@@ -53,17 +53,25 @@ none = { .has = false } \/ {}
 /: Fun {A} (A) -> Opt A
 some = \val. { .has = true } \/ val
 
-///: Fun {u} (Type^ u) (Type^ u) -> Type^ u
-//Iter = \ElT T. Fun (T) -> Opt {( .x = ElT | .xs = T)}
+/: Fun (j : Int+) -> Type^ (j + 1)
+Trait = \u. Fun (Type^ u) -> Type^ u
 
-//FinIter = \ElT T. @|maxsize : Fun (T) -> Int+|
-//    Iter ElT T
-//    @|dec :
-//        Fun (curr : T) {r : Where (. curr).has} ->
-//        Where (rewrite r in (maxsize (. curr).xs < maxsize curr)) |
+///: Fun {u} (Trait u) -> Type^ u
+//Imp
 
-/////: Fun {A} (List A) -> FinIter
-////list_iter =
+/: Fun {u} (Type^ u) (Type^ u) -> Type^ u
+Iter = \ElT T. Fun (T) -> Opt {( .x = ElT | .xs = T)}
+
+FinIter = \ElT T. @|maxsize : Fun (T) -> Int+|
+    Iter ElT T
+    @|dec :
+        Fun (curr : T) {r : Where (. curr).has} ->
+        Where (rewrite r in (maxsize (. curr).xs < maxsize curr)) |
+
+
+
+///: Fun {A} (List A) -> FinIter
+//list_iter =
 
 ///: Fun (until : Int+) -> FinIter (Int+ @|< : Where (. < until)|) Int+
 //iter_int+< = \until. @|\curr. int->int+ (until - curr)| (\curr. some {}) @|SORRY|
@@ -99,7 +107,7 @@ some = \val. { .has = true } \/ val
 ///: Fun {u : Int+} (A : Type^ u) -> Row^ u
 //Opt = \A. U [ .none => Unit | .some => {( .val = A )} ]
 
-/: Fun (u : Int) -> Type^ (u + 1)
+/: Fun (u : Int+) -> Type^ (u + 1)
 Dyn^ = \u. {( .Ty = Type^ u )} \./ {( .val = ..Ty )}
 
 ///: Fun (u : Int+) (Fun (Type^ u) -> Type^ u) -> Type^ (u + 1)

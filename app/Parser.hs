@@ -35,6 +35,7 @@ module Parser (
   nestedByP,
   nestedByP',
   maxOf,
+  splitAt3,
   parseQQ,
   pIdent,
   pQuant,
@@ -62,7 +63,7 @@ import Control.Effect.Reader qualified as R
 import Data.ByteString.Char8 qualified as BS
 import Data.Functor.Classes (Eq1, Ord1)
 import Data.Kind (Type)
-import Data.RRBVector (Vector, findIndexR, zip, (!?), (|>))
+import Data.RRBVector (Vector, findIndexR, splitAt, viewl, zip, (!?), (|>))
 import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfyAscii, skipMany, skipSatisfy, skipSatisfyAscii, skipSome, string, try)
 import GHC.Exts (IsList (..))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
@@ -79,6 +80,13 @@ import System.OsPath (OsPath, encodeUtf, takeDirectory, unsafeEncodeUtf, (</>))
 -- TODO ASAP: assocativity for operators. YeAh, TuRns oUT wE NeEd iT, wHo coUlD hAvE GuESseD?
 -- (6 - 4 - 2 ≠ 6 - (4 - 2))
 -- TODO: Recolour everything.
+
+splitAt3 ∷ Int → Vector a → (Vector a, Maybe a, Vector a)
+splitAt3 i v =
+  let
+    (bef, viewl → aft) = splitAt i v
+   in
+    (bef, fst <$> aft, maybe [] snd aft)
 
 -- censor + listen
 intercept ∷ ∀ w m sig a. (Has (Writer w) sig m, Monoid w) ⇒ m a → m (w, a)
@@ -243,7 +251,7 @@ data TermF a
   | BuiltinsVar
   | Builtin !BuiltinT
   | Lam !Quant !(Maybe Ident) !(Lambda a)
-  | App !a !a
+  | App !a !a -- TODO: Quant?
   | Var !Int
   | Sorry -- TODO: Pretty sure it should be destoyed in favour of application-scope existentials.
   | RefineGet !Int !(Int, Maybe Ident)
@@ -793,7 +801,15 @@ data Fuse = FNo | FLam | FPi | FBlock !(Maybe Term) deriving (Eq)
 pTerm' ∷ (Fuse, Int, Vector (Maybe Ident)) → Term → Doc AnsiStyle
 pTerm' (fuse, oldPrec, vars) t0 =
   let
-    pvar x = maybe ("#" <> pretty x) (maybe "_" pIdent) (vars !? (length vars - x - 1))
+    pvar x =
+      let (_, nameM, after) = splitAt3 (length vars - x - 1) vars
+       in case nameM of
+            Just (Just name) →
+              if Just name `elem` after
+                then pIdent name <> "#" <> pretty x
+                else pIdent name
+            Just Nothing → "_"
+            _ → "#" <> pretty x
     -- pvar x = "$" <> pretty x
     prefixf = case (fuse, unTerm t0) of
       (FNo, _) → id

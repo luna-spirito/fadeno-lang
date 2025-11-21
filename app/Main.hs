@@ -21,11 +21,11 @@ import Control.Effect.Writer (Writer, censor, tell)
 import Data.Bitraversable (bimapM)
 import Data.Foldable (foldlM)
 import Data.List (find)
-import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, replicate, splitAt, take, viewl, viewr, zip, (!?), (|>))
+import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, replicate, splitAt, take, viewl, viewr, zip, (!?), (<|), (|>))
 import GHC.Exts (IsList (..))
 import NameGen
-import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Imports (..), Rewrite (..), Scopes (..), applyLambda, applyLambdaRefineGetSkip, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', normalizeModule, numDecDispatch, runSubContext, splitAt3, termQQ, withBinding, withMarked)
-import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, loadModule', maxOf, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parseFile, render, rowOf, traverseTermF, typ, typOf, pattern Op2)
+import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Imports (..), Rewrite (..), Scopes (..), applyLambda, applyLambdaRefineGetSkip, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', normalizeModule, numDecDispatch, runSubContext, termQQ, withBinding, withMarked)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, loadModule', maxOf, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parseFile, render, rowOf, splitAt3, traverseTermF, typ, typOf, pattern Op2)
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, replicate, runReader, take, to, toList, zip)
@@ -344,6 +344,11 @@ data InferMode a where
   Infer ∷ InferMode Term
   Check ∷ Term → InferMode ()
 
+mapTermFor ∷ (Applicative m) ⇒ InferMode a → ((Term → m Term) → a → m a)
+mapTermFor = \case
+  Infer → id
+  Check _ → const pure
+
 logAndRunInfer ∷ ∀ sig m a. (Has Checker sig m) ⇒ ((TermF Term, (Epoch, InferMode a)) → m a) → Term → InferMode a → m a
 logAndRunInfer f t mode =
   let act = getEpoch >>= \e → f (unTerm t, (e, mode))
@@ -387,25 +392,45 @@ insideQuant q = case q of
 pattern CheckL ∷ () ⇒ (a2 ~ ()) ⇒ TermF Dyn → (Epoch, InferMode a2)
 pattern CheckL x ← (e, Check (fDyn e → x))
 
-inferApp ∷ (Has Checker sig m) ⇒ Quant → Term → Term → m Term
-inferApp q f a = do
-  let norm = q == QNorm
-  infer f Infer
-    >>= withMono'
-      (norm, True)
-      id
-      ( if norm
-          then Term <$> (Pi QNorm Nothing <$> subExVar (Term $ Builtin Any') <*> (Lambda <$> subExVar (Term $ Builtin Any')))
-          else stackError \_ → "Cannot apply erased argument to unknown"
+-- TODO: Doesn't typecheck `id ex` (look test/id.fad).
+-- The challenge: Term `t` has some type in context `Γ`, yet we need to check it against type `T` in context `Γ \/ whatever_inferapp_introduced`?
+inferApp ∷ (Has Checker sig m) ⇒ Term → Vector (Quant, Term) → (Epoch, InferMode a) → m a
+inferApp f0 args0 (em, mode) = case f0 of
+  Term (App f' a') → inferApp f' ((QNorm, a') <| args0) (em, mode)
+  Term (AppErased f' a') → inferApp f' ((QEra, a') <| args0) (em, mode)
+  _ → do
+    foldr
+      ( \(q, arg) cont (args, f) →
+          f
+            & withMono'
+              (q == QNorm, True)
+              (mapTermFor mode)
+              ( case q of
+                  QNorm → Term <$> (Pi QNorm Nothing <$> subExVar (Term $ Builtin Any') <*> (Lambda <$> subExVar (Term $ Builtin Any')))
+                  QEra → stackError \_ → "Cannot apply erased argument to unknown"
+              )
+              ( \t →
+                  getEpoch >>= \e → case fDyn e t of
+                    Pi q2 _n inT outT | q == q2 → do
+                      arg' ← normalize arg
+                      outT' ← fetchLambda outT >>= (`applyLambda` arg')
+                      cont (args |> (q, arg, inT), outT')
+                    _ → stackError \p → "inferApp" <+> pretty (show q) <+> p t
+              )
       )
-      ( \t0 →
-          getEpoch >>= \e0 → case t0 of
-            (fDyn e0 → Pi q2 _n inT outT) | q == q2 → do
-              let updCtx = if norm then id else insideEra
-              updCtx (infer a . Check =<< fetchT inT)
-              uncurry applyLambda =<< ((,) <$> fetchLambda outT <*> normalize a)
-            t → stackError \p → "inferApp" <+> pretty (show q) <+> p t
+      ( \(args, outT0) → do
+          outT ← dyn outT0
+          let
+            checkArgs = for_ args \(q, arg, argTy) → insideQuant q . infer arg . Check =<< fetchT argTy
+          case mode of
+            Infer → checkArgs *> fetchT outT
+            Check (Dyn em → cOutT) → do
+              uncurry subtype =<< (,) <$> fetchT outT <*> fetchT cOutT
+              checkArgs
       )
+      args0
+      . ([],)
+      =<< infer f0 Infer
 
 checkDepLam ∷ ∀ sig m. (Has Checker sig m) ⇒ Quant → Maybe Ident → Lambda Term → Dyn → Lambda Dyn → m ()
 checkDepLam q i bod inT outT = do
@@ -675,7 +700,7 @@ infer = logAndRunInfer $ \case
         for d fetchT >>= \d' → stackError \p →
           "Couldn't find field" <+> p tag' <+> "among" <+> list (p <$> toList d')
       LookupUnknown → stackError \_ → "Can't check if tag is equal"
-  (App f a, (_, Infer)) → inferApp QNorm f a
+  (App f a, mode) → inferApp f [(QNorm, a)] mode
   (Var i, (_, Infer)) → do
     Scopes binds _ _ ← get @Scopes
     IsErased isEra ← ask
@@ -692,7 +717,7 @@ infer = logAndRunInfer $ \case
     when (isJust final && not isEra) $ stackError \_ → "Can't access erased refinement in normal context"
     iT ← infer (Term $ Var i) Infer
     refineGet i (skips, final) iT
-  (AppErased f a, (_, Infer)) → inferApp QEra f a
+  (AppErased f a, mode) → inferApp f [(QEra, a)] mode
   (Refine (RefinePre ann base), CheckL (Refine (RefinePreTy _n annT baseT))) → checkDepPair ((QEra, ann), (QNorm, base)) (annT, baseT)
   (Refine (RefinePost base ann), CheckL (Refine (RefinePostTy baseT _n annT))) → checkDepPair ((QNorm, base), (QEra, ann)) (baseT, annT)
   (Refine (RefinePre{}), (_, Infer)) → stackError \_ → "TODO Cannot infer a type of an erased annotation"
@@ -729,7 +754,20 @@ infer = logAndRunInfer $ \case
         EVar _ (Right ty') ← scope !? i
         pure (scopeid, ty')
     nestBinding exScope ty
-  (t, (e, Check c)) → stackScope (\p → "check via infer" <+> p (Term t) <+> ":" <+> p c) do
+  (t, (e, Check c@(fDyn e → Refine (RefinePostTy baseT _n annT)))) → do
+    annT' ← uncurry applyLambda =<< (,) <$> fetchLambda annT <*> normalize (Term t)
+    stackLog \_ → "aha!"
+    stackLog \p → p annT'
+    case unTerm annT' of
+      Op2 Eq a b →
+        isEqUnify a b >>= \case
+          -- TODO: Drop unify?
+          EqYes → infer (Term t) . Check =<< fetchT baseT
+          _ → viaInfer t e c
+      _ → viaInfer t e c
+  (t, (e, Check c)) → viaInfer t e c
+ where
+  viaInfer t e c = stackScope (\p → "check via infer" <+> p (Term t) <+> ":" <+> p c) do
     ty ← infer (Term t) Infer
     (ty `subtype`) =<< fetchT (Dyn e c)
 
@@ -769,6 +807,8 @@ typOfBuiltin = \case
  where
   opd d = Term $ Pi QNorm Nothing (Term $ Builtin $ Num d) $ Lambda $ Term $ Builtin $ Num d
   op2d d = Term $ Pi QNorm Nothing (Term $ Builtin $ Num d) $ Lambda $ opd d
+
+-- TODO: Allow instantiation with erased functions
 
 -- | Instantiate meta to a normalized value
 instMeta ∷ ∀ sig m. (Has Checker sig m) ⇒ (Int, Int) → Term → m ()
@@ -886,14 +926,20 @@ subtype = \a b →
       -- Pi QEra x:K. Body <: T => Introduce ExVar for x
       (unTerm → Pi QEra (Just n) inT outT, t) →
         scopedExVar (\_ _ → stackError \_ → "Unresolved existential" <+> pIdent n) inT ((`subtype` t) <=< applyLambda outT)
-      (t, unTerm → Refine (RefinePostTy base _ _ann)) → subtype t base
-      (unTerm → Refine (RefinePostTy base _ _ann), t) → subtype base t
       -- Existential Variables (?a <: ?b, ?a <: T, T <: ?a)
       (fDyn e → ExVar ex1, fDyn e → ExVar ex2) | ex1 == ex2 → pure ()
       (fDyn e → ExVar ex1, t2) → instMeta ex1 t2
       (t1, fDyn e → ExVar ex) → instMeta ex t1
       -- Universal Variables (u1 <: u2) - Must be identical.
       (fDyn e → UniVar id1 _, fDyn e → UniVar id2 _) | id1 == id2 → pure ()
+      -- Refine post
+      (fDyn e → Refine (RefinePostTy base1 _ ann1), fDyn e → Refine (RefinePostTy base2 n ann2)) → do
+        uncurry subtype =<< (,) <$> fetchT base1 <*> fetchT base2
+        fetchT base1 >>= \base1' → do
+          ann1' ← fetchLambda ann1
+          ann2' ← fetchLambda ann2
+          scopedVar (const pure) (QNorm, Just n, Nothing, base1') $ subtype (unLambda ann1') (unLambda ann2')
+      (unTerm → Refine (RefinePostTy base _ _ann), t) → subtype base t
       -- Function Types (Πx:T1.U1 <: Πy:T2.U2)
       (fDyn e → Pi q1 n1 inT1 outT1, fDyn e → Pi q2 n2 inT2 outT2) | q1 == q2 → do
         -- Input types are contravariant (T2 <: T1)
