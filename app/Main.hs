@@ -33,6 +33,7 @@ import RIO.Time (UTCTime)
 import Ser (serializeCompileResult)
 import System.Directory.OsPath (getModificationTime)
 import System.File.OsPath (writeFile')
+import System.IO (print)
 import System.OsPath (OsPath, encodeUtf, replaceExtension, unsafeEncodeUtf)
 
 -- TODO: Permit inference of dependent Pis?
@@ -674,7 +675,7 @@ infer = logAndRunInfer $ \case
       vTy ← infer v Infer
       pure (n, vTy)
     pure $ Term $ FieldsLit (FRow ()) rowFields
-  (FieldsLit (FRecord ()) (Vector' flds), (e, Check (b@(fDyn e → FieldsLit (FRow ()) (Vector' flds2))))) →
+  (FieldsLit (FRecord ()) (Vector' flds), (e, Check b@(fDyn e → FieldsLit (FRow ()) (Vector' flds2)))) →
     forRightFields pure (\f t → infer f . Check =<< fetchT t) (Dyn e b) flds flds2
   (FieldsLit (FRow ()) (Vector' flds), (_, Infer)) → do
     -- TODO: use maxOf chain
@@ -1082,7 +1083,10 @@ watch path = do
       pure $ zip files tms
     rebuild = do
       render $ annotate (color Yellow) "Rebuilding..."
-      tryAny (build' path') >>= (fromRight [path'] >>> getModTimes) -- TODO: fragile & doesn't work. Just stop throwing errors.
+      res ← tryAny (build' path')
+      case res of
+        Left e → print e *> getModTimes [path'] -- horrible
+        Right paths → getModTimes paths -- TODO: fragile & doesn't work. Just stop throwing errors.
     loop ∷ Vector (OsPath, UTCTime) → IO never
     loop oldTimes = do
       threadDelay 50000 -- 0.05s

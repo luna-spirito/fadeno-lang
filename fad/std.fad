@@ -50,7 +50,7 @@ _++_ = \a b.
     in (a + b) @|refl|
 
 /: Fun (Int) -> Int+
-int-clamp>int++ = \x.
+int-clamp>int+ = \x.
   if @Int+ (x >= 0)
     (\@yes. x @|yes|)
     (0 @|refl|)
@@ -85,10 +85,14 @@ FinIter = \ElT T. @|maxsize : Fun (T) -> Int+|
         Fun (curr : T) {r : Where (. curr).has} ->
         Where (rewrite r in (maxsize (. curr).xs < maxsize curr)) |
 
-/: Fun (Int+) -> ImplOf (Iter Int+)
-iter_< = \to. @|Int+|
+/: Fun (Int+) -> ImplOf (FinIter Int+)
+iter_< = \to.
+  @|Int+|
   { .obj = 0 @|refl|
-  | .impl = \curr. if (curr < to) (some { .x = curr | .xs = curr ++ 1}) none
+  | .impl =
+    @|\curr. int-clamp>int+ (to - curr)|
+    (\curr. if (curr < to) (some { .x = curr | .xs = curr ++ 1 }) none)
+    @|\curr @|
   }
 
 ///: Fun {A} (List A) -> FinIter
