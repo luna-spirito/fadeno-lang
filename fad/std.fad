@@ -1,9 +1,13 @@
-unpack fadeno. Type^ Int Tag List Bool Eq refl Row^ list_length list_indexl
+unpack fadeno. Type^ Int Tag List Bool Eq refl Row^ list_length list_indexl list_viewl
 if W int_>=0 wrap unwrap fix Never Any int_neg tag_==
 
 /: Fun (Int) (Int) -> Int
 _+_ = fadeno.int_add
 _-_ = \a b. a + (int_neg b)
+
+// A function that returns its argument
+/: Fun (Int) -> Int
+id = \x. x
 
 /: Fun (Int) (Int) -> Bool
 _>=_ = \a b. int_>=0 (a - b)
@@ -80,36 +84,42 @@ ImplOf^ = \u trait. @|T: Type^ u| {( .obj = T | .impl = trait T )}
 ImplOf = ImplOf^ 0
 
 /: Fun {u} (Type^ u) -> Trait^ u
-Iter = \ElT T. Fun (T) -> Opt {( .x = ElT | .xs = T)}
+Iter = \ElT T. Fun (T) -> Opt {( .curr = ElT | .rest = T)}
 
 /: Fun {u} (Type^ u) -> Trait^ u
 FinIter = \ElT T. @|maxsize : Fun (T) -> Int+|
-    Iter ElT T
-    @|dec :
-        Fun (curr : T) {r : Where (. curr).has} ->
-        Where (rewrite r in (maxsize (. curr).xs < maxsize curr)) |
+  Iter ElT T
+  @|dec :
+    Fun (curr : T) {r : Where (. curr).has} ->
+    Where (rewrite r in (maxsize (. curr).rest < maxsize curr)) |
 
-/: Fun (Int+) -> ImplOf (FinIter Int+)
-iter_<= = \to.
+/: Fun (to : Int+) -> ImplOf (FinIter (Int+ @|< : Where (. < to)|))
+iter_< = \to.
   @|Int+|
   { .obj = 0 @|refl|
   | .impl =
     @|\curr. int-clamp>int+ (to - curr)|
-    (\curr. someIf (curr <= to) { .x = curr | .xs = curr ++ 1 })
+    (\curr. someIf (curr < to) (\@yes. rewrite yes in { .curr = curr | .rest = curr ++ 1 }))
     @|\curr @has.
-      rewrite has in
-      SORRY|
-      //>=_transitive @to @(curr + 1) @curr refl refl|
+      rewrite has
+      rewrite >=_transitive @to @(curr + 1) @curr refl refl
+      in refl|
   }
-/: Unit
-x = 4
 
-// curr < to ⇒ curr <= to, i. e.
-// curr + 1 <= to ⇒ curr <= to
-// to >= curr + 1 ⇒ to >= curr
+/: Fun {u : Int+} {A : Type^ u} (l : List A) -> ImplOf^ u (FinIter A)
+iter_list = \@_ @A start.
+  @|List A|
+  { .obj = start
+  | .impl =
+    @|list_length|
+    (\curr. someIf (list_length curr > 0) (\@yes.
+      rewrite yes
+      res = list_viewl curr
+      in { .curr = res.left | .rest = res.rest }))
+    @|\curr @has. rewrite has in 4|
+  }
 
-///: Fun {A} (List A) -> FinIter
-//list_iter =
+// Note: viewl is O(1)+no reallocation, as a matter of fact!
 
 ///: Fun (until : Int+) -> FinIter (Int+ @|< : Where (. < until)|) Int+
 //iter_int+< = \until. @|\curr. int-clamp>int++ (until - curr)| (\curr. some {}) @|SORRY|

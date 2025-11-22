@@ -309,9 +309,9 @@ postApp f0 a0 = case (unTerm f0, a0) of
   (Term (Builtin RecordKeepFields) `App` Term (ListLit tags), a) → Term . FieldsLit (FRecord ()) $ (\tag → (tag, recordGet tag a)) <$> tags
   (Term (Builtin RecordDropFields) `App` Term (ListLit tags), a) → recordDropFields tags a
   (Builtin ListLength, Term (ListLit (Vector' fi))) → Term $ NumLit $ fromIntegral $ length fi
-  (f@(Term (Term (Builtin ListIndexL) `App` Term (ListLit (Vector' vals))) `App` Term (NumLit i)), a) → case vals !? fromIntegral i of
+  (Term (Builtin ListIndexL) `App` Term (ListLit (Vector' vals)), Term (NumLit i)) → case vals !? fromIntegral i of
     Just v → v
-    Nothing → Term $ App (Term f) a
+    Nothing → Term $ App f0 a0
   (Term (Builtin Fix') `App` f, i) →
     run $ runSubContext (Imports []) $ normalize $ Term $ Term (f `App` f0) `App` i
   (Term (Term (Builtin If) `App` (Term (BoolLit cond))) `App` thenBranch, elseBranch) →
@@ -326,7 +326,7 @@ postApp f0 a0 = case (unTerm f0, a0) of
     | Term (NumLit a') ← a → Term $ NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a' + fromIntegral b) (a' + b)
   -- Sub
   (Builtin (IntNeg d), Term (NumLit x)) → Term $ NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ -fromIntegral x) (-x)
-  (f, a) → normalizePoly $ Term $ App (Term f) a
+  _ → normalizePoly $ Term $ App f0 a0
  where
   -- Drop `x` from ListLit.
   listLitDrop ∷ Term → Vector' Term → ListDropRes

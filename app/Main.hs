@@ -822,8 +822,9 @@ typOfBuiltin = \case
   -- TODO: Better type
   RecordKeepFields → [termQQ| Fun {u : Int} {row : Row^ u} (List Tag) (row) -> Any |]
   RecordDropFields → [termQQ| Fun {u : Int} {row : Row^ u} (List Tag) (row) -> Any |]
-  ListLength → [termQQ| Fun {A} (List A) -> Int |]
+  ListLength → [termQQ| Fun {A} (List A) -> Int+ |]
   ListIndexL → [termQQ| Fun {A} (i : Int+) (l : List A) {_ : Where (i < list_length l)} -> A |]
+  ListViewL → [termQQ| Fun {A} (l : List A) {_ : Where (0 < list_length l)} -> {( .left = A | .rest = List A )}|]
   Fix' → [termQQ| Fun {I} {O} {measure : Fun (I) -> Int+} (Fun (curr : I) (Fun (next : I) {_ : Where (measure next < measure curr)} -> O) -> O) (I) -> O|]
   If → [termQQ| Fun {A} (cond : Bool) (Fun {_ : Eq cond true} -> A) (Fun {_ : Eq cond false} -> A) -> A |]
   IntGte0 → [termQQ| Fun (Int) -> Bool |]

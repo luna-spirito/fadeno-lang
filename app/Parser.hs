@@ -117,6 +117,7 @@ data BuiltinT
   | RecordDropFields
   | ListLength
   | ListIndexL
+  | ListViewL
   | Fix'
   | If -- TODO: Make Choice counterpart for Record
   | IntGte0
@@ -130,12 +131,12 @@ data BuiltinT
   | Num !NumDesc
   | Add !NumDesc
   | Mul !NumDesc
-  | IntNeg !NumDesc
+  | IntNeg !NumDesc -- TODO: depreacate? That's just multiplication by `-1`.
   deriving (Show, Eq, Ord, Lift)
 
 builtinsList ∷ Vector BuiltinT
 builtinsList =
-  [Tag, RowPlus, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, Fix', If, IntGte0, IntEq, TagEq, W, Wrap, Unwrap, Never, Any']
+  [Tag, RowPlus, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, ListViewL, Fix', If, IntGte0, IntEq, TagEq, W, Wrap, Unwrap, Never, Any']
     <> (Num <$> nd)
     <> (Add <$> nd)
     <> (Mul <$> nd)
@@ -157,6 +158,7 @@ identOfBuiltin = \case
   RecordDropFields → r "record_drop_fields"
   ListLength → r "list_length"
   ListIndexL → r "list_indexl"
+  ListViewL → r "list_viewl"
   Fix' → r "fix"
   If → r "if"
   IntGte0 → r "int_>=0" -- TODO: int>=0?
