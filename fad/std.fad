@@ -1,6 +1,7 @@
 unpack fadeno. Type^ Int Tag List Bool Eq refl Row^ list_length list_indexl
 if W int_>=0 wrap unwrap fix Never Any int_neg tag_==
 
+/: Fun (Int) (Int) -> Int
 _+_ = fadeno.int_add
 _-_ = \a b. a + (int_neg b)
 
@@ -36,8 +37,20 @@ Where = \x. Eq x true
 /: Type
 Int+ = Int @|>=0 : Where (. >= 0)|
 
+/: Fun {x} {y} {z} (Where (x >= y)) -> Where ((x + z) >= (y + z))
++_mono = SORRY
+
+/: Fun {a} {b} {c} (Where (a >= b)) (Where (b >= c)) -> Where (a >= c)
+>=_transitive = SORRY
+
+/: Fun (Int+) (Int+) -> Int+
+_++_ = \a b.
+    rewrite +_mono @a @0 @b (a.@>=0) // a + b >= 0 + b
+    rewrite >=_transitive @(a + b) @b @0 refl b.@>=0
+    in (a + b) @|refl|
+
 /: Fun (Int) -> Int+
-int->int+ = \x.
+int-clamp>int++ = \x.
   if @Int+ (x >= 0)
     (\@yes. x @|yes|)
     (0 @|refl|)
@@ -54,27 +67,32 @@ none = { .has = false } \/ {}
 some = \val. { .has = true } \/ val
 
 /: Fun (j : Int+) -> Type^ (j + 1)
-Trait = \u. Fun (Type^ u) -> Type^ u
+Trait^ = \u. Fun (Type^ u) -> Type^ u
+Trait = Trait^ 0
 
-///: Fun {u} (Trait u) -> Type^ u
-//Imp
+// Any implementer of trait
+/: Fun (u : Int+) (Trait^ u) -> Type^ (u + 1)
+ImplOf^ = \u trait. @|T: Type^ u| {( .obj = T | .impl = trait T )}
+ImplOf = ImplOf^ 0
 
-/: Fun {u} (Type^ u) (Type^ u) -> Type^ u
+/: Fun {u} (Type^ u) -> Trait^ u
 Iter = \ElT T. Fun (T) -> Opt {( .x = ElT | .xs = T)}
 
+/: Fun {u} (Type^ u) -> Trait^ u
 FinIter = \ElT T. @|maxsize : Fun (T) -> Int+|
     Iter ElT T
     @|dec :
         Fun (curr : T) {r : Where (. curr).has} ->
         Where (rewrite r in (maxsize (. curr).xs < maxsize curr)) |
 
-
+/: Fun (Int+) -> ImplOf (Iter Int+)
+iter_< = \to. @|Int+| { .obj = 0 @|refl| | .impl = \x. y = x ++ 1 in if (y < to) (some y) none }
 
 ///: Fun {A} (List A) -> FinIter
 //list_iter =
 
 ///: Fun (until : Int+) -> FinIter (Int+ @|< : Where (. < until)|) Int+
-//iter_int+< = \until. @|\curr. int->int+ (until - curr)| (\curr. some {}) @|SORRY|
+//iter_int+< = \until. @|\curr. int-clamp>int++ (until - curr)| (\curr. some {}) @|SORRY|
 
 //// TODO: rename
 ///: Fun {A} {T} {R} (FinIter A T) (T) (R) (Fun (A) (Fun (Unit) -> R) -> R) -> R

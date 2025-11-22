@@ -2,7 +2,7 @@
 
 {-# HLINT ignore "Use const" #-}
 
-module Main (main, parseFile, formatFile, formatModule, loadModule, normalizeModule, checkModule, checkModuleDebug, compileModule, decompileModule, build) where
+module Main (main, parseFile, formatFile, formatModule, loadModule, normalizeModule, checkModule, checkModuleDebug, compileModule, decompileModule, build, watch) where
 
 import Compiler (compileModule, decompileModule)
 import Control.Algebra
@@ -29,9 +29,11 @@ import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), 
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, replicate, runReader, take, to, toList, zip)
+import RIO.Time (UTCTime)
 import Ser (serializeCompileResult)
+import System.Directory.OsPath (getModificationTime)
 import System.File.OsPath (writeFile')
-import System.OsPath (encodeUtf, replaceExtension, unsafeEncodeUtf)
+import System.OsPath (OsPath, encodeUtf, replaceExtension, unsafeEncodeUtf)
 
 -- TODO: Permit inference of dependent Pis?
 -- TODO: Concat uncomfortably replicates Pi.
@@ -1054,14 +1056,37 @@ checkModule (names, m) = do
     Right r → pTerm [] r
 
 -- Loads, checks, builds
-build ∷ FilePath → IO ()
-build path = do
-  path' ← encodeUtf path
-  (names, m) ← loadModule' path'
+build' ∷ OsPath → IO (Vector OsPath)
+build' path' = do
+  (names, m, paths) ← loadModule' path'
   checkModule (names, m)
   writeFile' (path' `replaceExtension` unsafeEncodeUtf ".fadobj")
     $ serializeCompileResult
     $ compileModule m
+  pure paths
+
+build ∷ FilePath → IO ()
+build = void . (encodeUtf >=> build')
+
+watch ∷ FilePath → IO ()
+watch path = do
+  path' ← encodeUtf path
+  let
+    getModTimes files = do
+      tms ← for files \p → getModificationTime (p <> unsafeEncodeUtf ".fad")
+      pure $ zip files tms
+    rebuild = do
+      render $ annotate (color Yellow) "Rebuilding..."
+      tryAny (build' path') >>= (fromRight [path'] >>> getModTimes) -- TODO: fragile & doesn't work. Just stop throwing errors.
+    loop ∷ Vector (OsPath, UTCTime) → IO never
+    loop oldTimes = do
+      threadDelay 50000 -- 0.05s
+      newTimes ← getModTimes $ fst <$> oldTimes
+      if oldTimes /= newTimes
+        then rebuild >>= loop
+        else loop oldTimes
+  render $ annotate (color Yellow) $ "Watching " <> pretty path
+  rebuild >>= loop
 
 checkModuleDebug ∷ (UsedNames, Module) → IO ()
 checkModuleDebug (names, m) = do

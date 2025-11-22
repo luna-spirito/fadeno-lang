@@ -57,7 +57,7 @@ import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.Lift (sendIO)
 import Control.Carrier.Reader (ReaderC, runReader)
 import Control.Carrier.State.Church (State, StateC, evalState, execState, get, modify, runState)
-import Control.Carrier.Writer.Church (Writer, censor, listen)
+import Control.Carrier.Writer.Church (Writer, WriterC, censor, listen, runWriter, tell)
 import Control.Effect.Empty qualified as E
 import Control.Effect.Reader qualified as R
 import Data.ByteString.Char8 qualified as BS
@@ -950,15 +950,16 @@ formatSource = render . pTerm [] <=< parseSource
 formatFile ∷ OsPath → IO ()
 formatFile = formatSource <=< readFile'
 
-type LoaderC = StateC (HashMap OsPath Int) (StateC N.UsedNames (StateC (Vector Term) IO))
+type LoaderC = StateC (HashMap OsPath Int) (StateC N.UsedNames (StateC (Vector Term) (WriterC (Vector OsPath) IO)))
 newtype Module = Module (Vector Term) -- non-empty
 
 -- TODO: disallow trailing `/` in Import syntax!
-loadModule' ∷ OsPath → IO (N.UsedNames, Module)
-loadModule' = runState (\t u → pure (u, Module t)) [] . execState N.emptyUsedNames . evalState mempty . new
+loadModule' ∷ OsPath → IO (N.UsedNames, Module, Vector OsPath)
+loadModule' = runWriter (\c (a, b) → pure (a, b, c)) . runState (\t u → pure (u, Module t)) [] . execState N.emptyUsedNames . evalState mempty . new
  where
   new ∷ OsPath → LoaderC ()
   new path = do
+    tell @(Vector OsPath) [path]
     t0 ← sendIO $ parseFile $ path <> unsafeEncodeUtf ".fad"
     t ← runReader path $ subload t0
     modify (|> t)
@@ -987,7 +988,7 @@ loadModule' = runState (\t u → pure (u, Module t)) [] . execState N.emptyUsedN
         for_ label $ modify . N.use
         Term <$> traverseTermF subload (fmap Lambda . subload . unLambda) t
 
-loadModule ∷ FilePath → IO (N.UsedNames, Module)
+loadModule ∷ FilePath → IO (N.UsedNames, Module, Vector OsPath)
 loadModule = encodeUtf >=> loadModule'
 
 formatModule ∷ Module → IO ()
