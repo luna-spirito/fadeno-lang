@@ -506,6 +506,27 @@ rowGet mapTerm tag cont = go -- tag is source term
       )
       row
 
+-- | For each pair in the right RecordLit finds a pair and exeutes `f` on it. Accept "original right term" just for prettyprinting the error.
+forRightFields ∷ (Has Checker sig m) ⇒ (tag1 → m Term) → (t1 → t2 → m ()) → Dyn → Vector (tag1, t1) → Vector (Dyn, t2) → m ()
+forRightFields fetchTag1 f orig2 =
+  foldM_
+    ( \fields1' (tag2, ty2) →
+        ifoldr
+          ( \i (tag, ty) rec →
+              ((,) <$> fetchTag1 tag <*> fetchT tag2) >>= uncurry isEqUnify >>= \case
+                EqYes → do
+                  f ty ty2
+                  pure $ deleteAt i fields1'
+                EqUnknown →
+                  fetchTag1 tag >>= \tag' →
+                    fetchT tag2 >>= \tag2' →
+                      stackError \p → "Unable to check field equality when subtyping:" <+> p tag' <+> "?=" <+> p tag2'
+                EqNot → rec
+          )
+          (fetchT tag2 >>= \tag' → fetchT orig2 >>= \orig2' → stackError \p → "Can't find" <+> p tag' <+> "in" <+> p orig2')
+          fields1'
+    )
+
 refineGet ∷ (Has Checker sig m) ⇒ Int → (Int, Maybe Ident) → Term → m Term
 refineGet var (skips0, etagSearched) = go 0
  where
@@ -653,6 +674,8 @@ infer = logAndRunInfer $ \case
       vTy ← infer v Infer
       pure (n, vTy)
     pure $ Term $ FieldsLit (FRow ()) rowFields
+  (FieldsLit (FRecord ()) (Vector' flds), (e, Check (b@(fDyn e → FieldsLit (FRow ()) (Vector' flds2))))) →
+    forRightFields pure (\f t → infer f . Check =<< fetchT t) (Dyn e b) flds flds2
   (FieldsLit (FRow ()) (Vector' flds), (_, Infer)) → do
     -- TODO: use maxOf chain
     for_ flds \(n, _) → infer n $ Check $ Term $ Builtin Tag
@@ -990,26 +1013,8 @@ subtype = \a b →
           _ → stackError \p → "Cannot equate wrapped types" <+> p a <+> "and" <+> p b
       (Term (App (fDyn e → Builtin RowPlus) a), Term (App (fDyn e → Builtin RowPlus) b)) → subtype (typOf a) (typOf b)
       (Term (App (fDyn e → Builtin RowPlus) a), Term (App (fDyn e → Builtin TypePlus) u)) → subtype (typOf a) (typOf u)
-      (fDyn e → FieldsLit (FRow ()) (Vector' fields1), fDyn e → FieldsLit (FRow ()) fields2) →
-        foldM_
-          ( \fields1' (tag2, ty2) →
-              ifoldr
-                ( \i (tag, ty) rec →
-                    ((,) <$> fetchT tag <*> fetchT tag2) >>= uncurry isEqUnify >>= \case
-                      EqYes → do
-                        uncurry subtype =<< ((,) <$> fetchT ty <*> fetchT ty2)
-                        pure $ deleteAt i fields1'
-                      EqUnknown →
-                        fetchT tag >>= \tag' →
-                          fetchT tag2 >>= \tag2' →
-                            stackError \p → "Unable to check field equality when subtyping:" <+> p tag' <+> "?=" <+> p tag2'
-                      EqNot → rec
-                )
-                (fetchT tag2 >>= \tag' → fetchT ty2 >>= \ty' → stackError \p → "Can't find" <+> p tag' <+> "in" <+> p ty')
-                fields1'
-          )
-          fields1
-          fields2
+      (fDyn e → FieldsLit (FRow ()) (Vector' fields1), b@(fDyn e → FieldsLit (FRow ()) (Vector' fields2))) → do
+        forRightFields fetchT (\ty ty2 → uncurry subtype =<< ((,) <$> fetchT ty <*> fetchT ty2)) (Dyn e b) fields1 fields2
       -- l1 \./ r1  <: l2 \./ r2
       (fDyn e → Concat l1 (FRow lr1), fDyn e → Concat l2 (FRow lr2)) → do
         uncurry subtype =<< ((,) <$> fetchT l1 <*> fetchT l2)

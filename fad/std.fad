@@ -86,7 +86,10 @@ FinIter = \ElT T. @|maxsize : Fun (T) -> Int+|
         Where (rewrite r in (maxsize (. curr).xs < maxsize curr)) |
 
 /: Fun (Int+) -> ImplOf (Iter Int+)
-iter_< = \to. @|Int+| { .obj = 0 @|refl| | .impl = \x. y = x ++ 1 in if (y < to) (some y) none }
+iter_< = \to. @|Int+|
+  { .obj = 0 @|refl|
+  | .impl = \curr. if (curr < to) (some { .x = curr | .xs = curr ++ 1}) none
+  }
 
 ///: Fun {A} (List A) -> FinIter
 //list_iter =
