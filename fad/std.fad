@@ -65,6 +65,10 @@ Opt = \R. {( .has = Bool )} \./ (if ..has R Unit)
 none = { .has = false } \/ {}
 /: Fun {A} (A) -> Opt A
 some = \val. { .has = true } \/ val
+/: Fun {A} (has : Bool) (Fun {_ : Where has} -> A) -> Opt A
+someIf = \has body. { .has = has } \/ if has
+  (\@yes. rewrite yes in body @refl)
+  (\@no. rewrite no in {})
 
 /: Fun (j : Int+) -> Type^ (j + 1)
 Trait^ = \u. Fun (Type^ u) -> Type^ u
@@ -86,14 +90,23 @@ FinIter = \ElT T. @|maxsize : Fun (T) -> Int+|
         Where (rewrite r in (maxsize (. curr).xs < maxsize curr)) |
 
 /: Fun (Int+) -> ImplOf (FinIter Int+)
-iter_< = \to.
+iter_<= = \to.
   @|Int+|
   { .obj = 0 @|refl|
   | .impl =
     @|\curr. int-clamp>int+ (to - curr)|
-    (\curr. if (curr < to) (some { .x = curr | .xs = curr ++ 1 }) none)
-    @|\curr @|
+    (\curr. someIf (curr <= to) { .x = curr | .xs = curr ++ 1 })
+    @|\curr @has.
+      rewrite has in
+      SORRY|
+      //>=_transitive @to @(curr + 1) @curr refl refl|
   }
+/: Unit
+x = 4
+
+// curr < to ⇒ curr <= to, i. e.
+// curr + 1 <= to ⇒ curr <= to
+// to >= curr + 1 ⇒ to >= curr
 
 ///: Fun {A} (List A) -> FinIter
 //list_iter =

@@ -75,7 +75,11 @@ instance (Algebra sig m) ⇒ Algebra (StackLog :+: sig) (StackAccC m) where
     R other → alg (unStackAccC . hdl) (R other) ctx
 
 termLoggerM ∷ (Has Context sig m) ⇒ m (Term → Doc AnsiStyle)
-termLoggerM = (\(Scopes ctx _ _) → pTerm $ (\(_, n, _, _) → n) <$> ctx) <$> get @Scopes
+termLoggerM = (\(Scopes ctx _ _) → pTerm $ (\(_, n, t, _) → (n, t >>= asBuiltin)) <$> ctx) <$> get @Scopes
+ where
+  asBuiltin = \case
+    Term (Builtin x) → Just x
+    _ → Nothing
 
 stackLog ∷ (Has (Context :+: StackLog) sig m) ⇒ ((Term → Doc AnsiStyle) → Doc AnsiStyle) → m ()
 stackLog f = send . StackLog . f =<< termLoggerM
