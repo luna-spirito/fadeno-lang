@@ -453,7 +453,9 @@ traverseNormTermF c locals t0 = rewr =<< trav
       termX ← travVar oldX
       pure $ Term $ case unTerm termX of
         Var x → RefineGet x (skips1, final1)
-        u → error $ show u -- "Internal error: cannot substitute into a RefineGet"
+        _ → if oldX < length locals
+          then error "Internal error: cannot substitute into a RefineGet"
+          else RefineGet (oldX - countErasedLocals) (skips1, final1) -- safe, because global bindings aren't erased.
     Block (BlockLet _q _name _ty val into) → do
       val' ← c locals val
       c (locals |> Just val') $ unLambda into
