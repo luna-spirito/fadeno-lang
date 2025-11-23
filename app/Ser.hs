@@ -140,7 +140,7 @@ putBuiltin = \case
   Any' → S.putWord8 0
   Bool → S.putWord8 1
   Eq → S.putWord8 2
-  Fix' → S.putWord8 3
+  Loop → S.putWord8 3
   If → S.putWord8 4
   IntEq → S.putWord8 5
   IntGte0 → S.putWord8 6
@@ -172,7 +172,7 @@ getBuiltin = do
     0 → pure Any'
     1 → pure Bool
     2 → pure Eq
-    3 → pure Fix'
+    3 → pure Loop
     4 → pure If
     5 → pure IntEq
     6 → pure IntGte0

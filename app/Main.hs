@@ -804,7 +804,7 @@ typOfBuiltin = \case
   Any' → [termQQ| Type^ 0 |]
   Bool → [termQQ| Type^ 0 |]
   Eq → [termQQ| Fun (Any) (Any) -> Type^ 0 |]
-  Fix' → [termQQ| Fun {I} {O} {measure : Fun (I) -> Int+} (Fun (curr : I) (Fun (next : I) {_ : Where (measure next < measure curr)} -> O) -> O) (I) -> O|]
+  Loop → [termQQ| Fun {I} {O} {measure : Fun (I) -> Int+} (Fun (curr : I) (Fun (next : I) {_ : Where (measure next < measure curr)} -> O) -> O) (I) -> O|]
   If → [termQQ| Fun {A} (cond : Bool) (Fun {_ : Eq cond true} -> A) (Fun {_ : Eq cond false} -> A) -> A |]
   Int' _d → [termQQ| Type^ 0 |]
   IntAdd d → op2d d
@@ -817,6 +817,8 @@ typOfBuiltin = \case
   ListLength → [termQQ| Fun {A} (List A) -> Int+ |]
   ListViewL → [termQQ| Fun {A} (l : List A) {_ : Where (0 < list_length l)} -> {( .left = A | .rest = List A )}|]
   Never → [termQQ| Type^ 0 |]
+  PropListViewlDec → [termQQ| Fun {A} (l : List A) -> Eq (list_length l) (list_length (list_viewl l).rest + 1) |]
+  PropLteTrans → [termQQ| Fun {a} {b} {c} (Where (a <= b)) (Where (b <= c)) -> Where (a <= c) |]
   RecordDropFields → [termQQ| Fun {u : Int} {row : Row^ u} (List Tag) (row) -> Any |]
   RecordGet → [termQQ| Fun {u : Int} {row : Row^ u} {T : Type^ u} (tag : Tag) (record : {( (tag) = T )} \/ row) -> T|]
   RecordKeepFields → [termQQ| Fun {u : Int} {row : Row^ u} (List Tag) (row) -> Any |]

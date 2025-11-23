@@ -27,14 +27,14 @@ import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replic
 -- (returns `n ** (Vec n Term -> Term)`)
 appBuiltin ∷ (Has Context sig m) ⇒ Vector (Maybe Term) → BuiltinT → Vector Term → m (Maybe Term)
 appBuiltin locals = curry \case
-  ((Any'; Bool; Eq; Int' _; List; Never; Refl; RowPlus; Tag; TypePlus; W), _) → pure Nothing
-  (Fix', [f, i]) → fmap Just $ normalize' locals $ (f `TApp` (TBuiltin Fix' `TApp` f)) `TApp` i
+  ((Any'; Bool; Eq; Int' _; List; Never; PropLteTrans; PropListViewlDec; Refl; RowPlus; Tag; TypePlus; W), _) → pure Nothing
+  (Loop, [f, i]) → fmap Just $ normalize' locals $ (f `TApp` (TBuiltin Loop `TApp` f)) `TApp` i
   (If, [Term (BoolLit cond), th, el]) → pure $ Just $ if cond then th else el
   (IntEq, [Term (NumLit a), Term (NumLit b)]) → pure $ Just $ Term $ BoolLit $ a == b
   (IntGte0, [Term (NumLit x)]) → pure $ Just $ Term $ BoolLit $ x >= 0
   ((IntAdd _; IntMul _; IntNeg _), _) → pure Nothing
   (ListIndexL, [Term (ListLit (Vector' vals)), Term (NumLit i)]) → pure $ vals !? fromIntegral i
-  (ListLength, [(Term (ListLit vals))]) → pure $ Just $ Term $ NumLit $ fromIntegral $ length vals
+  (ListLength, [Term (ListLit vals)]) → pure $ Just $ Term $ NumLit $ fromIntegral $ length vals
   (ListViewL, [Term (ListLit (Vector' vals))]) →
     pure $ viewl vals <&> \(left, rest) →
       Term $ FieldsLit (FRecord ()) [(Term $ TagLit (Ident "left" False), left), (Term $ TagLit (Ident "rest" False), Term $ ListLit $ Vector' rest)]
@@ -55,7 +55,7 @@ appBuiltin locals = curry \case
   (TagEq, [Term (TagLit a), Term (TagLit b)]) → pure $ Just $ Term $ BoolLit $ a == b
   (WUnwrap, [a]) → pure $ Just a
   (WWrap, [a]) → pure $ Just a
-  ((Fix'; If; IntEq; IntGte0; ListIndexL; ListLength; ListViewL; RecordDropFields; RecordGet; RecordKeepFields; TagEq; WWrap; WUnwrap), _) → pure Nothing
+  ((Loop; If; IntEq; IntGte0; ListIndexL; ListLength; ListViewL; RecordDropFields; RecordGet; RecordKeepFields; TagEq; WWrap; WUnwrap), _) → pure Nothing
  where
   -- Drop `x` from ListLit.
   listLitDrop ∷ Term → Vector' Term → ListDropRes
@@ -453,7 +453,7 @@ traverseNormTermF c locals t0 = rewr =<< trav
       termX ← travVar oldX
       pure $ Term $ case unTerm termX of
         Var x → RefineGet x (skips1, final1)
-        _ → error "Internal error: cannot substitute into a RefineGet"
+        u → error $ show u -- "Internal error: cannot substitute into a RefineGet"
     Block (BlockLet _q _name _ty val into) → do
       val' ← c locals val
       c (locals |> Just val') $ unLambda into

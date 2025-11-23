@@ -91,7 +91,7 @@ data BuiltinT
   = Any'
   | Bool
   | Eq
-  | Fix'
+  | Loop
   | If -- TODO: Make Choice counterpart for Record
   | Int' !NumDesc
   | IntAdd !NumDesc
@@ -104,6 +104,8 @@ data BuiltinT
   | ListLength
   | ListViewL
   | Never
+  | PropListViewlDec
+  | PropLteTrans
   | RecordDropFields
   | RecordGet -- Second-class!
   | RecordKeepFields
@@ -122,7 +124,7 @@ builtinsList =
   [ Any'
   , Bool
   , Eq
-  , Fix'
+  , Loop
   , If
   , IntEq
   , IntGte0
@@ -131,6 +133,8 @@ builtinsList =
   , ListLength
   , ListViewL
   , Never
+  , PropListViewlDec
+  , PropLteTrans
   , RecordDropFields
   , RecordGet
   , RecordKeepFields
@@ -155,7 +159,7 @@ identOfBuiltin = \case
   Any' → r "Any"
   Bool → r "Bool"
   Eq → r "Eq"
-  Fix' → r "fix"
+  Loop → r "loop"
   If → r "if"
   Int' d → r $ numDesc True d
   IntAdd d → r $ numDesc False d <> "_add"
@@ -168,6 +172,8 @@ identOfBuiltin = \case
   ListLength → r "list_length"
   ListViewL → r "list_viewl"
   Never → r "Never"
+  PropListViewlDec → r "list_viewl~dec"
+  PropLteTrans → r "<=~trans"
   RecordDropFields → r "record_drop_fields"
   RecordGet → r "record_get"
   RecordKeepFields → r "record_keep_fields"

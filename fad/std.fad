@@ -1,5 +1,5 @@
 unpack fadeno. Type^ Int Tag List Bool Eq refl Row^ list_length list_indexl list_viewl
-if W int_>=0 fix Never Any int_neg tag_==
+if W int_>=0 loop Never Any int_neg tag_== <=~trans list_viewl~dec
 
 /: Fun (Int) (Int) -> Int
 _+_ = fadeno.int_add
@@ -41,17 +41,8 @@ Where = \x. Eq x true
 /: Type
 Int+ = Int @|>=0 : Where (. >= 0)|
 
-/: Fun {x} {y} {z} (Where (x >= y)) -> Where ((x + z) >= (y + z))
-+_mono = SORRY
-
-/: Fun {a} {b} {c} (Where (a >= b)) (Where (b >= c)) -> Where (a >= c)
->=_transitive = SORRY
-
 /: Fun (Int+) (Int+) -> Int+
-_++_ = \a b.
-    rewrite +_mono @a @0 @b (a.@>=0) // a + b >= 0 + b
-    rewrite >=_transitive @(a + b) @b @0 refl b.@>=0
-    in (a + b) @|refl|
+_++_ = \a b. (a + b) @|<=~trans @0 @b @(a + b) b.@>=0 a.@>=0|
 
 /: Fun (Int) -> Int+
 int-clamp>int+ = \x.
@@ -102,7 +93,7 @@ iter_< = \to.
     (\curr. someIf (curr < to) (\@yes. rewrite yes in { .curr = curr | .rest = curr ++ 1 }))
     @|\curr @has.
       rewrite has
-      rewrite >=_transitive @to @(curr + 1) @curr refl refl
+      rewrite <=~trans @curr @(curr + 1) @to refl refl
       in refl|
   }
 
@@ -116,24 +107,19 @@ iter_list = \@_ @A start.
       rewrite yes
       res = list_viewl curr
       in { .curr = res.left | .rest = res.rest }))
-    @|\curr @has. rewrite has in 4|
+    @|\curr @has.
+      rewrite has
+      rewrite list_viewl~dec curr
+      in refl|
   }
 
-// Note: viewl is O(1)+no reallocation, as a matter of fact!
-
-///: Fun (until : Int+) -> FinIter (Int+ @|< : Where (. < until)|) Int+
-//iter_int+< = \until. @|\curr. int-clamp>int++ (until - curr)| (\curr. some {}) @|SORRY|
-
-//// TODO: rename
-///: Fun {A} {T} {R} (FinIter A T) (T) (R) (Fun (A) (Fun (Unit) -> R) -> R) -> R
-//iter_fix = \@A @T @R I it0 base step.
-//  fix @T @R @(I.@maxsize) (\it rec.
-//    xxs = I it in
-//    if xxs.has
-//      (\@yes. rewrite yes in step xxs.x (\_unit. rec xxs.xs @(I.@dec it @refl)))
-//      base
-//  ) it0
-
+// Loop, at each iteration getting a new element from an iterator.
+/: Fun {u} {A} {I} {O} (ImplOf^ u (FinIter A)) (Fun (A) (I) -> O) (I) -> O
+loopIter = \@_ @A @I @O iter0 f.
+  step = iter0.@_.impl in
+  loop @iter0.@T @(Fun (I) -> O) @step.@maxsize (\rec iterO.
+    SORRY
+  ) iter0.@_.obj
 
 ///: Fun {u} (tag : Tag) (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
 //find-case = \@u tag l. SORRY
