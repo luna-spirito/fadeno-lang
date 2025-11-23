@@ -19,7 +19,7 @@
         {
           checks.pre-commit-check = pre-commit-hooks.lib.${system}.run {
             src = ./.;
-            hooks.fourmolu.enable = true;
+            # hooks.fourmolu.enable = true;
           };
           devShells.default = pkgs.mkShell {
             inherit (self.checks.${system}.pre-commit-check) shellHook;
@@ -27,7 +27,7 @@
               cabal-install
               haskell.compiler."ghc${hask}"
               (haskell-language-server.override { supportedGhcVersions = [ hask ]; })
-              fourmolu
+              haskell.packages."ghc${hask}".fourmolu
             ] ++ (self.checks.${system}.pre-commit-check.enabledPackages);
           };
         }

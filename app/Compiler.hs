@@ -77,13 +77,11 @@ data Value
     VBuiltinsVar
   | VBuiltin !BuiltinT
   | VPanic
-  | VImport !Int64
-  deriving
-    ( -- | Pi !Quant !Term !(Either (Ident, Lambda Term) Term)
-      -- | Concat !Term !(Either (Ident, Lambda Term) Term)
-      Show
-    , Eq
-    )
+  | {- | Pi !Quant !Term !(Either (Ident, Lambda Term) Term)
+    | Concat !Term !(Either (Ident, Lambda Term) Term)  deriving
+    -}
+    VImport !Int64
+  deriving (Show, Eq)
 
 {-
 Basically, all the instruction set is just a "flat" sequence of operations that builds a tree.

@@ -1,5 +1,5 @@
 unpack fadeno. Type^ Int Tag List Bool Eq refl Row^ list_length list_indexl list_viewl
-if W int_>=0 wrap unwrap fix Never Any int_neg tag_==
+if W int_>=0 fix Never Any int_neg tag_==
 
 /: Fun (Int) (Int) -> Int
 _+_ = fadeno.int_add

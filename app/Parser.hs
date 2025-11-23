@@ -15,8 +15,8 @@ module Parser (
   Module (..),
   NumDesc (..),
   ParserContext (..),
-  RefineK (..),
   Quant (..),
+  RefineK (..),
   Term (..),
   TermF (..),
   Vector' (..),
@@ -28,28 +28,29 @@ module Parser (
   freshIdent,
   identOfBuiltin,
   intercept,
-  loadModule,
   loadModule',
+  loadModule,
+  maxOf,
   nested,
   nestedBy',
-  nestedByP,
   nestedByP',
-  maxOf,
-  splitAt3,
-  parseQQ,
+  nestedByP,
   pIdent,
   pQuant,
   pTerm,
   parse,
   parseFile,
+  parseQQ,
   parseSource,
+  pattern TApp,
+  pattern TBuiltin,
   recordGet,
   render,
   rowOf,
+  splitAt3,
+  traverseTermF,
   typ,
   typOf,
-  traverseTermF,
-  pattern Op2,
 ) where
 
 import Control.Algebra
@@ -81,6 +82,118 @@ import System.OsPath (OsPath, encodeUtf, takeDirectory, unsafeEncodeUtf, (</>))
 -- (6 - 4 - 2 ≠ 6 - (4 - 2))
 -- TODO: Recolour everything.
 
+data Bits = Bits8 | Bits16 | Bits32 | Bits64
+  deriving (Show, Eq, Ord, Lift)
+data NumDesc = NumFin !Bool {- ≥ 0 -} !Bits | NumInf
+  deriving (Show, Eq, Ord, Lift)
+
+data BuiltinT
+  = Any'
+  | Bool
+  | Eq
+  | Fix'
+  | If -- TODO: Make Choice counterpart for Record
+  | Int' !NumDesc
+  | IntAdd !NumDesc
+  | IntEq
+  | IntGte0
+  | IntMul !NumDesc
+  | IntNeg !NumDesc -- TODO: depreacate? That's just multiplication by `-1`.
+  | List
+  | ListIndexL
+  | ListLength
+  | ListViewL
+  | Never
+  | RecordDropFields
+  | RecordGet -- Second-class!
+  | RecordKeepFields
+  | Refl
+  | RowPlus
+  | Tag
+  | TagEq
+  | TypePlus -- Type^ 0, Type^ 1, ..., Type^ Aleph
+  | W
+  | WUnwrap
+  | WWrap
+  deriving (Show, Eq, Ord, Lift)
+
+builtinsList ∷ Vector BuiltinT
+builtinsList =
+  [ Any'
+  , Bool
+  , Eq
+  , Fix'
+  , If
+  , IntEq
+  , IntGte0
+  , List
+  , ListIndexL
+  , ListLength
+  , ListViewL
+  , Never
+  , RecordDropFields
+  , RecordGet
+  , RecordKeepFields
+  , Refl
+  , RowPlus
+  , Tag
+  , TagEq
+  , TypePlus
+  , W
+  , WUnwrap
+  , WWrap
+  ]
+    <> (Int' <$> nd)
+    <> (IntAdd <$> nd)
+    <> (IntMul <$> nd)
+    <> (IntNeg <$> nd)
+ where
+  nd = (NumFin <$> [False, True] <*> [Bits8, Bits16, Bits32, Bits64]) <> [NumInf]
+
+identOfBuiltin ∷ BuiltinT → Ident
+identOfBuiltin = \case
+  Any' → r "Any"
+  Bool → r "Bool"
+  Eq → r "Eq"
+  Fix' → r "fix"
+  If → r "if"
+  Int' d → r $ numDesc True d
+  IntAdd d → r $ numDesc False d <> "_add"
+  IntEq → r "int_=="
+  IntGte0 → r "int_>=0" -- TODO: int>=0?
+  IntMul d → r $ numDesc False d <> "_mul"
+  IntNeg d → r $ numDesc False d <> "_neg"
+  List → r "List"
+  ListIndexL → r "list_indexl"
+  ListLength → r "list_length"
+  ListViewL → r "list_viewl"
+  Never → r "Never"
+  RecordDropFields → r "record_drop_fields"
+  RecordGet → r "record_get"
+  RecordKeepFields → r "record_keep_fields"
+  Refl → r "refl"
+  RowPlus → r "Row^"
+  Tag → r "Tag"
+  TagEq → r "tag_=="
+  TypePlus → r "Type^"
+  W → r "W"
+  WUnwrap → r "w_unwrap"
+  WWrap → r "w_wrap"
+ where
+  numDesc upper desc =
+    (if upper then "I" else "i")
+      <> case desc of
+        NumFin nonneg bits →
+          case bits of
+            Bits8 → "8"
+            Bits16 → "16"
+            Bits32 → "32"
+            Bits64 → "64"
+            <> (if nonneg then "+" else mempty)
+        NumInf → "nt"
+  -- regular
+  r x = x `Ident` False
+
 splitAt3 ∷ Int → Vector a → (Vector a, Maybe a, Vector a)
 splitAt3 i v =
   let
@@ -99,97 +212,11 @@ instance Hashable Ident
 data Quant = QEra | QNorm
   deriving (Show, Eq, Ord, Lift)
 
-data Bits = Bits8 | Bits16 | Bits32 | Bits64
-  deriving (Show, Eq, Ord, Lift)
-data NumDesc = NumFin !Bool {- ≥ 0 -} !Bits | NumInf
-  deriving (Show, Eq, Ord, Lift)
+pattern TApp ∷ Term → Term → Term
+pattern TApp a b = Term (App a b)
 
-data BuiltinT
-  = Tag
-  | RowPlus
-  | List
-  | Bool
-  | TypePlus -- Type^ 0, Type^ 1, ..., Type^ Aleph
-  | Eq
-  | Refl
-  | RecordGet -- Second-class!
-  | RecordKeepFields
-  | RecordDropFields
-  | ListLength
-  | ListIndexL
-  | ListViewL
-  | Fix'
-  | If -- TODO: Make Choice counterpart for Record
-  | IntGte0
-  | IntEq
-  | TagEq
-  | W
-  | Wrap
-  | Unwrap
-  | Never
-  | Any'
-  | Num !NumDesc
-  | Add !NumDesc
-  | Mul !NumDesc
-  | IntNeg !NumDesc -- TODO: depreacate? That's just multiplication by `-1`.
-  deriving (Show, Eq, Ord, Lift)
-
-builtinsList ∷ Vector BuiltinT
-builtinsList =
-  [Tag, RowPlus, List, Bool, TypePlus, Eq, Refl, RecordGet, RecordKeepFields, RecordDropFields, ListLength, ListIndexL, ListViewL, Fix', If, IntGte0, IntEq, TagEq, W, Wrap, Unwrap, Never, Any']
-    <> (Num <$> nd)
-    <> (Add <$> nd)
-    <> (Mul <$> nd)
-    <> (IntNeg <$> nd)
- where
-  nd = (NumFin <$> [False, True] <*> [Bits8, Bits16, Bits32, Bits64]) <> [NumInf]
-
-identOfBuiltin ∷ BuiltinT → Ident
-identOfBuiltin = \case
-  Tag → r "Tag"
-  Bool → r "Bool"
-  RowPlus → r "Row^"
-  List → r "List"
-  TypePlus → r "Type^"
-  Eq → r "Eq"
-  Refl → r "refl"
-  RecordGet → r "record_get"
-  RecordKeepFields → r "record_keep_fields"
-  RecordDropFields → r "record_drop_fields"
-  ListLength → r "list_length"
-  ListIndexL → r "list_indexl"
-  ListViewL → r "list_viewl"
-  Fix' → r "fix"
-  If → r "if"
-  IntGte0 → r "int_>=0" -- TODO: int>=0?
-  IntEq → r "int_=="
-  TagEq → r "tag_=="
-  W → r "W"
-  Wrap → r "wrap"
-  Unwrap → r "unwrap"
-  Never → r "Never"
-  Any' → r "Any"
-  Num d → r $ numDesc True d
-  Add d → r $ numDesc False d <> "_add"
-  Mul d → r $ numDesc False d <> "_mul"
-  IntNeg d → r $ numDesc False d <> "_neg"
- where
-  numDesc upper desc =
-    (if upper then "I" else "i")
-      <> case desc of
-        NumFin nonneg bits →
-          case bits of
-            Bits8 → "8"
-            Bits16 → "16"
-            Bits32 → "32"
-            Bits64 → "64"
-            <> (if nonneg then "+" else mempty)
-        NumInf → "nt"
-  -- \| regular
-  r x = x `Ident` False
-
-pattern Op2 ∷ BuiltinT → Term → Term → TermF Term
-pattern Op2 f a b = Term (Term (Builtin f) `App` a) `App` b
+pattern TBuiltin ∷ BuiltinT → Term
+pattern TBuiltin a = Term (Builtin a)
 
 newtype Lambda a = Lambda {unLambda ∷ a}
   deriving (Show, Eq, Lift)
@@ -278,22 +305,22 @@ newtype Term = Term {unTerm ∷ TermF Term}
   deriving (Show, Eq, Lift)
 
 typOf ∷ Term → Term
-typOf = Term . App (Term $ Builtin TypePlus)
+typOf = TApp (TBuiltin TypePlus)
 
 rowOf ∷ Term → Term
-rowOf u = Term $ App (Term $ Builtin RowPlus) u
+rowOf = TApp (TBuiltin RowPlus)
 
 recordGet ∷ Term → Term → Term
-recordGet tag record = Term $ Term (Term (Builtin RecordGet) `App` tag) `App` record
+recordGet tag record = (TBuiltin RecordGet `TApp` tag) `TApp` record
 
 typ ∷ Term
 typ = typOf $ Term $ NumLit 0
 
 eqOf ∷ Term → Term → Term
-eqOf a b = Term $ Term (Term (Builtin Eq) `App` a) `App` b
+eqOf a b = (TBuiltin Eq `TApp` a) `TApp` b
 
 maxOf ∷ Term → Term → Term
-maxOf a b = Term (App (Term (App (Term (App (Term (Builtin If)) (Term (App (Term (Builtin IntGte0)) (Term (App (Term (App (Term (Builtin (Add NumInf))) (Term (App (Term (App (Term (Builtin (Mul NumInf))) (Term (NumLit (-1))))) b)))) a)))))) a)) b)
+maxOf a b = Term (App (Term (App (Term (App (Term (Builtin If)) (Term (App (Term (Builtin IntGte0)) (Term (App (Term (App (Term (Builtin (IntAdd NumInf))) (Term (App (Term (App (Term (Builtin (IntMul NumInf))) (Term (NumLit (-1))))) b)))) a)))))) a)) b)
 
 -- parsing
 
@@ -413,7 +440,7 @@ parsePrim = token do
     (Term . NumLit <$> number)
       <|> ( $(char '.')
               *> ( ($(char '/') *> (Term . Import Nothing <$> byteStringOf (skipSome localPathSym)))
-                    <|> (Term . TagLit <$> (maybe failed pure =<< identRightNow))
+                     <|> (Term . TagLit <$> (maybe failed pure =<< identRightNow))
                  )
           )
       <|> (Term . BoolLit <$> notFollowedBy ((True <$ $(string "true")) <|> (False <$ $(string "false"))) identSym)
@@ -491,7 +518,7 @@ parseApp = parsePrim >>= infxl'
     )
       <|> ( do
               p ← parsePrim
-              infxl' $ Term $ prev `App` p
+              infxl' $ prev `TApp` p
           )
       <|> pure prev
 
@@ -584,7 +611,7 @@ parseInfixOps = infxl parseTy parseOperator'
     case i of
       Just (Ident opName False) →
         findVar opName >>= \case
-          Just (idx, QNorm, True) → pure \a b → Term $ Term (Term (Var idx) `App` a) `App` b
+          Just (idx, QNorm, True) → pure \a b → (Term (Var idx) `TApp` a) `TApp` b
           _ → empty -- Not a known operator in this scope
       _ → empty
 
@@ -764,8 +791,8 @@ isSimple =
           Block defs →
             ping
               *> ( case defs of
-                    BlockLet _ _ b c x → for_ b complexity *> complexity c *> complexity (unLambda x)
-                    BlockRewrite r x → ping *> complexity r *> complexity x
+                     BlockLet _ _ b c x → for_ b complexity *> complexity c *> complexity (unLambda x)
+                     BlockRewrite r x → ping *> complexity r *> complexity x
                  )
           App f a → complexity f *> complexity a
           AppErased f a → complexity f *> complexity a
@@ -842,7 +869,7 @@ pTerm' (fuse, oldPrec, vars) t0 =
               _ → Nothing
            in
             case (tyM, nameM, val) of
-              (Nothing, Just name1, unTerm → (unTerm → (unTerm → Builtin RecordGet) `App` (unTerm → TagLit name2)) `App` record)
+              (Nothing, Just name1, (TBuiltin RecordGet `TApp` (unTerm → TagLit name2)) `TApp` record)
                 | name1 == name2 →
                     (if fuse == FBlock (Just record) then mempty else annotate (color Yellow) "unpack" <+> pTerm' (FNo, 5, vars) record <> annotate (color Cyan) ".")
                       <+> pIdent name1
@@ -906,10 +933,10 @@ pTerm' (fuse, oldPrec, vars) t0 =
       RefineGet x (skips, final) →
         let skips' = hcat $ replicate skips ".@_"
          in (5, pvar x <> annotate (color Blue) (skips' <> maybe mempty (\final' → ".@" <> pIdent final') final))
-      App (unTerm → App (unTerm → Builtin RecordGet) (unTerm → TagLit tag)) rec →
+      App (TApp (TBuiltin RecordGet) (unTerm → TagLit tag)) rec →
         (5, pTerm' (FNo, 5, vars) rec <> annotate (color Blue) ("." <> pIdent tag))
       App lam arg2 → case lam of
-        (unTerm → App (Term (asvar → Just opIdx)) arg1)
+        (TApp (Term (asvar → Just opIdx)) arg1)
           | Just (Just (Ident opName True), _) ← vars !? (length vars - opIdx - 1) →
               (2, pTerm' (FNo, 3, vars) arg1 <+> pBS opName <+> pTerm' (FNo, 2, vars) arg2)
         _ →

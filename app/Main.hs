@@ -25,7 +25,7 @@ import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, re
 import GHC.Exts (IsList (..))
 import NameGen
 import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Imports (..), Rewrite (..), Scopes (..), applyLambda, applyLambdaRefineGetSkip, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', normalizeModule, numDecDispatch, runSubContext, termQQ, withBinding, withMarked)
-import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, loadModule', maxOf, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parseFile, render, rowOf, splitAt3, traverseTermF, typ, typOf, pattern Op2)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, loadModule', maxOf, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parseFile, render, rowOf, splitAt3, traverseTermF, typ, typOf, pattern TApp, pattern TBuiltin)
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, replicate, runReader, take, to, toList, zip)
@@ -658,15 +658,15 @@ infer = logAndRunInfer $ \case
     Imports imps ← ask
     pure $ maybe (error "Incomplete context") snd $ imps !? n
   -- main
-  (NumLit x, CheckL (Builtin (Num d))) →
+  (NumLit x, CheckL (Builtin (Int' d))) →
     if x `numFitsInto` d
       then pure ()
-      else stackError \_ → "Number literal " <> pretty x <> " does not fit into " <> pIdent (identOfBuiltin $ Num d)
+      else stackError \_ → "Number literal " <> pretty x <> " does not fit into " <> pIdent (identOfBuiltin $ Int' d)
   (NumLit x, (_, Infer)) →
     pure
       $ Term
       $ Builtin
-      $ Num
+      $ Int'
       $ let candidates = NumFin False <$> [Bits8, Bits16, Bits32, Bits64]
          in fromMaybe NumInf $ find @[] (x `numFitsInto`) candidates
   (TagLit _, (_, Infer)) → pure $ Term $ Builtin Tag
@@ -786,10 +786,8 @@ infer = logAndRunInfer $ \case
     nestBinding exScope ty
   (t, (e, Check c@(fDyn e → Refine (RefinePostTy baseT _n annT)))) → do
     annT' ← uncurry applyLambda =<< (,) <$> fetchLambda annT <*> normalize (Term t)
-    stackLog \_ → "aha!"
-    stackLog \p → p annT'
-    case unTerm annT' of
-      Op2 Eq a b →
+    case annT' of
+      TBuiltin Eq `TApp` a `TApp` b →
         isEqUnify a b >>= \case
           -- TODO: Drop unify?
           EqYes → infer (Term t) . Check =<< fetchT baseT
@@ -803,41 +801,37 @@ infer = logAndRunInfer $ \case
 
 typOfBuiltin ∷ BuiltinT → Term
 typOfBuiltin = \case
-  Num _d → [termQQ| Type^ 0 |]
-  Add d → op2d d
-  Mul d → op2d d
-  IntNeg d → opd d
-  Tag → [termQQ| Type^ 0 |]
+  Any' → [termQQ| Type^ 0 |]
   Bool → [termQQ| Type^ 0 |]
-  -- TODO: Int+ alternative here then?
-  RowPlus → [termQQ| Fun (u : Int+) -> Type^ u |]
-  TypePlus → [termQQ| Fun (u : Int+) -> Type^ (u + 1) |]
-  List → [termQQ| Fun {u} (Type^ u) -> Type^ u |]
   Eq → [termQQ| Fun (Any) (Any) -> Type^ 0 |]
-  Refl → [termQQ| Fun {x} -> Eq x x |]
-  RecordGet →
-    [termQQ|
-      Fun {u : Int} {row : Row^ u} {T : Type^ u} (tag : Tag) (record : {( (tag) = T )} \/ row) -> T
-    |]
-  -- TODO: Better type
-  RecordKeepFields → [termQQ| Fun {u : Int} {row : Row^ u} (List Tag) (row) -> Any |]
-  RecordDropFields → [termQQ| Fun {u : Int} {row : Row^ u} (List Tag) (row) -> Any |]
-  ListLength → [termQQ| Fun {A} (List A) -> Int+ |]
-  ListIndexL → [termQQ| Fun {A} (i : Int+) (l : List A) {_ : Where (i < list_length l)} -> A |]
-  ListViewL → [termQQ| Fun {A} (l : List A) {_ : Where (0 < list_length l)} -> {( .left = A | .rest = List A )}|]
   Fix' → [termQQ| Fun {I} {O} {measure : Fun (I) -> Int+} (Fun (curr : I) (Fun (next : I) {_ : Where (measure next < measure curr)} -> O) -> O) (I) -> O|]
   If → [termQQ| Fun {A} (cond : Bool) (Fun {_ : Eq cond true} -> A) (Fun {_ : Eq cond false} -> A) -> A |]
-  IntGte0 → [termQQ| Fun (Int) -> Bool |]
+  Int' _d → [termQQ| Type^ 0 |]
+  IntAdd d → op2d d
   IntEq → [termQQ| Fun (Int) (Int) -> Bool |]
-  TagEq → [termQQ| Fun (Tag) (Tag) -> Bool |]
-  W → [termQQ| Fun {u} (Type^ u) -> Type^ u |]
-  Wrap → [termQQ| Fun {A} (A) -> W A |]
-  Unwrap → [termQQ| Fun {A} (W A) -> A |]
+  IntGte0 → [termQQ| Fun (Int) -> Bool |]
+  IntMul d → op2d d
+  IntNeg d → opd d
+  List → [termQQ| Fun {u} (Type^ u) -> Type^ u |]
+  ListIndexL → [termQQ| Fun {A} (i : Int+) (l : List A) {_ : Where (i < list_length l)} -> A |]
+  ListLength → [termQQ| Fun {A} (List A) -> Int+ |]
+  ListViewL → [termQQ| Fun {A} (l : List A) {_ : Where (0 < list_length l)} -> {( .left = A | .rest = List A )}|]
   Never → [termQQ| Type^ 0 |]
-  Any' → [termQQ| Type^ 0 |] where
+  RecordDropFields → [termQQ| Fun {u : Int} {row : Row^ u} (List Tag) (row) -> Any |]
+  RecordGet → [termQQ| Fun {u : Int} {row : Row^ u} {T : Type^ u} (tag : Tag) (record : {( (tag) = T )} \/ row) -> T|]
+  RecordKeepFields → [termQQ| Fun {u : Int} {row : Row^ u} (List Tag) (row) -> Any |]
+  -- TODO: Better type
+  Refl → [termQQ| Fun {x} -> Eq x x |]
+  RowPlus → [termQQ| Fun (u : Int+) -> Type^ u |]
+  Tag → [termQQ| Type^ 0 |]
+  TagEq → [termQQ| Fun (Tag) (Tag) -> Bool |]
+  TypePlus → [termQQ| Fun (u : Int+) -> Type^ (u + 1) |]
+  W → [termQQ| Fun {u} (Type^ u) -> Type^ u |]
+  WUnwrap → [termQQ| Fun {A} (W A) -> A |]
+  WWrap → [termQQ| Fun {A} (A) -> W A |]
  where
-  opd d = Term $ Pi QNorm Nothing (Term $ Builtin $ Num d) $ Lambda $ Term $ Builtin $ Num d
-  op2d d = Term $ Pi QNorm Nothing (Term $ Builtin $ Num d) $ Lambda $ opd d
+  opd d = Term $ Pi QNorm Nothing (Term $ Builtin $ Int' d) $ Lambda $ Term $ Builtin $ Int' d
+  op2d d = Term $ Pi QNorm Nothing (Term $ Builtin $ Int' d) $ Lambda $ opd d
 
 -- TODO: Allow instantiation with erased functions
 
@@ -980,7 +974,7 @@ subtype = \a b →
           outT1' ← fetchLambda outT1
           outT2' ← fetchLambda outT2
           scopedVar (const pure) (QNorm, n1 <|> n2, Nothing, inT2') $ subtype (unLambda outT1') (unLambda outT2')
-      (fDyn e → Builtin (Num d1), fDyn e → Builtin (Num d2)) →
+      (fDyn e → Builtin (Int' d1), fDyn e → Builtin (Int' d2)) →
         let fits = case (d1, d2) of
               (_, NumInf) → True
               (NumFin nonneg1 bits1, NumFin nonneg2 bits2) → case (nonneg1, nonneg2) of
@@ -988,7 +982,7 @@ subtype = \a b →
                 (False, True) → False
                 _ → bits1 <= bits2
               (NumInf, NumFin{}) → False
-         in if fits then pure () else stackError \_ → "Cannot fit " <> pIdent (identOfBuiltin $ Num d1) <> " into " <> pIdent (identOfBuiltin $ Num d2)
+         in if fits then pure () else stackError \_ → "Cannot fit " <> pIdent (identOfBuiltin $ Int' d1) <> " into " <> pIdent (identOfBuiltin $ Int' d2)
       (fDyn e → Builtin Never, _) → pure ()
       (_, fDyn e → Builtin Any') → pure ()
       -- Builtin Types (must be identical)
@@ -1007,7 +1001,7 @@ subtype = \a b →
               EqYes → pure ()
               _ → do
                 let negA = Term $ Term (Builtin $ IntNeg NumInf) `App` a
-                evaluated ← normalize (Term $ Term (Builtin IntGte0) `App` Term (Op2 (Add NumInf) b negA))
+                evaluated ← normalize (TBuiltin IntGte0 `TApp` (TBuiltin (IntAdd NumInf) `TApp` b `TApp` negA))
                 stackLog \p → p evaluated
                 isEqUnify evaluated (Term $ BoolLit True) >>= \case
                   EqYes → pure ()

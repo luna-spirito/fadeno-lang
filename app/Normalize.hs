@@ -14,14 +14,75 @@ import Control.Effect.State (State, get, modify, state)
 import Data.Bitraversable (bimapM)
 import Data.ByteString.Char8 (pack)
 import Data.Foldable (foldlM)
-import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, ifoldr, take, viewl, viewr, zip, (!?), (<|), (|>))
+import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, ifoldr, replicate, take, viewl, viewr, zip, (!?), (<|), (|>))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedByP, nestedByP', pTerm, parse, recordGet, render, splitAt3, traverseTermF)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedByP, nestedByP', pTerm, parse, recordGet, render, splitAt3, traverseTermF, pattern TApp, pattern TBuiltin)
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, take, to, toList, try, zip)
 
 -- TODO: Erasure is wrong... Verify for \f. f @4
 -- TODO: Add `Thunk` Term, make `normalize` have a pure-heart with the capability to delay normalizing of subterms as `Thunk ctx`
 -- Basically, we need to enrich term with information when it's needed, and `normalize` shouldn't normalize the term fully, instead just injecting Thunk's.
+
+-- Builtins
+-- (returns `n ** (Vec n Term -> Term)`)
+appBuiltin ∷ (Has Context sig m) ⇒ Vector (Maybe Term) → BuiltinT → Vector Term → m (Maybe Term)
+appBuiltin locals = curry \case
+  ((Any'; Bool; Eq; Int' _; List; Never; Refl; RowPlus; Tag; TypePlus; W), _) → pure Nothing
+  (Fix', [f, i]) → fmap Just $ normalize' locals $ (f `TApp` (TBuiltin Fix' `TApp` f)) `TApp` i
+  (If, [Term (BoolLit cond), th, el]) → pure $ Just $ if cond then th else el
+  (IntEq, [Term (NumLit a), Term (NumLit b)]) → pure $ Just $ Term $ BoolLit $ a == b
+  (IntGte0, [Term (NumLit x)]) → pure $ Just $ Term $ BoolLit $ x >= 0
+  ((IntAdd _; IntMul _; IntNeg _), _) → pure Nothing
+  (ListIndexL, [Term (ListLit (Vector' vals)), Term (NumLit i)]) → pure $ vals !? fromIntegral i
+  (ListLength, [(Term (ListLit vals))]) → pure $ Just $ Term $ NumLit $ fromIntegral $ length vals
+  (ListViewL, [Term (ListLit (Vector' vals))]) →
+    pure $ viewl vals <&> \(left, rest) →
+      Term $ FieldsLit (FRecord ()) [(Term $ TagLit (Ident "left" False), left), (Term $ TagLit (Ident "rest" False), Term $ ListLit $ Vector' rest)]
+  (RecordDropFields, [Term (ListLit tags), a]) → pure $ Just $ recordDropFields tags a
+  (RecordGet, [name1, a]) →
+    pure
+      $ Just
+        let
+          search a' = case unconsField a' of
+            Nothing → recordGet name1 a'
+            Just ((name2, v), rest) → case isEq name1 name2 of
+              EqYes → v
+              EqNot → search rest
+              EqUnknown → recordGet name1 a'
+         in
+          search a
+  (RecordKeepFields, [Term (ListLit tags), a]) → pure $ Just $ Term $ FieldsLit (FRecord ()) $ (\tag → (tag, recordGet tag a)) <$> tags
+  (TagEq, [Term (TagLit a), Term (TagLit b)]) → pure $ Just $ Term $ BoolLit $ a == b
+  (WUnwrap, [a]) → pure $ Just a
+  (WWrap, [a]) → pure $ Just a
+  ((Fix'; If; IntEq; IntGte0; ListIndexL; ListLength; ListViewL; RecordDropFields; RecordGet; RecordKeepFields; TagEq; WWrap; WUnwrap), _) → pure Nothing
+ where
+  -- Drop `x` from ListLit.
+  listLitDrop ∷ Term → Vector' Term → ListDropRes
+  listLitDrop x (Vector' fi) =
+    ifoldr
+      ( \i n rec → case isEq x n of
+          EqYes → TDFound $ Vector' $ deleteAt i fi
+          EqNot → rec
+          EqUnknown → TDUnknown
+      )
+      TDMissing
+      fi
+
+  recordDropFields ∷ Vector' Term → Term → Term
+  recordDropFields tags fields0 = case tags of
+    Vector' (null → True) → Term $ FieldsLit (FRecord ()) []
+    _ →
+      let
+        stuck = Term $ App (Term $ App (Term $ Builtin RecordDropFields) $ Term $ ListLit tags) fields0
+       in
+        case unconsField fields0 of
+          Nothing → stuck
+          Just ((n, v), fields) → case listLitDrop n tags of
+            TDFound tags' → recordDropFields tags' fields
+            TDMissing →
+              concat (Term $ FieldsLit (FRecord ()) [(n, v)]) $ recordDropFields tags fields
+            TDUnknown → stuck
 
 -- | Intensional equality.
 data EqRes
@@ -263,17 +324,6 @@ unconsField =
       Nothing → Nothing
     _ → Nothing
 
-repeat ∷ Integer → (a → a) → a → a
-repeat n f = case n of
-  0 → id
-  _ → f . repeat (n - 1) f
-
--- TODO: Really simple, expand upon.
-unplus ∷ Term → (Maybe Term, Integer)
-unplus (unTerm → NumLit n) | n >= 0 = (Nothing, n)
-unplus (unTerm → (Term (Term (Builtin (Add NumInf)) `App` a) `App` Term (NumLit n))) = (+ n) <$> unplus a
-unplus x = (Just x, 0)
-
 numDecDispatch ∷ NumDesc → (∀ x. (Integral x, Bounded x) ⇒ Proxy x → a) → a → a
 numDecDispatch desc f inf = case desc of
   NumFin signed bits → case (signed, bits) of
@@ -288,72 +338,6 @@ numDecDispatch desc f inf = case desc of
   NumInf → inf
 
 data ListDropRes = TDFound !(Vector' Term) | TDMissing | TDUnknown
-
--- TODO: Switch to monadic
-
--- | Processes application of `f` onto `a`.
-postApp ∷ Term → Term → Term
-postApp f0 a0 = case (unTerm f0, a0) of
-  (Lam QNorm _ bod, a) → run $ runSubContext (Imports []) $ applyLambda bod a -- TODO: This is wrong. Do we need fuel or something?
-  -- TODO: This is obviously wrong since no rewrites?
-  (App (Term (Builtin RecordGet)) name1, a) →
-    let
-      search a' = case unconsField a' of
-        Nothing → recordGet name1 a'
-        Just ((name2, v), rest) → case isEq name1 name2 of
-          EqYes → v
-          EqNot → search rest
-          EqUnknown → recordGet name1 a'
-     in
-      search a
-  (Term (Builtin RecordKeepFields) `App` Term (ListLit tags), a) → Term . FieldsLit (FRecord ()) $ (\tag → (tag, recordGet tag a)) <$> tags
-  (Term (Builtin RecordDropFields) `App` Term (ListLit tags), a) → recordDropFields tags a
-  (Builtin ListLength, Term (ListLit (Vector' fi))) → Term $ NumLit $ fromIntegral $ length fi
-  (Term (Builtin ListIndexL) `App` Term (ListLit (Vector' vals)), Term (NumLit i)) → case vals !? fromIntegral i of
-    Just v → v
-    Nothing → Term $ App f0 a0
-  (Term (Builtin Fix') `App` f, i) →
-    run $ runSubContext (Imports []) $ normalize $ Term $ Term (f `App` f0) `App` i
-  (Term (Term (Builtin If) `App` (Term (BoolLit cond))) `App` thenBranch, elseBranch) →
-    if cond then thenBranch else elseBranch
-  (Builtin IntGte0, Term (NumLit x)) → Term $ BoolLit $ x >= 0
-  (Term (Builtin IntEq) `App` Term (NumLit l), Term (NumLit r)) → Term $ BoolLit $ l == r
-  (Term (Builtin Wrap) `App` _ty, b) → b
-  (Term (Builtin Unwrap) `App` _ty, b) → b
-  -- Add
-  (Term (Builtin (Add d)) `App` a, Term (NumLit b))
-    | b == 0 → a
-    | Term (NumLit a') ← a → Term $ NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ fromIntegral a' + fromIntegral b) (a' + b)
-  -- Sub
-  (Builtin (IntNeg d), Term (NumLit x)) → Term $ NumLit $ numDecDispatch d (\(_ ∷ Proxy x) → fromIntegral @x $ -fromIntegral x) (-x)
-  _ → normalizePoly $ Term $ App f0 a0
- where
-  -- Drop `x` from ListLit.
-  listLitDrop ∷ Term → Vector' Term → ListDropRes
-  listLitDrop x (Vector' fi) =
-    ifoldr
-      ( \i n rec → case isEq x n of
-          EqYes → TDFound $ Vector' $ deleteAt i fi
-          EqNot → rec
-          EqUnknown → TDUnknown
-      )
-      TDMissing
-      fi
-
-  recordDropFields ∷ Vector' Term → Term → Term
-  recordDropFields tags fields0 = case tags of
-    Vector' (null → True) → Term $ FieldsLit (FRecord ()) []
-    _ →
-      let
-        stuck = Term $ App (Term $ App (Term $ Builtin RecordDropFields) $ Term $ ListLit tags) fields0
-       in
-        case unconsField fields0 of
-          Nothing → stuck
-          Just ((n, v), fields) → case listLitDrop n tags of
-            TDFound tags' → recordDropFields tags' fields
-            TDMissing →
-              concat (Term $ FieldsLit (FRecord ()) [(n, v)]) $ recordDropFields tags fields
-            TDUnknown → stuck
 
 tryRewrite ∷ (Has Context sig m) ⇒ (Int, Rewrite) → Term → m (Maybe Term)
 tryRewrite (nest, Rewrite forallsCount lfromto0) t = do
@@ -443,7 +427,23 @@ traverseNormTermF c locals t0 = rewr =<< trav
     App f a → do
       f' ← c locals f
       a' ← c locals a
-      pure $ postApp f' a'
+      let locals' = replicate (length locals - countErasedLocals) Nothing
+      case f' of
+        Term (Lam QNorm _ body) → c (locals' |> Just a') $ unLambda body
+        _ →
+          let
+            collect disf disargs = case disf of
+              TApp disff disfa → collect disff (disfa <| disargs)
+              _ → (disf, disargs)
+            (f'', a'') = collect f' [a']
+           in
+            case f'' of
+              TBuiltin bf →
+                appBuiltin locals' bf a'' <&> \case
+                  Just r → r
+                  Nothing → normalizePoly $ f' `TApp` a'
+              _ → pure $ f' `TApp` a'
+    -- pure $ postApp f' a'
     Var globalI → travVar globalI
     AppErased f _a → c locals f
     Refine (RefinePre _ann base) → c locals base
@@ -530,14 +530,14 @@ termQQ ∷ QuasiQuoter
 termQQ =
   let
     wher = Term $ Lam QNorm (Just $ Ident "n" False) $ Lambda $ Term $ Term (Term (Builtin Eq) `App` Term (Var 0)) `App` Term (BoolLit True)
-    sub = Term $ Lam QNorm (Just (Ident "a" False)) (Lambda (Term (Lam QNorm (Just (Ident "b" False)) (Lambda (Term (App (Term (App (Term (Builtin (Add NumInf))) (Term (App (Term (App (Term (Builtin (Mul NumInf))) (Term (NumLit (-1))))) (Term (Var 0)))))) (Term (Var 1))))))))
-    lte = Term{unTerm = Lam QNorm (Just (Ident "a" False)) (Lambda{unLambda = Term{unTerm = Lam QNorm (Just (Ident "b" False)) (Lambda{unLambda = Term{unTerm = App (Term{unTerm = Builtin IntGte0}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Add NumInf)}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Mul NumInf)}) (Term{unTerm = NumLit (-1)})}) (Term{unTerm = Var 1})})}) (Term{unTerm = Var 0})})}})}})}
-    lt = Term{unTerm = Lam QNorm (Just (Ident "a" False)) (Lambda{unLambda = Term{unTerm = Lam QNorm (Just (Ident "b" False)) (Lambda{unLambda = Term{unTerm = App (Term{unTerm = Builtin IntGte0}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Add NumInf)}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Add NumInf)}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (Mul NumInf)}) (Term{unTerm = NumLit (-1)})}) (Term{unTerm = Var 1})})}) (Term{unTerm = Var 0})})}) (Term{unTerm = NumLit (-1)})})}})}})}
-    intp = Term{unTerm = Refine (RefinePostTy (Term{unTerm = Builtin (Num NumInf)}) (Ident "pos" False) (Lambda{unLambda = Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin Eq}) (Term{unTerm = App (Term{unTerm = Builtin IntGte0}) (Term{unTerm = Var 0})})}) (Term{unTerm = BoolLit True})}}))}
+    sub = Term $ Lam QNorm (Just (Ident "a" False)) (Lambda (Term (Lam QNorm (Just (Ident "b" False)) (Lambda (Term (App (Term (App (Term (Builtin (IntAdd NumInf))) (Term (App (Term (App (Term (Builtin (IntMul NumInf))) (Term (NumLit (-1))))) (Term (Var 0)))))) (Term (Var 1))))))))
+    lte = Term{unTerm = Lam QNorm (Just (Ident "a" False)) (Lambda{unLambda = Term{unTerm = Lam QNorm (Just (Ident "b" False)) (Lambda{unLambda = Term{unTerm = App (Term{unTerm = Builtin IntGte0}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (IntAdd NumInf)}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (IntMul NumInf)}) (Term{unTerm = NumLit (-1)})}) (Term{unTerm = Var 1})})}) (Term{unTerm = Var 0})})}})}})}
+    lt = Term{unTerm = Lam QNorm (Just (Ident "a" False)) (Lambda{unLambda = Term{unTerm = Lam QNorm (Just (Ident "b" False)) (Lambda{unLambda = Term{unTerm = App (Term{unTerm = Builtin IntGte0}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (IntAdd NumInf)}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (IntAdd NumInf)}) (Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin (IntMul NumInf)}) (Term{unTerm = NumLit (-1)})}) (Term{unTerm = Var 1})})}) (Term{unTerm = Var 0})})}) (Term{unTerm = NumLit (-1)})})}})}})}
+    intp = Term{unTerm = Refine (RefinePostTy (Term{unTerm = Builtin (Int' NumInf)}) (Ident "pos" False) (Lambda{unLambda = Term{unTerm = App (Term{unTerm = App (Term{unTerm = Builtin Eq}) (Term{unTerm = App (Term{unTerm = Builtin IntGte0}) (Term{unTerm = Var 0})})}) (Term{unTerm = BoolLit True})}}))}
     scope ∷ Vector (Maybe Ident, Term)
     scope =
       ((\b → (Just $ identOfBuiltin b, Term $ Builtin b)) <$> builtinsList)
-        <> [ (Just $ Ident "+" True, Term $ Builtin $ Add NumInf)
+        <> [ (Just $ Ident "+" True, Term $ Builtin $ IntAdd NumInf)
            , (Just $ Ident "-" True, sub)
            , (Just $ Ident "Where" False, wher)
            , (Just $ Ident "<=" True, lte)

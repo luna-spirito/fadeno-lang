@@ -137,63 +137,65 @@ getValue = do
 
 putBuiltin ∷ BuiltinT → S.Put
 putBuiltin = \case
-  Tag → S.putWord8 0
-  RowPlus → S.putWord8 1
-  List → S.putWord8 2
-  Bool → S.putWord8 3
-  TypePlus → S.putWord8 4
-  Eq → S.putWord8 5
-  Refl → S.putWord8 6
-  RecordGet → S.putWord8 7
-  RecordKeepFields → S.putWord8 8
-  RecordDropFields → S.putWord8 9
-  ListLength → S.putWord8 10
-  ListIndexL → S.putWord8 11
-  Fix' → S.putWord8 12
-  If → S.putWord8 13
-  IntGte0 → S.putWord8 14
-  IntEq → S.putWord8 15
-  TagEq → S.putWord8 16
-  W → S.putWord8 17
-  Wrap → S.putWord8 18
-  Unwrap → S.putWord8 19
-  Never → S.putWord8 20
-  Any' → S.putWord8 21
-  Add d → S.putWord8 22 *> putNumDesc d
-  Mul d → S.putWord8 23 *> putNumDesc d
-  Num d → S.putWord8 24 *> putNumDesc d
-  IntNeg d → S.putWord8 25 *> putNumDesc d
+  Any' → S.putWord8 0
+  Bool → S.putWord8 1
+  Eq → S.putWord8 2
+  Fix' → S.putWord8 3
+  If → S.putWord8 4
+  IntEq → S.putWord8 5
+  IntGte0 → S.putWord8 6
+  List → S.putWord8 7
+  ListIndexL → S.putWord8 8
+  ListLength → S.putWord8 9
+  ListViewL → S.putWord8 10
+  Never → S.putWord8 11
+  RecordDropFields → S.putWord8 12
+  RecordGet → S.putWord8 13
+  RecordKeepFields → S.putWord8 14
+  Refl → S.putWord8 15
+  RowPlus → S.putWord8 16
+  Tag → S.putWord8 17
+  TagEq → S.putWord8 18
+  TypePlus → S.putWord8 19
+  W → S.putWord8 20
+  WUnwrap → S.putWord8 21
+  WWrap → S.putWord8 22
+  Int' d → S.putWord8 23 *> putNumDesc d
+  IntAdd d → S.putWord8 24 *> putNumDesc d
+  IntMul d → S.putWord8 25 *> putNumDesc d
+  IntNeg d → S.putWord8 26 *> putNumDesc d
 
 getBuiltin ∷ S.Get BuiltinT
 getBuiltin = do
   tag ← S.getWord8
   case tag of
-    0 → pure Tag
-    1 → pure RowPlus
-    2 → pure List
-    3 → pure Bool
-    4 → pure TypePlus
-    5 → pure Eq
-    6 → pure Refl
-    7 → pure RecordGet
-    8 → pure RecordKeepFields
-    9 → pure RecordDropFields
-    10 → pure ListLength
-    11 → pure ListIndexL
-    12 → pure Fix'
-    13 → pure If
-    14 → pure IntGte0
-    15 → pure IntEq
-    16 → pure TagEq
-    17 → pure W
-    18 → pure Wrap
-    19 → pure Unwrap
-    20 → pure Never
-    21 → pure Any'
-    22 → Add <$> getNumDesc
-    23 → Mul <$> getNumDesc
-    24 → Num <$> getNumDesc
-    25 → IntNeg <$> getNumDesc
+    0 → pure Any'
+    1 → pure Bool
+    2 → pure Eq
+    3 → pure Fix'
+    4 → pure If
+    5 → pure IntEq
+    6 → pure IntGte0
+    7 → pure List
+    8 → pure ListIndexL
+    9 → pure ListLength
+    10 → pure ListViewL
+    11 → pure Never
+    12 → pure RecordDropFields
+    13 → pure RecordGet
+    14 → pure RecordKeepFields
+    15 → pure Refl
+    16 → pure RowPlus
+    17 → pure Tag
+    18 → pure TagEq
+    19 → pure TypePlus
+    20 → pure W
+    21 → pure WUnwrap
+    22 → pure WWrap
+    23 → Int' <$> getNumDesc
+    24 → IntAdd <$> getNumDesc
+    25 → IntMul <$> getNumDesc
+    26 → IntNeg <$> getNumDesc
     _ → fail "Unknown builtin tag"
 
 -- TODO: More dense?
