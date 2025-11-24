@@ -28,7 +28,9 @@ import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replic
 appBuiltin ∷ (Has Context sig m) ⇒ Vector (Maybe Term) → BuiltinT → Vector Term → m (Maybe Term)
 appBuiltin locals = curry \case
   ((Any'; Bool; Eq; Int' _; List; Never; PropLteTrans; PropListViewlDec; Refl; RowPlus; Tag; TypePlus; W), _) → pure Nothing
-  (Loop, [f, i]) → fmap Just $ normalize' locals $ (f `TApp` (TBuiltin Loop `TApp` f)) `TApp` i
+  (Loop, [i0, f]) | not (stuck i0) → do
+    traceM $ tshow i0
+    fmap Just $ normalize' locals $ f `TApp` i0 `TApp` Term (Lam QNorm (Just $ Ident "i" False) $ Lambda $ TBuiltin Loop `TApp` Term (Var 0) `TApp` f)
   (If, [Term (BoolLit cond), th, el]) → pure $ Just $ if cond then th else el
   (IntEq, [Term (NumLit a), Term (NumLit b)]) → pure $ Just $ Term $ BoolLit $ a == b
   (IntGte0, [Term (NumLit x)]) → pure $ Just $ Term $ BoolLit $ x >= 0
@@ -57,6 +59,9 @@ appBuiltin locals = curry \case
   (WWrap, [a]) → pure $ Just a
   ((Loop; If; IntEq; IntGte0; ListIndexL; ListLength; ListViewL; RecordDropFields; RecordGet; RecordKeepFields; TagEq; WWrap; WUnwrap), _) → pure Nothing
  where
+  stuck = unTerm >>> \case
+    (NumLit{}; TagLit{}; BoolLit{}; ListLit{}; FieldsLit{}; Builtin{}; Lam{}; Pi{}; Concat{}) → False
+    (BuiltinsVar{}; App{}; Var{}; Sorry; RefineGet{}; Block{}; AppErased{}; Refine{}; Import{}; ExVar{}; UniVar{}) → True
   -- Drop `x` from ListLit.
   listLitDrop ∷ Term → Vector' Term → ListDropRes
   listLitDrop x (Vector' fi) =

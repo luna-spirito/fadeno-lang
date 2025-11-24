@@ -1,5 +1,4 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
-
 {-# HLINT ignore "Use const" #-}
 
 module Main (main, parseFile, formatFile, formatModule, loadModule, normalizeModule, checkModule, checkModuleDebug, compileModule, decompileModule, build, watch) where
@@ -35,6 +34,7 @@ import System.Directory.OsPath (getModificationTime)
 import System.File.OsPath (writeFile')
 import System.IO (print)
 import System.OsPath (OsPath, encodeUtf, replaceExtension, unsafeEncodeUtf)
+import System.Environment (getArgs)
 
 -- TODO: Permit inference of dependent Pis?
 -- TODO: Concat uncomfortably replicates Pi.
@@ -804,7 +804,7 @@ typOfBuiltin = \case
   Any' → [termQQ| Type^ 0 |]
   Bool → [termQQ| Type^ 0 |]
   Eq → [termQQ| Fun (Any) (Any) -> Type^ 0 |]
-  Loop → [termQQ| Fun {I} {O} {measure : Fun (I) -> Int+} (Fun (curr : I) (Fun (next : I) {_ : Where (measure next < measure curr)} -> O) -> O) (I) -> O|]
+  Loop → [termQQ| Fun {I} {measure : Fun (I) -> Int+} {O} (I) (Fun (curr : I) (Fun (next : I) {_ : Where (measure next < measure curr)} -> O) -> O) -> O|]
   If → [termQQ| Fun {A} (cond : Bool) (Fun {_ : Eq cond true} -> A) (Fun {_ : Eq cond false} -> A) -> A |]
   Int' _d → [termQQ| Type^ 0 |]
   IntAdd d → op2d d
@@ -1106,4 +1106,6 @@ checkModuleDebug (names, m) = do
     Right r → pTerm [] r
 
 main ∷ IO ()
-main = pure ()
+main = getArgs >>= \case
+  [] -> render $ annotate (color Red) "Usage: fadeno <file>"
+  (arg:_) -> watch arg

@@ -61,7 +61,7 @@ none = { .has = false } \/ {}
 /: Fun {A} (A) -> Opt A
 some = \val. { .has = true } \/ val
 /: Fun {A} (has : Bool) (Fun {_ : Where has} -> A) -> Opt A
-someIf = \has body. { .has = has } \/ if has
+some_if = \has body. { .has = has } \/ if has
   (\@yes. rewrite yes in body @refl)
   (\@no. rewrite no in {})
 
@@ -90,20 +90,20 @@ iter_< = \to.
   { .obj = 0 @|refl|
   | .impl =
     @|\curr. int-clamp>int+ (to - curr)|
-    (\curr. someIf (curr < to) (\@yes. rewrite yes in { .curr = curr | .rest = curr ++ 1 }))
+    (\curr. some_if (curr < to) (\@yes. rewrite yes in { .curr = curr | .rest = curr ++ 1 }))
     @|\curr @has.
       rewrite has
       rewrite <=~trans @curr @(curr + 1) @to refl refl
       in refl|
   }
 
-/: Fun {u : Int+} {A : Type^ u} (l : List A) -> ImplOf^ u (FinIter A)
+/: Fun {u} {A : Type^ u} (l : List A) -> ImplOf^ u (FinIter A)
 iter_list = \@_ @A start.
   @|List A|
   { .obj = start
   | .impl =
     @|list_length|
-    (\curr. someIf (list_length curr > 0) (\@yes.
+    (\curr. some_if (list_length curr > 0) (\@yes.
       rewrite yes
       res = list_viewl curr
       in { .curr = res.left | .rest = res.rest }))
@@ -114,15 +114,24 @@ iter_list = \@_ @A start.
   }
 
 // Loop, at each iteration getting a new element from an iterator.
-/: Fun {u} {A} {I} {O} (ImplOf^ u (FinIter A)) (Fun (A) (I) -> O) (I) -> O
-loopIter = \@_ @A @I @O iter0 f.
+/: Fun {u} {A} {O} (ImplOf^ u (FinIter A)) (Fun (A) (O) -> O) (O) -> O
+loop_iter = \@_ @A @O iter0 f final.
   step = iter0.@_.impl in
-  loop @iter0.@T @(Fun (I) -> O) @step.@maxsize (\rec iterO.
-    SORRY
-  ) iter0.@_.obj
+  loop @iter0.@T @step.@maxsize @O iter0.@_.obj (\iterT rec.
+    next = step iterT
+    in if next.has
+      (\@yes. rewrite yes in f next.curr (rewrite step.@dec iterT @refl in rec next.rest @refl))
+      final
+  )
 
 ///: Fun {u} (tag : Tag) (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
-//find-case = \@u tag l. SORRY
+//find_case = \@u tag l. loop_iter (iter_list l) 4 5
+
+/: ImplOf^ 4 (FinIter Int+)
+a = SORRY
+
+/: ImplOf^ 4 (FinIter Int+)
+b = a
 
 ///: Fun {u} (tag : Tag) (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
 //find-case = \@u tag l. int+_unfold @(Row^ u)
