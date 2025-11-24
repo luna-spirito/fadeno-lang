@@ -943,14 +943,26 @@ subtype = \a b →
   subtype' ∷ Term → Term → m ()
   subtype' t10 t20 =
     getEpoch >>= \e → case (t10, t20) of -- TODO: fDyn e right here? Maybe in infer?
+      -- Subtype Pi & RefinePreTy directly if possible. Can misfire, but generally ensures `A <: B` gets correctly subtyped when `A = B`.
+      (fDyn e → Pi q1 n1 inT1 outT1, fDyn e → Pi q2 n2 inT2 outT2) | q1 == q2 && (q1 == QNorm || n1 == n2) → do
+        uncurry subtype =<< (,) <$> fetchT inT2 <*> fetchT inT1 -- Input types are contravariant (T2 <: T1)
+        fetchT inT2 >>= \inT2' → do -- Output types are covariant
+          outT1' ← fetchLambda outT1
+          outT2' ← fetchLambda outT2
+          scopedVar (const pure) (QNorm, n1 <|> n2, Nothing, inT2') $ subtype (unLambda outT1') (unLambda outT2')
+      (fDyn e → Refine (RefinePreTy n1 annT1 baseT1), fDyn e → Refine (RefinePreTy n2 annT2 baseT2)) | n1 == n2 → do
+        uncurry subtype =<< (,) <$> fetchT annT1 <*> fetchT annT2
+        fetchT annT2 >>= \inT2' → do
+          outT1' ← fetchLambda baseT1
+          outT2' ← fetchLambda baseT2
+          scopedVar (const pure) (QNorm, Just n2, Nothing, inT2') $ subtype (unLambda outT1') (unLambda outT2')
+      -- Handle existentials now
       (unTerm → Refine (RefinePreTy _n annT baseT), t) →
         scopedUniVar (const pure) annT ((`subtype` t) <=< applyLambda baseT)
-      -- T <: Pi QEra x:K. Body  => Introduce UniVar for x
       (t, unTerm → Pi QEra (Just _n) inT outT) →
         scopedUniVar (const pure) inT (subtype t <=< applyLambda outT)
       (t, unTerm → Refine (RefinePreTy n annT baseT)) →
         scopedExVar (\_ _ → stackError \_ → "Unresolved existential" <+> pIdent n) annT (subtype t <=< applyLambda baseT)
-      -- Pi QEra x:K. Body <: T => Introduce ExVar for x
       (unTerm → Pi QEra (Just n) inT outT, t) →
         scopedExVar (\_ _ → stackError \_ → "Unresolved existential" <+> pIdent n) inT ((`subtype` t) <=< applyLambda outT)
       -- Existential Variables (?a <: ?b, ?a <: T, T <: ?a)
@@ -968,14 +980,6 @@ subtype = \a b →
           scopedVar (const pure) (QNorm, Just n, Nothing, base1') $ subtype (unLambda ann1') (unLambda ann2')
       (unTerm → Refine (RefinePostTy base _ _ann), t) → subtype base t
       -- Function Types (Πx:T1.U1 <: Πy:T2.U2)
-      (fDyn e → Pi q1 n1 inT1 outT1, fDyn e → Pi q2 n2 inT2 outT2) | q1 == q2 → do
-        -- Input types are contravariant (T2 <: T1)
-        uncurry subtype =<< (,) <$> fetchT inT2 <*> fetchT inT1
-        -- Output types are covariant
-        fetchT inT2 >>= \inT2' → do
-          outT1' ← fetchLambda outT1
-          outT2' ← fetchLambda outT2
-          scopedVar (const pure) (QNorm, n1 <|> n2, Nothing, inT2') $ subtype (unLambda outT1') (unLambda outT2')
       (fDyn e → Builtin (Int' d1), fDyn e → Builtin (Int' d2)) →
         let fits = case (d1, d2) of
               (_, NumInf) → True
