@@ -23,8 +23,8 @@ import Data.List (find)
 import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, replicate, splitAt, take, viewl, viewr, zip, (!?), (<|), (|>))
 import GHC.Exts (IsList (..))
 import NameGen
-import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Imports (..), Rewrite (..), Scopes (..), applyLambda, applyLambdaRefineGetSkip, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', normalizeModule, numDecDispatch, runSubContext, termQQ, withBinding, withMarked)
-import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, loadModule', maxOf, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parseFile, render, rowOf, splitAt3, traverseTermF, typ, typOf, pattern TApp, pattern TBuiltin)
+import Normalize (Context, Dyn (..), EEntry (..), Epoch (..), EqRes (..), Imports (..), Rewrite (..), Scopes (..), applyLambda, applyLambdaRefineGetSkip, dyn, fDyn, fetchLambda, fetchT, getEpoch, getScopeId, isEq', normalize, normalize', normalizeModule, numDecDispatch, runSubContext, termQQ, withBinding, withMarked, printTryRewriteStats)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, formatFile, formatModule, freshIdent, identOfBuiltin, loadModule, loadModule', maxOf, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, parseFile, render, rowOf, splitAt3, traverseTermF, typ, typOf, pattern TApp, pattern TBuiltin, OpaqueId (..), regIdent, nestedByP')
 import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, replicate, runReader, take, to, toList, zip)
@@ -35,6 +35,8 @@ import System.File.OsPath (writeFile')
 import System.IO (print)
 import System.OsPath (OsPath, encodeUtf, replaceExtension, unsafeEncodeUtf)
 import System.Environment (getArgs)
+import qualified RIO.HashMap as HM
+import Control.Monad (when)
 
 -- TODO: Permit inference of dependent Pis?
 -- TODO: Concat uncomfortably replicates Pi.
@@ -50,7 +52,7 @@ import System.Environment (getArgs)
 -- in test (-1)
 -- ```
 
-type Checker = Context :+: Fresh :+: State UsedNames :+: StackLog :+: Throw (Doc AnsiStyle)
+type Checker = Context :+: Fresh :+: State UsedNames :+: State (HashMap OpaqueId Term) :+: StackLog :+: Throw (Doc AnsiStyle)
 
 -- | Debug stack
 data StackLog m a where
@@ -187,10 +189,10 @@ writeMeta exId0@(scope0, subi0) (valLocals0, valNow0) = do
 -- -- TODO: Dependent.
 
 -- | Introduce new variable/binding.
-scopedVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → (Quant, Maybe Ident, Maybe Term, Term) → m a → m a
-scopedVar mapTerm (bindQ, bindI, bindT, bindTy) act = do
-  outT ← withBinding (bindQ, bindI, bindT, bindTy) act
-  mapTerm (\t → maybe (stackError \p → "Var leaked in" <+> p t) pure $ nestedBy' 0 t $ -1) outT
+-- scopedVar ∷ (Has Checker sig m) ⇒ (Quant, Maybe Ident, Maybe Term, Term) → m () → m ()
+-- scopedVar mapTerm (bindQ, bindI, bindT, bindTy) act = do
+--   outT ← withBinding (bindQ, bindI, bindT, bindTy) act
+--   mapTerm (\t → maybe (stackError \p → "Var leaked in" <+> p t) pure $ nestedBy' 0 t $ -1) outT
 
 scopedUniVar ∷ (Has Checker sig m) ⇒ ((Term → m Term) → a → m a) → Term → (Term → m a) → m a
 scopedUniVar mapTerm ty act = do
@@ -200,7 +202,7 @@ scopedUniVar mapTerm ty act = do
   let ensureNotOcc = fix \rec →
         unTerm >>> fmap Term . \case
           UniVar uni2 _ | (scope1, sub1) == uni2 → stackError \_ → "UniVar leaked"
-          x → traverseTermF rec (fmap Lambda . rec . unLambda) x
+          x → traverseTermF rec (\_n → fmap Lambda . rec . unLambda) x
   res ← act (Term $ UniVar (scope1, sub1) ty) >>= mapTerm ensureNotOcc
   modify @Scopes \(Scopes bs es rs) → Scopes bs (adjust' scope1 (fmap $ maybe (error "impossible") fst . viewr) es) rs
   pure res
@@ -244,7 +246,7 @@ scopedExVar mapTerm ty0 act = do
                               , Just indL ← findIndexL ((== j) . fst) binds → do
                                   locs ← ask
                                   pure $ Var $ locs + (length binds - indL - 1)
-                            x → traverseTermF rec (fmap Lambda . local @Int (+ 1) . rec . unLambda) x
+                            x → traverseTermF rec (\n → fmap Lambda . local @Int (+ n) . rec . unLambda) x
                       )
              in foldr
                   ( \(newBindId, newBindTy0) rec binds → do
@@ -403,10 +405,12 @@ pattern CheckL x ← (e, Check (fDyn e → x))
 -- The challenge: Term `t` has some type in context `Γ`, yet we need to check it against type `T` in context `Γ \/ whatever_inferapp_introduced`?
 inferApp ∷ (Has Checker sig m) ⇒ Term → Vector (Quant, Term) → (Epoch, InferMode a) → m a
 inferApp f0 args0 (em, mode) = case f0 of
-  Term (App f' a') → inferApp f' ((QNorm, a') <| args0) (em, mode)
+  Term ((TBuiltin RecordGet `TApp` _tag) `App` _rec) → done
+  Term (App f' a') | f' /= TBuiltin RecordGet → inferApp f' ((QNorm, a') <| args0) (em, mode)
   Term (AppErased f' a') → inferApp f' ((QEra, a') <| args0) (em, mode)
-  _ → do
-    foldr
+  _ → done
+  where
+  done = foldr
       ( \(q, arg) cont (args, f) →
           f
             & withMono'
@@ -443,7 +447,7 @@ checkDepLam ∷ ∀ sig m. (Has Checker sig m) ⇒ Quant → Maybe Ident → Lam
 checkDepLam q i bod inT outT = do
   inT' ← fetchT inT
   outT' ← fetchLambda outT
-  scopedVar (const pure) (q, i, Nothing, inT')
+  withBinding (q, i, Nothing, inT')
     $ infer (unLambda bod)
     $ Check
     $ unLambda outT'
@@ -564,21 +568,12 @@ inferList tts = for (viewl tts) \(t, ts) → do
   checkList ts tT
   fetchT tT
 
--- TODO: Remove? Was previously used for Pi ?
--- match Row^ and Type^, since any Row^ is Type^
-isTypePlus ∷ Term → Bool
-isTypePlus =
-  unTerm >>> \case
-    Builtin TypePlus → True
-    Builtin RowPlus → True
-    _ → False
-
 -- | Pi, Concat, Refine
 checkT2 ∷ (Has Checker sig m) ⇒ Maybe Ident → Term → Lambda Term → (Term → Term) → Dyn → m ()
 checkT2 i a b con u = do
   infer a . Check . con =<< fetchT u
   a' ← normalize a
-  scopedVar (const pure) (QNorm, i, Nothing, a')
+  withBinding (QNorm, i, Nothing, a')
     . infer (unLambda b)
     . Check
     . con
@@ -592,13 +587,28 @@ inferT2 i a b con =
     scopedExVar id (Term $ Builtin Any') $ dyn >=> \u2 → do
       infer a . Check . con =<< fetchT u1
       a' ← normalize a
-      scopedVar (const pure) (QNorm, i, Nothing, a')
+      withBinding (QNorm, i, Nothing, a')
         . infer (unLambda b)
         . Check
         . con
         . nested
         =<< fetchT u2
       normalize . con =<< (maxOf <$> fetchT u1 <*> fetchT u2)
+
+inferBlockLetInto :: forall sig m a. (Has Checker sig m) ⇒ (Quant, Maybe Ident, Term, Term) → Lambda Term → (Epoch, InferMode a) → m a
+inferBlockLetInto (q, name, val, ty) into mode0 = do
+  let
+    fInto ∷ ((Term → m Term) → a → m a) → InferMode a → m a
+    fInto mapTerm mode =
+      mapTerm (\t → pure $ fromMaybe (error "Internal error: let var leaked") $ nestedBy' 0 t (-1))
+      =<< withBinding (q, name, Just val, ty) (infer (unLambda into) mode)
+        -- mapTerm (\x' → (stackLog \p → p x') $> x') x
+        -- pure x
+  withBlockLog (unLambda into) $ case mode0 of
+    (_, Infer) → fInto id Infer
+    (e, Check subty0) → do
+      subty ← fetchT $ Dyn e subty0
+      fInto (const pure) $ Check $ nested subty
 
 -- | Accepts a term and lifts it into the current scope.
 nestBinding ∷ (Has Checker sig m) ⇒ Int → Term → m Term
@@ -618,6 +628,15 @@ withMonoUniverse mapTerm f =
     App (isTypePlus → True) u → f u
     t → stackError \p → p (Term t) <+> "is not a kind"
 
+-- TODO: Remove? Was previously used for Pi ?
+-- match Row^ and Type^, since any Row^ is Type^
+isTypePlus ∷ Term → Bool
+isTypePlus =
+  unTerm >>> \case
+    Builtin TypePlus → True
+    Builtin RowPlus → True
+    _ → False
+
 -- | Either infers a normalized type for the value and context, or checks a value against the normalized type.
 infer ∷ ∀ sig m a. (Has Checker sig m) ⇒ Term → InferMode a → m a
 infer = logAndRunInfer $ \case
@@ -634,14 +653,42 @@ infer = logAndRunInfer $ \case
           infer val $ Check ty'
           pure ty'
     val' ← normalize val
+    inferBlockLetInto (q, name, val', ty) into mode0
+  (Block (BlockOpaque oid@(OpaqueId name _) args body0 into), mode0) → do
+    let mklam b = unLambda $ foldr (\i → Lambda . Term . Lam QNorm (Just i)) b args
+    -- Kind of `\arg1 arg2 argN. body`
+    kind ← infer (mklam body0) Infer
+    body' ← fmap Lambda $ normalize' (replicate (length args) Nothing) $ unLambda body0
+    -- body must not contain any frees
+    freeVarM ← runError @Int (pure . Just) (\() → pure Nothing) $ runReader (length args) $ unLambda body' & fix \rec → unTerm >>> \case
+      Var x → do
+        locals ← ask
+        when (x >= locals) $ throwError $ x - locals
+      x → void $ traverseTermF rec (\n → fmap Lambda . local (+ n) . rec . unLambda) x
+    case freeVarM of
+      Just x → stackLog \p → "Opaque type" <+> pIdent name <+> "mentions free variable" <+> p (Term $ Var x) -- TODO: Mention the exact declaration?
+      Nothing → pure ()
+    -- TODO: support check as well
+    modify (HM.insert oid kind)
+    -- slooooow
+    -- let
+    --   -- T :⇒ Fun {arg1} {arg2} {...} T
+    --   -- DOESN'T NEST ANYTHING
+    --   inContext t = unLambda $ foldr (\n → Lambda . Term . Pi QEra (Just n) (TBuiltin Any')) t args
+    --   contextedTy = Lambda $ foldr @[] (\i acc → acc `TApp` Term (Var i)) (TBuiltin $ OpaqueType oid) [0..length args-1]
+    --   modty = Term $ Refine $ RefinePostTy kind (regIdent "un") $ Lambda $ inContext $ Lambda $
+    --     TBuiltin Eq `TApp` unLambda contextedTy `TApp` unLambda body' -- body is free of frees, so no nesting
+    -- inferBlockLetInto (QNorm, Just name, TBuiltin $ OpaqueType oid, modty) into mode0
     let
-      fInto ∷ ((Term → m Term) → a → m a) → InferMode a → m a
-      fInto mapTerm mode = scopedVar mapTerm (q, name, Just val', ty) $ infer (unLambda into) mode
-    withBlockLog (unLambda into) $ case mode0 of
-      (_, Infer) → fInto id Infer
-      (e, Check subty0) → do
-        subty ← fetchT $ Dyn e subty0
-        fInto (const pure) $ Check $ nested subty
+      -- T :⇒ Fun {arg1} {arg2} {...} T
+      -- DOESN'T NEST ANYTHING
+      -- inContext t = unLambda $ foldr (\n → Lambda . Term . Pi QEra (Just n) (TBuiltin Any')) t args
+      -- contextedTy = Lambda $ foldr @[] (\i acc → acc `TApp` Term (Var i)) (TBuiltin $ OpaqueType oid) [0..length args-1]
+      modty = Term $ Refine $ RefinePostTy kind (regIdent "un") $ Lambda $
+        TBuiltin Eq `TApp` TBuiltin (OpaqueType oid) `TApp` mklam body'
+      -- Lambda $ inContext $ Lambda $
+      --   TBuiltin Eq `TApp` unLambda contextedTy `TApp` unLambda body' -- body is free of frees, so no nesting
+    inferBlockLetInto (QNorm, Just name, TBuiltin $ OpaqueType oid, modty) into mode0
   (Block (BlockRewrite prf inner), mode) → do
     prfTy0 ← insideEra $ infer prf Infer
     let
@@ -688,14 +735,16 @@ infer = logAndRunInfer $ \case
   (FieldsLit (FRow ()) (Vector' flds), (e, Check (unTerm → App (isTypePlus → True) (Dyn e . typOf → ty)))) → do
     for_ flds \(n, _) → infer n $ Check $ Term $ Builtin Tag
     checkList (snd <$> flds) ty
-  (BuiltinsVar, (_, Infer)) →
+  (BuiltinsVar, (_, Infer)) → do
     pure
       $ Term
       $ FieldsLit (FRow ())
       $ Vector'
-      $ (\b → (Term $ TagLit $ identOfBuiltin b, typOfBuiltin b))
+      $ (\b → (Term $ TagLit $ identOfBuiltin b, typOfBuiltin mempty b))
       <$> builtinsList
-  (Builtin x, (_, Infer)) → pure $ typOfBuiltin x
+  (Builtin x, (_, Infer)) → do
+    opaques ← get
+    pure $ typOfBuiltin opaques x
   (Lam q1 n1 bod, CheckL (Pi q2 n2 inT outT)) | q1 == q2 → checkDepLam q1 (n1 <|> n2) bod inT outT
   (term, CheckL (Pi QEra _ xTy yT)) → do
     xTy' ← fetchT xTy
@@ -703,8 +752,11 @@ infer = logAndRunInfer $ \case
       infer (Term term) . Check =<< (`applyLambda` uni) =<< fetchLambda yT
   (Lam QNorm n bod, (_, Infer)) →
     scopedExVar id (Term $ Builtin Any') $ dyn >=> \inT → do
-      outT ← fetchT inT >>= \inT' → scopedVar id (QNorm, n, Nothing, inT') $ infer (unLambda bod) Infer
-      fetchT inT <&> \inT' → Term $ Pi QNorm Nothing inT' $ Lambda $ nested outT
+      outT ← fetchT inT >>= \inT' → fmap Lambda $ withBinding (QNorm, n, Nothing, inT') $ infer (unLambda bod) Infer
+      let isDependent = isNothing (nestedBy' 0 (unLambda outT) (-1))
+      n' ← if isDependent then Just <$> maybe freshIdent pure n else pure Nothing
+      inT' ← fetchT inT
+      pure $ Term $ Pi QNorm n' inT' outT
   (Lam QEra _ _, (_, Infer)) → stackError \_ → "TODO Cannot infer a type of an erased lambda" -- Probably we could, but the idea overall is oxymoron.
   (App (unTerm → App (unTerm → Builtin RecordGet) tag) record, mode) → do
     infer tag $ Check $ Term $ Builtin Tag
@@ -799,8 +851,8 @@ infer = logAndRunInfer $ \case
     ty ← infer (Term t) Infer
     (ty `subtype`) =<< fetchT (Dyn e c)
 
-typOfBuiltin ∷ BuiltinT → Term
-typOfBuiltin = \case
+typOfBuiltin ∷ HashMap OpaqueId Term → BuiltinT → Term
+typOfBuiltin opaques = \case
   Any' → [termQQ| Type^ 0 |]
   Bool → [termQQ| Type^ 0 |]
   Eq → [termQQ| Fun (Any) (Any) -> Type^ 0 |]
@@ -817,6 +869,7 @@ typOfBuiltin = \case
   ListLength → [termQQ| Fun {A} (List A) -> Int+ |]
   ListViewL → [termQQ| Fun {A} (l : List A) {_ : Where (0 < list_length l)} -> {( .left = A | .rest = List A )}|]
   Never → [termQQ| Type^ 0 |]
+  OpaqueType x → fromMaybe (error "Internal error: opaque not found") $ HM.lookup x opaques
   PropListViewlDec → [termQQ| Fun {A} (l : List A) -> Eq (list_length l) (list_length (list_viewl l).rest + 1) |]
   PropLteTrans → [termQQ| Fun {a} {b} {c} (Where (a <= b)) (Where (b <= c)) -> Where (a <= c) |]
   RecordDropFields → [termQQ| Fun {u : Int} {row : Row^ u} (List Tag) (row) -> Any |]
@@ -949,13 +1002,13 @@ subtype = \a b →
         fetchT inT2 >>= \inT2' → do -- Output types are covariant
           outT1' ← fetchLambda outT1
           outT2' ← fetchLambda outT2
-          scopedVar (const pure) (QNorm, n1 <|> n2, Nothing, inT2') $ subtype (unLambda outT1') (unLambda outT2')
+          withBinding (QNorm, n1 <|> n2, Nothing, inT2') $ subtype (unLambda outT1') (unLambda outT2')
       (fDyn e → Refine (RefinePreTy n1 annT1 baseT1), fDyn e → Refine (RefinePreTy n2 annT2 baseT2)) | n1 == n2 → do
         uncurry subtype =<< (,) <$> fetchT annT1 <*> fetchT annT2
         fetchT annT2 >>= \inT2' → do
           outT1' ← fetchLambda baseT1
           outT2' ← fetchLambda baseT2
-          scopedVar (const pure) (QNorm, Just n2, Nothing, inT2') $ subtype (unLambda outT1') (unLambda outT2')
+          withBinding (QNorm, Just n2, Nothing, inT2') $ subtype (unLambda outT1') (unLambda outT2')
       -- Handle existentials now
       (unTerm → Refine (RefinePreTy _n annT baseT), t) →
         scopedUniVar (const pure) annT ((`subtype` t) <=< applyLambda baseT)
@@ -977,7 +1030,7 @@ subtype = \a b →
         fetchT base1 >>= \base1' → do
           ann1' ← fetchLambda ann1
           ann2' ← fetchLambda ann2
-          scopedVar (const pure) (QNorm, Just n, Nothing, base1') $ subtype (unLambda ann1') (unLambda ann2')
+          withBinding (QNorm, Just n, Nothing, base1') $ subtype (unLambda ann1') (unLambda ann2')
       (unTerm → Refine (RefinePostTy base _ _ann), t) → subtype base t
       -- Function Types (Πx:T1.U1 <: Πy:T2.U2)
       (fDyn e → Builtin (Int' d1), fDyn e → Builtin (Int' d2)) →
@@ -1027,7 +1080,7 @@ subtype = \a b →
         fetchT l1 >>= \l1' → do
           body1' ← fetchLambda lr1
           body2' ← fetchLambda lr2
-          scopedVar (const pure) (QNorm, Just dotvar, Nothing, l1') do
+          withBinding (QNorm, Just dotvar, Nothing, l1') do
             subtype (unLambda body1') (unLambda body2')
       (a, IfT (Dyn e → cond) (Dyn e → th) (Dyn e → el)) → do
         let
@@ -1044,13 +1097,14 @@ subtype = \a b →
           EqYes → pure ()
           _ → stackError \p → "Subtype check failed, no rule applies for:" <+> p t1 <+> "<:" <+> p t2
 
-runChecker' ∷ (Applicative m) ⇒ UsedNames → StateC UsedNames (FreshC (ErrorC e m)) a → m (Either e a)
+runChecker' ∷ (Applicative m) ⇒ UsedNames → StateC (HashMap OpaqueId Term) (StateC UsedNames (FreshC (ErrorC e m))) a → m (Either e a)
 runChecker' n =
   runError (pure . Left) (pure . Right)
     . evalFresh 0
     . evalState n
+    . evalState mempty
 
-checkModule' ∷ (Has (State UsedNames :+: Throw (Doc AnsiStyle) :+: Fresh :+: StackLog) sig m) ⇒ Module → m Term
+checkModule' ∷ (Has (State (HashMap OpaqueId Term) :+: State UsedNames :+: Throw (Doc AnsiStyle) :+: Fresh :+: StackLog :+: Lift IO) sig m) ⇒ Module → m Term
 checkModule' = \(Module m) → snd . maybe (error "module must be non-empty") snd . viewr <$> foldlM checkSubModule [] m
  where
   checkSubModule xs x = (xs |>) <$> runSubContext (Imports xs) ((,) <$> normalize x <*> infer x Infer)
@@ -1110,6 +1164,8 @@ checkModuleDebug (names, m) = do
     Right r → pTerm [] r
 
 main ∷ IO ()
-main = getArgs >>= \case
-  [] -> render $ annotate (color Red) "Usage: fadeno <file>"
-  (arg:_) -> watch arg
+main = do
+  res <- getArgs >>= \case
+    [] -> render (annotate (color Red) "Usage: fadeno <file>") $>  False
+    (arg:_) -> build arg $> True
+  when res $ printTryRewriteStats

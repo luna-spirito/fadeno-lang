@@ -8,7 +8,7 @@ import Data.IntMap.Strict qualified as IM
 import Data.RRBVector (Vector)
 import Data.Serialize qualified as S
 import GHC.Exts (IsList (..))
-import Parser (Bits (..), BuiltinT (..), Ident (..), NumDesc (..))
+import Parser (Bits (..), BuiltinT (..), Ident (..), NumDesc (..), OpaqueId (..))
 import RIO hiding (Vector, toList)
 import RIO.HashMap qualified as HM
 
@@ -149,21 +149,22 @@ putBuiltin = \case
   ListLength → S.putWord8 9
   ListViewL → S.putWord8 10
   Never → S.putWord8 11
-  RecordDropFields → S.putWord8 12
-  RecordGet → S.putWord8 13
-  RecordKeepFields → S.putWord8 14
-  Refl → S.putWord8 15
-  RowPlus → S.putWord8 16
-  Tag → S.putWord8 17
-  TagEq → S.putWord8 18
-  TypePlus → S.putWord8 19
-  W → S.putWord8 20
-  WUnwrap → S.putWord8 21
-  WWrap → S.putWord8 22
-  Int' d → S.putWord8 23 *> putNumDesc d
-  IntAdd d → S.putWord8 24 *> putNumDesc d
-  IntMul d → S.putWord8 25 *> putNumDesc d
-  IntNeg d → S.putWord8 26 *> putNumDesc d
+  OpaqueType (OpaqueId _ x) → S.putWord8 12 *> S.putWord64le (fromIntegral x)
+  RecordDropFields → S.putWord8 13
+  RecordGet → S.putWord8 14
+  RecordKeepFields → S.putWord8 15
+  Refl → S.putWord8 16
+  RowPlus → S.putWord8 17
+  Tag → S.putWord8 18
+  TagEq → S.putWord8 19
+  TypePlus → S.putWord8 20
+  W → S.putWord8 21
+  WUnwrap → S.putWord8 22
+  WWrap → S.putWord8 23
+  Int' d → S.putWord8 24 *> putNumDesc d
+  IntAdd d → S.putWord8 25 *> putNumDesc d
+  IntMul d → S.putWord8 26 *> putNumDesc d
+  IntNeg d → S.putWord8 27 *> putNumDesc d
 
 getBuiltin ∷ S.Get BuiltinT
 getBuiltin = do

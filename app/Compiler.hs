@@ -18,7 +18,7 @@ import Data.IntSet qualified as IS
 import Data.RRBVector (Vector, drop, ifoldl, imap, replicate, reverse, splitAt, take, viewl, viewr, zip, (<|), (|>))
 import GHC.Exts (IsList (..))
 import NameGen (UsedNames, emptyUsedNames)
-import Parser (BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), freshIdent, nestedByP, splitAt3, traverseTermF)
+import Parser (BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), freshIdent, nestedByP, splitAt3, traverseTermF, OpaqueId (..), pattern TBuiltin)
 import RIO hiding (Vector, ask, drop, local, replicate, reverse, runReader, take, toList, zip)
 import RIO.HashMap qualified as HM
 
@@ -30,13 +30,16 @@ erase reals =
     Lam QEra _ body → erase (reals |> False) $ unLambda body
     Block (BlockLet QEra _ _ _ into) → erase (reals |> False) $ unLambda into
     Block (BlockRewrite _ into) → erase reals into
+    Block (BlockOpaque oid@(OpaqueId name _) _args _body into) →
+      Term $ Block $ BlockLet QNorm (Just name) Nothing (TBuiltin $ OpaqueType oid) $ Lambda $ erase (reals |> True) $ unLambda into
+      -- erase reals into
     AppErased f _ → erase reals f
     Var x → Term $ Var $ x - foldl' (\erased isReal → if isReal then erased else erased + 1) 0 (drop (length reals - x) reals)
     RefineGet i (_, Nothing) → erase reals $ Term $ Var i
     RefineGet _ (_, Just _) → Term $ FieldsLit (FRecord ()) []
     Refine (RefinePre _ann base) → erase reals base
     Refine (RefinePost base _ann) → erase reals base
-    x → Term $ run $ traverseTermF (Identity . erase reals) (Identity . Lambda . erase (reals |> True) . unLambda) x
+    x → Term $ run $ traverseTermF (Identity . erase reals) (\n → Identity . Lambda . erase (reals <> replicate n True) . unLambda) x
 
 listCaptures ∷ Word8 → Lambda Term → IntSet
 listCaptures locals0 = run . execWriter . runReader @Int (fromIntegral locals0) . go . unLambda
@@ -46,7 +49,7 @@ listCaptures locals0 = run . execWriter . runReader @Int (fromIntegral locals0) 
       Var x → do
         locals ← ask @Int
         when (x >= locals) $ tell @IntSet [x - locals]
-      x → void $ traverseTermF rec (local @Int (+ 1) . fmap Lambda . rec . unLambda) x
+      x → void $ traverseTermF rec (\n → local @Int (+ n) . fmap Lambda . rec . unLambda) x
 
 -- A helper function that identifies trivially nested lambdas `\x y z. ...`
 -- Proper type: Fun (Lambda 1 Term) -> (self : { .n : Int } \/ { .lam : Lambda self.n Term })
@@ -195,15 +198,7 @@ toTagM = \case
 compile' ∷ (Has Compile sig m) ⇒ Term → m Code
 compile' =
   unTerm >>> \case
-    Block (BlockLet QEra _ _ _ _) → undefined
-    Block (BlockRewrite _ _) → undefined
-    ExVar{} → undefined
-    UniVar{} → undefined
-    Lam QEra _ _ → undefined
-    AppErased{} → undefined
-    RefineGet{} → undefined
-    Refine (RefinePre{}) → undefined
-    Refine (RefinePost{}) → undefined
+    (Block (BlockLet QEra _ _ _ _; BlockRewrite {}; BlockOpaque {}); ExVar {}; UniVar {}; Lam QEra _ _; AppErased {}; RefineGet {}; Refine (RefinePre {}; RefinePost {}))  → undefined
     NumLit x → pure $ CConst $ VNum $ fromIntegral x
     TagLit tag → CConst . VTag <$> registry tag
     BoolLit x → pure $ CConst $ VBool x

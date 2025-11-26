@@ -53,43 +53,39 @@ int-clamp>int+ = \x.
 /: Fun {a : Any} {b : Any} (Eq a b) -> Eq b a
 ~sym = \@_ @_ aToB. rewrite aToB in refl
 
-/: Fun {u} (Row^ u) -> Type^ u
-Opt = \R. {( .has = Bool )} \./ (if ..has R Unit)
+opaque Opt R. {( .has = Bool )} \./ (if ..has R Unit)
 
 /: Fun {A} -> Opt A
-none = { .has = false } \/ {}
+none = rewrite Opt.@un in ({ .has = false } \/ {})
+
 /: Fun {A} (A) -> Opt A
-some = \val. { .has = true } \/ val
+some = \val. rewrite Opt.@un in ({ .has = true } \/ val)
+
 /: Fun {A} (has : Bool) (Fun {_ : Where has} -> A) -> Opt A
-some_if = \has body. { .has = has } \/ if has
+some_if = \has body. rewrite Opt.@un in ({ .has = has } \/ if has
   (\@yes. rewrite yes in body @refl)
-  (\@no. rewrite no in {})
+  (\@no. rewrite no in {}))
 
 /: Fun (j : Int+) -> Type^ (j + 1)
 Trait^ = \u. Fun (Type^ u) -> Type^ u
 Trait = Trait^ 0
 
-// Any implementer of trait
-/: Fun (u : Int+) (Trait^ u) -> Type^ (u + 1)
-ImplOf^ = \u trait. @|T: Type^ u| {( .obj = T | .impl = trait T )}
-ImplOf = ImplOf^ 0
+//// Any implementer of trait
+opaque ImplOf^ u trait. @|T: Type^ u| {( .obj = T | .impl = trait T )}
 
-/: Fun {u} (Type^ u) -> Trait^ u
-Iter = \ElT T. Fun (T) -> Opt {( .curr = ElT | .rest = T)}
+opaque Iter ElT T. Fun (T) -> Opt {( .curr = ElT | .rest = T)}
 
-/: Fun {u} (Type^ u) -> Trait^ u
-FinIter = \ElT T.
+opaque FinIter ElT T.
+  rewrite Opt.@un in
+  rewrite Iter.@un in
   @|maxsize : Fun (T) -> Int+|
-  (
-  rewrite ~sym @4 @4 refl in
-  rewrite ~sym @4 @4 refl in
-  Iter ElT T)
-  @|dec :
-    Fun (curr : T) {r : Where (. curr).has} ->
-    Where (rewrite r in (maxsize (. curr).rest < maxsize curr)) |
+    Iter ElT T
+    @|dec :
+        Fun (curr : T) {r : Where (. curr).has} ->
+        Where (rewrite r in (maxsize (. curr).rest < maxsize curr)) |
 
-///: Fun (to : Int+) -> ImplOf (FinIter (Int+ @|< : Where (. < to)|))
-//iter_< = \to.
+///: Fun (to : Int+) -> ImplOf 0 (FinIter (Int+ @|< : Where (. < to)|))
+//iter_< = \to. impl_of^.mk (
 //  @|Int+|
 //  { .obj = 0 @|refl|
 //  | .impl =
