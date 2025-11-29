@@ -7,7 +7,7 @@ import Arithmetic (normalizePoly)
 import Control.Algebra
 import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.Reader (ReaderC, runReader)
-import Control.Carrier.State.Church (StateC, evalState, put, runState)
+import Control.Carrier.State.Church (StateC (..), evalState, put, runState)
 import Control.Effect.Empty (empty)
 import Control.Effect.Reader (Reader, ask, local)
 import Control.Effect.State (State, get, modify, state)
@@ -17,14 +17,16 @@ import Data.Foldable (foldlM)
 import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, ifoldr, replicate, take, viewl, viewr, zip, (!?), (<|), (|>))
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedByP, nestedByP', pTerm, parse, recordGet, render, splitAt3, traverseTermF, pattern TApp, pattern TBuiltin, regIdent)
-import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, take, to, toList, try, zip)
+import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, take, to, toList, try, zip, catch)
 import Control.Carrier.Fresh.Church (Fresh, runFresh, fresh, FreshC)
 import qualified Data.IntSet as IS
 import GHC.Exts (IsList(..))
 import System.IO.Unsafe (unsafePerformIO)
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
 import Prelude (putStrLn)
-import Control.Carrier.Lift (Lift, sendIO)
+import Control.Carrier.Lift (Lift, sendIO, liftWith, sendM)
+import Context (ScopesM, Imports (..), Binding, Scopes (..), EEntry (..), Epoch (..), Dyn (..), Rewrite (..), EnvM, Err (..), runScopes, runApp, printErr, Env (..), fetchWith, getEpoch, getScopeId, askImports)
+import Control.Effect.Error (throwError, catchError)
 
 -- Crazy thoughts:
 -- 1) Normalizer has pretty simple logic, we could ± easily offload it to Rust.
@@ -38,7 +40,7 @@ import Control.Carrier.Lift (Lift, sendIO)
 
 -- Builtins
 -- (returns `n ** (Vec n Term -> Term)`)
-appBuiltin ∷ (Has Context sig m) ⇒ Vector (Maybe Term) → BuiltinT → Vector Term → m (Maybe Term)
+appBuiltin ∷ Vector (Maybe Term) → BuiltinT → Vector Term → ScopesM (Maybe Term)
 appBuiltin locals = curry \case
   ((Any'; Bool; Eq; Int' _; List; Never; OpaqueType{}; PropLteTrans; PropListViewlDec; Refl; RowPlus; Tag; TypePlus; W), _) → pure Nothing
   (Loop, [i0, f]) | not (isStuck i0) → fmap Just $ normalize' locals $ f `TApp` i0 `TApp` Term (Lam QNorm (Just $ regIdent "i") $ Lambda $ TBuiltin Loop `TApp` Term (Var 0) `TApp` f)
@@ -51,19 +53,17 @@ appBuiltin locals = curry \case
   (ListViewL, [Term (ListLit (Vector' vals))]) →
     pure $ viewl vals <&> \(left, rest) →
       Term $ FieldsLit (FRecord ()) [(Term $ TagLit (regIdent "left"), left), (Term $ TagLit (regIdent "rest"), Term $ ListLit $ Vector' rest)]
-  (RecordDropFields, [Term (ListLit tags), a]) → pure $ Just $ recordDropFields tags a
+  (RecordDropFields, [Term (ListLit tags), a]) → Just <$> recordDropFields tags a
   (RecordGet, [name1, a]) →
-    pure
-      $ Just
-        let
-          search a' = case unconsField a' of
-            Nothing → recordGet name1 a'
-            Just ((name2, v), rest) → case isEq name1 name2 of
-              EqYes → v
-              EqNot → search rest
-              EqUnknown → recordGet name1 a'
-         in
-          search a
+    Just <$>
+      let
+        search a' = case unconsField a' of
+          Nothing → pure $ recordGet name1 a'
+          Just ((name2, v), rest) → isEq name1 name2 >>= \case
+            EqYes → pure v
+            EqNot → search rest
+            EqUnknown → pure $ recordGet name1 a'
+        in search a
   (RecordKeepFields, [Term (ListLit tags), a]) → pure $ Just $ Term $ FieldsLit (FRecord ()) $ (\tag → (tag, recordGet tag a)) <$> tags
   (TagEq, [Term (TagLit a), Term (TagLit b)]) → pure $ Just $ Term $ BoolLit $ a == b
   (WUnwrap, [a]) → pure $ Just a
@@ -74,31 +74,31 @@ appBuiltin locals = curry \case
     (NumLit{}; TagLit{}; BoolLit{}; ListLit{}; FieldsLit{}; Builtin{}; Lam{}; Pi{}; Concat{}) → False
     (BuiltinsVar{}; App{}; Var{}; Sorry; RefineGet{}; Block{}; AppErased{}; Refine{}; Import{}; ExVar{}; UniVar{}) → True
   -- Drop `x` from ListLit.
-  listLitDrop ∷ Term → Vector' Term → ListDropRes
+  listLitDrop ∷ Term → Vector' Term → ScopesM ListDropRes
   listLitDrop x (Vector' fi) =
     ifoldr
-      ( \i n rec → case isEq x n of
-          EqYes → TDFound $ Vector' $ deleteAt i fi
+      ( \i n rec → isEq x n >>= \case
+          EqYes → pure $ TDFound $ Vector' $ deleteAt i fi
           EqNot → rec
-          EqUnknown → TDUnknown
+          EqUnknown → pure $ TDUnknown
       )
-      TDMissing
+      (pure TDMissing)
       fi
 
-  recordDropFields ∷ Vector' Term → Term → Term
+  recordDropFields ∷ Vector' Term → Term → ScopesM Term
   recordDropFields tags fields0 = case tags of
-    Vector' (null → True) → Term $ FieldsLit (FRecord ()) []
+    Vector' (null → True) → pure $ Term $ FieldsLit (FRecord ()) []
     _ →
       let
         stuck = Term $ App (Term $ App (Term $ Builtin RecordDropFields) $ Term $ ListLit tags) fields0
        in
         case unconsField fields0 of
-          Nothing → stuck
-          Just ((n, v), fields) → case listLitDrop n tags of
+          Nothing → pure stuck
+          Just ((n, v), fields) → listLitDrop n tags >>= \case
             TDFound tags' → recordDropFields tags' fields
             TDMissing →
-              concat (Term $ FieldsLit (FRecord ()) [(n, v)]) $ recordDropFields tags fields
-            TDUnknown → stuck
+              concat (Term $ FieldsLit (FRecord ()) [(n, v)]) <$> recordDropFields tags fields
+            TDUnknown → pure stuck
 
 -- | Intensional equality.
 data EqRes
@@ -106,23 +106,6 @@ data EqRes
   | EqNot -- provably uneq
   | EqUnknown
   deriving (Eq)
-
-type Binding = (Quant, Maybe Ident, Maybe Term, Term)
-newtype Epoch = Epoch Int deriving (Show, Eq)
-data Rewrite = Rewrite !Int !(Lambda (Term, Term)) deriving (Eq, Show) -- (foralls, from, to)
-data EEntry
-  = EMarker
-  | EVar !Int !(Either (Int, Term) Term) -- ExVarId, valty
-  | EUniVar !Int
-  | ERewrite !Rewrite
-  deriving (Eq, Show)
-data Scopes = Scopes !(Vector Binding) !(Vector (Epoch, Vector EEntry)) !(Vector (Int, Rewrite)) -- (bindings, metas, index of rewrites from metas)
--- Note: the `rs` vector is "just an index". Sad.
-
-data Dyn = Dyn !Epoch !Term
-
-newtype Imports = Imports (Vector (Term, Term)) -- (module, module type)
-type Context = Reader IsErased :+: Reader Imports :+: State Scopes :+: Fresh :+: Lift IO
 
 -- Global timer for tryRewrite
 {-# NOINLINE tryRewriteTime #-}
@@ -134,16 +117,7 @@ tryRewriteTime = unsafePerformIO $ newIORef 0.0
 tryRewriteCalls :: IORef Int
 tryRewriteCalls = unsafePerformIO $ newIORef 0
 
--- | Perform an effectful operation, comitting changes after the operation iff not aborted and EqYes.
-transactContext ∷ (Has Context sig m) ⇒ StateC Scopes m EqRes → m EqRes
-transactContext act = do
-  ctx0 ∷ Scopes ← get
-  runState (\ctx res → when (res == EqYes) (put ctx) $> res) ctx0 act
-
-runSubContext ∷ (Applicative m) ⇒ Imports → ReaderC IsErased (ReaderC Imports (StateC Scopes (FreshC m))) a → m a
-runSubContext i = runFresh (\_ → pure) 0 . evalState (Scopes [] [(Epoch 0, [])] []) . runReader i . runReader (IsErased False)
-
-withBinding ∷ (Has Context sig m) ⇒ Binding → m a → m a
+withBinding ∷ Has (State Scopes) sig m ⇒ Binding → m a → m a
 withBinding b act = do
   modify @Scopes \(Scopes bs es rs) → Scopes (bs |> b) (es |> (Epoch 0, [])) rs
   res ← act
@@ -158,7 +132,8 @@ withBinding b act = do
 Basically, needed for EMarker + EVar pattern. Marker is needed to ensure the start is still identifiable.
 TODO: NOT ERROR-SAFE!
 -}
-withMarked ∷ (Has Context sig m) ⇒ Vector EEntry → m a → m (Vector EEntry, a)
+-- Generic since used by both normalizer & rewriter
+withMarked ∷ Has (State Scopes) sig m ⇒ Vector EEntry → m a → m (Vector EEntry, a)
 withMarked orig act = do
   scopeId ← getScopeId
   modify @Scopes \(Scopes bs es rs) → Scopes bs (adjust' scopeId (fmap (<> (EMarker <| orig))) es) rs
@@ -179,36 +154,27 @@ withMarked orig act = do
       (Scopes bs (exsB |> (scopeE, scope')) rs, transformed)
   pure (transformed, res)
 
-getScopeId ∷ (Has Context sig m) ⇒ m Int
-getScopeId = (\(Scopes bs _es _rs) → length bs) <$> get @Scopes
-
-getEpoch ∷ (Has Context sig m) ⇒ m Epoch
-getEpoch = maybe (error "Missing ex scope") (fst . snd) . (\(Scopes _ es _) → viewr es) <$> get @Scopes
-
-dyn ∷ (Has Context sig m) ⇒ Term → m Dyn
-dyn x = (`Dyn` x) <$> getEpoch
-
 fDyn ∷ Epoch → Term → TermF Dyn
 fDyn e = run . traverseTermF (pure . Dyn e) (\_n → pure . Lambda . Dyn e . unLambda) . unTerm
 
--- | Unwraps a term that contains existentials
-fetchWith ∷ (Has Context sig m) ⇒ (Term → m Term) → Dyn → m Term
-fetchWith f (Dyn objEpoch x) = do
-  epoch ← getEpoch
-  if epoch == objEpoch
-    then pure x
-    else f x
-
 --
-fetchT ∷ (Has Context sig m) ⇒ Dyn → m Term
+fetchT ∷ Dyn → ScopesM Term
 fetchT = fetchWith normalize
 
-fetchLambda ∷ (Has Context sig m) ⇒ Lambda Dyn → m (Lambda Term)
+fetchLambda ∷ Lambda Dyn → ScopesM (Lambda Term)
 fetchLambda = fmap Lambda . fetchWith (normalize' [Nothing]) . unLambda
 
-isEq' ∷ (Has Context sig m) ⇒ ((Int, Int) → Term → StateC Scopes m Bool) → Term → Term → m EqRes
+isEq' ∷ ((Int, Int) → Term → ScopesM Bool) → Term → Term → ScopesM EqRes
 isEq' tryInst = \l0 r0 → transactContext $ go l0 r0
  where
+  -- | Perform an effectful operation, comitting changes after the operation iff not aborted and EqYes.
+  transactContext ∷ ScopesM EqRes → ScopesM EqRes
+  transactContext act = StateC \cont s0 →
+    runState (\s1 res →
+        if res == EqYes
+          then cont s1 res
+          else cont s0 res
+    ) s0 act
   go l0 r0 =
     getEpoch >>= \e0 → case (fDyn e0 l0, fDyn e0 r0) of
       (Lam QEra _ _, _) → undefined
@@ -330,8 +296,10 @@ isEq' tryInst = \l0 r0 → transactContext $ go l0 r0
       EqYes → cont
       x → pure x
 
-isEq ∷ Term → Term → EqRes
-isEq a b = unsafePerformIO $ runSubContext (Imports []) $ runEmpty (pure EqUnknown) pure $ isEq' (\_ _ → empty) a b
+isEq ∷ Term → Term → ScopesM EqRes
+isEq a b = isEq' (\_ _ → throwError ErrRollback) a b `catchError` \case
+  ErrRollback → pure EqUnknown
+  e → throwError e
 
 -- | Produces a non-dependent concat (of normalized terms)
 concat ∷ Term → Term → Term
@@ -366,21 +334,17 @@ numDecDispatch desc f inf = case desc of
 
 data ListDropRes = TDFound !(Vector' Term) | TDMissing | TDUnknown
 
-tryRewrite ∷ (Has Context sig m) ⇒ (Int, Rewrite) → Term → m (Maybe Term)
+tryRewrite ∷ (Int, Rewrite) → Term → ScopesM (Maybe Term)
 tryRewrite (nest, Rewrite forallsCount lfromto0) t = do
-  -- Update call counter
-  sendIO $ modifyIORef' tryRewriteCalls (+1)
-  -- Time this call
-  start <- sendIO getCurrentTime
   scopeId ← getScopeId
-  foralls ← for @Vector [1..forallsCount] \_ → fresh
+  foralls ← sendM @EnvM $ state @Env \e → (e { envFresh = envFresh e + forallsCount }, [envFresh e..envFresh e + forallsCount - 1])
   let
     exVars = Just . Term . ExVar . (scopeId,) <$> foralls
     forallsSet = fromList @IntSet $ toList foralls -- likely much slower than array
   (resolvedForalls, res) ← withMarked ((`EVar` Right (Term $ Builtin Any')) <$> foralls) do
     let (lfrom0, lto0) = bimap Lambda Lambda $ unLambda lfromto0
-    let contextualize = (`nestedByP` nest) . unsafePerformIO . runSubContext (Imports []) . normalize' exVars . unLambda
-    let from = contextualize lfrom0
+    let contextualize = fmap (`nestedByP` nest) . lift . runScopes {- optimization -} . normalize' exVars . unLambda
+    from ← contextualize lfrom0
     let
       inst' foral with = modify @Scopes \(Scopes bs exs rs) →
         Scopes
@@ -411,19 +375,15 @@ tryRewrite (nest, Rewrite forallsCount lfromto0) t = do
         ((scopeId2, foral), with) | scopeId2 == scopeId, foral `IS.member` forallsSet → inst' foral with $> True
         _ → pure False
     isEq' inst from t >>= \case
-      EqYes → pure $ Just $ contextualize lto0
+      EqYes → Just <$> contextualize lto0
       _ → pure Nothing
   when (isJust res) do
     for_ resolvedForalls \case
       EVar _ (Left _) → pure ()
       _ → error $ "Unresolved while trying to rewrite " <> show t <> " with " <> show lfromto0
-  -- End timing
-  end <- sendIO getCurrentTime
-  let elapsed = realToFrac $ diffUTCTime end start :: Double
-  sendIO $ modifyIORef' tryRewriteTime (+elapsed)
   pure res
 
-traverseNormTermF ∷ (Has Context sig m) ⇒ (Vector (Maybe Term) → Term → m Term) → Vector (Maybe Term) → TermF Term → m Term
+traverseNormTermF ∷ (Vector (Maybe Term) → Term → ScopesM Term) → Vector (Maybe Term) → TermF Term → ScopesM Term
 traverseNormTermF c locals t0 = rewr =<< trav
  where
   rewr res = do
@@ -519,7 +479,7 @@ traverseNormTermF c locals t0 = rewr =<< trav
         Just (Left val) → pure $ uncurry nestedByP' val $ length locals + (length globals - i) -- no -1 because of ridiculous scope counting
         _ → pure $ Term $ ExVar (i, subi)
     Import (fromMaybe (error "Unresolved import") → n) _ → do
-      Imports imps ← ask
+      Imports imps ← lift askImports
       pure $ maybe (error "Incomplete context") fst $ imps !? n
     _ → Term <$> traverseTermF (c locals) (\n → fmap Lambda . c (locals <> replicate n Nothing) . unLambda) t0
   countErasedLocals = countErased locals
@@ -528,19 +488,19 @@ traverseNormTermF c locals t0 = rewr =<< trav
 builtinsVar ∷ Term
 builtinsVar = Term $ FieldsLit (FRecord ()) $ Vector' $ (\b → (Term $ TagLit $ identOfBuiltin b, Term $ Builtin b)) <$> builtinsList
 
-rewrite ∷ (Has Context sig m) ⇒ (Int → Term → m (Maybe Term)) → Vector (Maybe Term) → Term → m Term
+rewrite ∷ (Int → Term → ScopesM (Maybe Term)) → Vector (Maybe Term) → Term → ScopesM Term
 rewrite rewriter = fix \rec locals t →
   rewriter (length locals) t >>= \case
     Just u → pure u
     Nothing → traverseNormTermF rec locals $ unTerm t
 
-normalize' ∷ (Has Context sig m) ⇒ Vector (Maybe Term) → Term → m Term
+normalize' ∷ Vector (Maybe Term) → Term → ScopesM Term
 normalize' = rewrite (\_ _ → pure Nothing)
 
-normalize ∷ (Has Context sig m) ⇒ Term → m Term
+normalize ∷ Term → ScopesM Term
 normalize = normalize' []
 
-applyLambda ∷ (Has Context sig m) ⇒ Lambda Term → Term → m Term
+applyLambda ∷ Lambda Term → Term → ScopesM Term
 applyLambda bod val = normalize' [Just val] $ unLambda bod
 
 -- | Apply `x.@_@_@_...` to a lambda.
@@ -591,26 +551,12 @@ termQQ =
           (term, _) ← case parse (ParserContext (IsErased False) $ (QNorm,) . fst <$> scope) 0 (pack s) of
             Left e → fail $ "termQQ: Parse error: " ++ show e
             Right t → pure t
-          let normed = unsafePerformIO $ runSubContext (Imports []) $ normalize' (Just . snd <$> scope) term
+          let normed = either (error . show) id $ snd $ unsafePerformIO $ runApp $ runScopes $ normalize' (Just . snd <$> scope) term
           ⟦normed⟧
       , quotePat = error "termQQ: No pattern support"
       , quoteType = error "termQQ: No type support"
       , quoteDec = error "termQQ: No declaration support"
       }
-
-normalizeSource ∷ Int → ByteString → IO ()
-normalizeSource fres x = do
-  let (t, _) = either (error . show) id $ parse (ParserContext (IsErased False) []) fres x
-  render $ pTerm [] $ unsafePerformIO $ runSubContext (Imports []) $ normalize t
-
-normalizeFile ∷ Int → FilePath → IO ()
-normalizeFile fres x = normalizeSource fres =<< readFileBinary x
-
-normalizeModule ∷ Module → Term
-normalizeModule = \(Module m) →
-  fst $ maybe (error "module must be non-empty") snd $ viewr $ unsafePerformIO $ foldlM normSubModule [] m
- where
-  normSubModule xs x = (xs |>) . (,Term $ Builtin Any') <$> runSubContext (Imports xs) (normalize x)
 
 -- | Print cumulative tryRewrite timing statistics
 printTryRewriteStats ∷ IO ()

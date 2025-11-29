@@ -18,9 +18,10 @@ import Data.IntSet qualified as IS
 import Data.RRBVector (Vector, drop, ifoldl, imap, replicate, reverse, splitAt, take, viewl, viewr, zip, (<|), (|>))
 import GHC.Exts (IsList (..))
 import NameGen (UsedNames, emptyUsedNames)
-import Parser (BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), freshIdent, nestedByP, splitAt3, traverseTermF, OpaqueId (..), pattern TBuiltin)
+import Parser (BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), nestedByP, splitAt3, traverseTermF, OpaqueId (..), pattern TBuiltin, regIdent)
 import RIO hiding (Vector, ask, drop, local, replicate, reverse, runReader, take, toList, zip)
 import RIO.HashMap qualified as HM
+import qualified NameGen as N
 
 -- KEEPS Import's
 -- Unfortunately, not a rewrite', since this just erases & is not meant to simplify anything.
@@ -32,7 +33,6 @@ erase reals =
     Block (BlockRewrite _ into) → erase reals into
     Block (BlockOpaque oid@(OpaqueId name _) _args _body into) →
       Term $ Block $ BlockLet QNorm (Just name) Nothing (TBuiltin $ OpaqueType oid) $ Lambda $ erase (reals |> True) $ unLambda into
-      -- erase reals into
     AppErased f _ → erase reals f
     Var x → Term $ Var $ x - foldl' (\erased isReal → if isReal then erased else erased + 1) 0 (drop (length reals - x) reals)
     RefineGet i (_, Nothing) → erase reals $ Term $ Var i
@@ -327,7 +327,7 @@ decompileModule ((tags0, tagSets0), instrs00) =
           scope
         IPushVar → do
           val ← popStackVal
-          n ← freshIdent
+          n ← regIdent <$> state N.gen
           res ←
             Term . Block . BlockLet QNorm (Just n) Nothing val . Lambda <$> do
               ctx0 ← get @(Vector (Maybe Term))
@@ -354,7 +354,7 @@ decompileModule ((tags0, tagSets0), instrs00) =
           body0 ←
             let lamStack = fmap Just captures <> replicate (fromIntegral argsN) Nothing
              in subdecompile lamStack lamInstrs
-          argNames ← for @Vector [1 .. argsN] \_ → freshIdent
+          argNames ← for @Vector [1 .. argsN] \_ → regIdent <$> state N.gen
           let res = foldr' (\n → Term . Lam QNorm (Just n) . Lambda) body0 argNames
           pushStack $ Just res
           scope

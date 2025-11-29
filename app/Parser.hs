@@ -24,13 +24,9 @@ module Parser (
   builtinsList,
   dotvar,
   eqOf,
-  formatFile,
-  formatModule,
-  freshIdent,
   identOfBuiltin,
   intercept,
   loadModule',
-  loadModule,
   maxOf,
   nested,
   nestedBy',
@@ -81,6 +77,7 @@ import RIO hiding (Reader, Vector, ask, local, runReader, toList, try, zip)
 import RIO.HashMap qualified as HM
 import System.File.OsPath (readFile')
 import System.OsPath (OsPath, encodeUtf, takeDirectory, unsafeEncodeUtf, (</>))
+import Control.Carrier.Error.Church (ErrorC, runError, throwError)
 
 -- TODO ASAP: assocativity for operators. YeAh, TuRns oUT wE NeEd iT, wHo coUlD hAvE GuESseD?
 -- (6 - 4 - 2 ≠ 6 - (4 - 2))
@@ -258,7 +255,7 @@ instance (Lift a) ⇒ Lift (Vector' a) where
 data BlockF f
   = BlockLet !Quant !(Maybe Ident) !(Maybe f) !f !(Lambda f)
   | BlockRewrite !f !f
-  | BlockOpaque !OpaqueId !(Vector' Ident) !(Lambda f) !(Lambda f)
+  | BlockOpaque !OpaqueId !(Vector' Ident) !(Lambda f) !(Lambda f) -- TODO: Replace `opaque A b c. d` with `opaque A @=/= \b c. d`
   deriving (Show, Eq, Lift)
 
 data FieldsK a b = FRecord !a | FRow !b
@@ -1003,10 +1000,10 @@ pTerm' (fuse, oldPrec, vars) t0 =
 pTerm ∷ Vector (Maybe Ident, Maybe BuiltinT) → Term → Doc AnsiStyle
 pTerm = pTerm' . (FNo,0,)
 
-parse ∷ ParserContext → Int → ByteString → Either Text (Term, Int)
+parse ∷ ParserContext → Int → ByteString → Either (Doc AnsiStyle) (Term, Int)
 parse vars fres inp = case runParser (parseTop <* eof) vars fres inp of
   OK x i "" → Right (x, i)
-  Err e → Left $ "Unable to parse at " <> tshow (posLineCols inp [e])
+  Err e → Left $ "Unable to parse at " <> pretty (posLineCols inp [e])
   _ → Left "Internal error: parser failure"
 
 parseSource ∷ Int → ByteString → IO (Term, Int)
@@ -1018,25 +1015,19 @@ parseFile fres = parseSource fres <=< readFile'
 render ∷ Doc AnsiStyle → IO ()
 render x = renderIO stdout $ layoutSmart defaultLayoutOptions $ x <> line
 
-formatSource ∷ ByteString → IO ()
-formatSource = render . pTerm [] . fst <=< parseSource 0
-
-formatFile ∷ OsPath → IO ()
-formatFile = formatSource <=< readFile'
-
-type LoaderC = StateC (HashMap OsPath Int) (StateC N.UsedNames (StateC (Vector Term) (WriterC (Vector OsPath) (StateC Int IO))))
+type LoaderC = StateC (HashMap OsPath Int) (StateC N.UsedNames (StateC (Vector Term) (WriterC (Vector OsPath) (StateC Int (ErrorC (Doc AnsiStyle) IO)))))
 newtype Module = Module (Vector Term) -- non-empty
 
 -- TODO: disallow trailing `/` in Import syntax!
 -- | Achtung: Uses internal Fresh, so no mix & matching! Better rewrite the signature to be StateC Int IO _.
-loadModule' ∷ OsPath → IO (N.UsedNames, Module, Vector OsPath)
-loadModule' = evalState @Int 0 . runWriter (\c (a, b) → pure (a, b, c)) . runState (\t u → pure (u, Module t)) [] . execState N.emptyUsedNames . evalState mempty . new
+loadModule' ∷ N.UsedNames → OsPath → IO (Either (Doc AnsiStyle) (N.UsedNames, Module, Vector OsPath))
+loadModule' names0 = runError (pure . Left) (pure . Right) . evalState @Int 0 . runWriter (\c (a, b) → pure (a, b, c)) . runState (\t u → pure (u, Module t)) [] . execState names0 . evalState mempty . new
  where
   new ∷ OsPath → LoaderC ()
   new path = do
     tell @(Vector OsPath) [path]
     oldI ← get
-    (t0, newI) ← sendIO $ parseFile oldI $ path <> unsafeEncodeUtf ".fad"
+    (t0, newI) ← either throwError pure . parse (ParserContext (IsErased False) []) oldI =<< sendIO (readFile' $ path <> unsafeEncodeUtf ".fad")
     put newI
     t ← runReader path $ subload t0
     modify (|> t)
@@ -1065,17 +1056,6 @@ loadModule' = evalState @Int 0 . runWriter (\c (a, b) → pure (a, b, c)) . runS
         for_ label $ modify . N.use
         Term <$> traverseTermF subload (\_n → fmap Lambda . subload . unLambda) t
 
-loadModule ∷ FilePath → IO (N.UsedNames, Module, Vector OsPath)
-loadModule = encodeUtf >=> loadModule'
-
-formatModule ∷ Module → IO ()
-formatModule (Module m) =
-  render
-    $ vsep
-    $ fmap
-      (\(i, t) → "/" <> pretty i <> nest 1 (line <> pTerm [] t))
-      (toList $ zip [0 .. length m - 1] m)
-
 parseQQ ∷ QuasiQuoter
 parseQQ =
   QuasiQuoter
@@ -1088,6 +1068,3 @@ parseQQ =
     , quoteType = error "parseQQ: No type support"
     , quoteDec = error "parseQQ: No declaration support"
     }
-
-freshIdent ∷ (Has (State N.UsedNames) sig m) ⇒ m Ident
-freshIdent = regIdent <$> N.genM

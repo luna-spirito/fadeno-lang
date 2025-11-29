@@ -3,8 +3,6 @@
 {-# HLINT ignore "Use const" #-}
 module NameGen where
 
-import Control.Algebra
-import Control.Effect.State (State, state)
 import Data.ByteString qualified as B
 import Data.Char (ord)
 import Data.Foldable (minimumBy)
@@ -75,6 +73,3 @@ gen = go Nothing Nothing . Just
         (new, res0) = go bM (Just bestLetter) old
        in
         (UsedNames $ adjust' bestI (\_ → (oldCnt + 1, Just new)) taken, bestLetter `B.cons` res0)
-
-genM ∷ (Has (State UsedNames) sig m) ⇒ m ByteString
-genM = state gen
