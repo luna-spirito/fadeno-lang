@@ -15,8 +15,9 @@ import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedByP, nestedByP', parse, recordGet, splitAt3, traverseTermF, pattern TApp, pattern TBuiltin, regIdent, nestedBy')
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, take, to, toList, try, zip, catch, reverse)
 import System.IO.Unsafe (unsafePerformIO)
-import Context (ScopesM, Imports (..), Binding, Scopes (..), EEntry (..), Epoch (..), Dyn (..), Rewrite (..), runScopes, runApp, fetchWith, getEpoch, getScopeId, stackError)
+import Context (ScopesM, Imports (..), Binding, Scopes (..), EEntry (..), Epoch (..), Dyn (..), Rewrite (..), runScopes, runApp, fetchWith, getEpoch, getScopeId, stackError, stackLog)
 import Control.Effect.Lift (sendIO)
+import Prettyprinter ((<+>))
 
 -- Crazy thoughts:
 -- 1) Normalizer has pretty simple logic, we could ± easily offload it to Rust.
@@ -318,7 +319,7 @@ tryRewrite (nest, Rewrite forallsCount lfromto0) t = do
         case nestedBy' 0 b (-locs) of
           Just curr → inst relI curr
           Nothing → pure EqUnknown
-      | otherwise → pure $ if Term (Var $ i - forallsCount) == b then EqYes else EqUnknown
+      | otherwise → pure $ if Term (Var $ i - forallsCount + nest) == b then EqYes else EqUnknown
     (a0@(Term (RefineGet i (skips, final))), b)
       | i < locs → pure $ if a0 == b then EqYes else EqUnknown
       | i < locs + forallsCount → do -- TODO: write tests
@@ -327,7 +328,7 @@ tryRewrite (nest, Rewrite forallsCount lfromto0) t = do
           Term (RefineGet i2 (skips2, final2)) | i2 >= locs && skips == skips2 && final == final2 →
             inst relI $ Term $ Var (i2 - locs)
           _ → pure EqUnknown
-      | otherwise → pure $ if Term (RefineGet (i - forallsCount) (skips, final)) == b then EqYes else EqUnknown
+      | otherwise → pure $ if Term (RefineGet (i - forallsCount + nest) (skips, final)) == b then EqYes else EqUnknown
     x → traverseIsEq (rec . (locs,)) (\i → rec . (locs+i,) . bimap unLambda unLambda) (bimap unTerm unTerm x)
   if matchesPattern == EqYes
     then do
@@ -335,7 +336,7 @@ tryRewrite (nest, Rewrite forallsCount lfromto0) t = do
       valsCurrScope ← reverse <$> for params (fmap (fromMaybe (error "Internal error: param unresolved during rewrite")) . sendIO . readIORef)
       let vals = imap (\i → Just . (`nestedByP` i)) valsCurrScope
       final ← normalize' vals (nestedByP' forallsCount (snd $ unLambda lfromto0) nest)
-      -- stackLog \p → "Rewrote " <> p t <> " with " <> p final
+      stackLog \p → "Rewrote" <+> p t <+> "with" <+> p final
       pure $ Just final
     else pure Nothing
 
