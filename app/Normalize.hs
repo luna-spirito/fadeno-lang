@@ -302,21 +302,32 @@ tryRewrite (nest, Rewrite forallsCount lfromto0) t = do
   -- Honestly, I don't see an issue with this, although this is *technically* a cutch.
   -- TODO: Arrays?
   -- stores instantiated meta-variables, with indices adjusted for the current scope.
-  -- stackError \p → p t
   params :: Vector (IORef (Maybe Term)) ← for [1..forallsCount] \_ → sendIO $ newIORef Nothing
+  let
+    inst relI curr = do
+      let param = fromMaybe undefined $ params !? relI
+      sendIO (readIORef param) >>= \case
+        Nothing → sendIO (writeIORef param $ Just curr) $> EqYes
+        Just written → isEq (curr, written)
   matchesPattern ← (0, (fst $ unLambda lfromto0, t)) & fix \rec → uncurry \locs → \case
-    (Term (Var i), b)
+    (a0@(Term (Var i)), b)
       | i < locs → -- Locally bound, shared for both
-        pure $ if Term (Var i) == b then EqYes else EqUnknown
+        pure $ if a0 == b then EqYes else EqUnknown
       | i < locs + forallsCount → do -- Rewrite parameter
         let relI = i - locs -- index of rewrite parameter
         case nestedBy' 0 b (-locs) of
+          Just curr → inst relI curr
           Nothing → pure EqUnknown
-          Just curr → do
-            let param = fromMaybe undefined $ params !? relI
-            sendIO (readIORef param) >>= \case
-              Nothing → sendIO (writeIORef param $ Just curr) $> EqYes
-              Just written → isEq (curr, written)
+      | otherwise → pure $ if Term (Var $ i - forallsCount) == b then EqYes else EqUnknown
+    (a0@(Term (RefineGet i (skips, final))), b)
+      | i < locs → pure $ if a0 == b then EqYes else EqUnknown
+      | i < locs + forallsCount → do -- TODO: write tests
+        let relI = i - locs
+        case b of
+          Term (RefineGet i2 (skips2, final2)) | i2 >= locs && skips == skips2 && final == final2 →
+            inst relI $ Term $ Var (i2 - locs)
+          _ → pure EqUnknown
+      | otherwise → pure $ if Term (RefineGet (i - forallsCount) (skips, final)) == b then EqYes else EqUnknown
     x → traverseIsEq (rec . (locs,)) (\i → rec . (locs+i,) . bimap unLambda unLambda) (bimap unTerm unTerm x)
   if matchesPattern == EqYes
     then do
