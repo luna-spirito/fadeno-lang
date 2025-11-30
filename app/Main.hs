@@ -33,6 +33,7 @@ import qualified RIO.HashMap as HM
 import Control.Effect.Fresh (fresh)
 import Control.Effect.Writer (tell)
 import Control.Effect.Lift (sendIO)
+import Control.Carrier.Lift (runM)
 
 -- TODO: Permit inference of dependent Pis?
 -- TODO: Concat uncomfortably replicates Pi.
@@ -891,9 +892,9 @@ instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) �
             _ → r
 
 isEqUnify ∷ (Term, Term) → ScopesM EqRes
-isEqUnify = fix \rec → \case
-  (Term (ExVar i), b) → instMeta i b $> EqYes
-  (a, Term (ExVar i)) → instMeta i a $> EqYes
+isEqUnify = runM . fix \rec → \case
+  (Term (ExVar i), b) → lift (instMeta i b) $> EqYes
+  (a, Term (ExVar i)) → lift (instMeta i a) $> EqYes
   x → traverseIsEq rec (\_i → rec . bimap unLambda unLambda) (bimap unTerm unTerm x)
 
 -- -- TODO: Use isEq.

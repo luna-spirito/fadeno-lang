@@ -10,14 +10,17 @@ import Control.Carrier.State.Church (StateC (..), runState)
 import Control.Effect.Reader (ask, local)
 import Control.Effect.State (State, get, modify, state)
 import Data.ByteString.Char8 (pack)
-import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, ifoldr, replicate, take, viewl, viewr, zip, (!?), (<|), (|>), reverse, imap)
+import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, ifoldr, replicate, take, viewl, viewr, zip, (!?), (<|), (|>), imap, fromList)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedByP, nestedByP', parse, recordGet, splitAt3, traverseTermF, pattern TApp, pattern TBuiltin, regIdent, nestedBy')
 import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, take, to, toList, try, zip, catch, reverse)
 import System.IO.Unsafe (unsafePerformIO)
-import Context (ScopesM, Imports (..), Binding, Scopes (..), EEntry (..), Epoch (..), Dyn (..), Rewrite (..), runScopes, runApp, fetchWith, getEpoch, getScopeId, stackError, stackLog)
-import Control.Effect.Lift (sendIO)
+import Context (ScopesM, Imports (..), Binding, Scopes (..), EEntry (..), Epoch (..), Dyn (..), Rewrite (..), runScopes, runApp, fetchWith, getEpoch, getScopeId, stackLog, stackError)
+import Control.Effect.Lift (Lift, sendM)
 import Prettyprinter ((<+>))
+import Control.Carrier.Lift (runM, LiftC (..))
+import Data.Tuple (swap)
+import qualified Data.IntMap.Strict as IM
 
 -- Crazy thoughts:
 -- 1) Normalizer has pretty simple logic, we could ± easily offload it to Rust.
@@ -97,16 +100,19 @@ data EqRes
   | EqUnknown
   deriving (Eq)
 
-withBinding ∷ Has (State Scopes) sig m ⇒ Binding → m a → m a
-withBinding b act = do
-  modify @Scopes \(Scopes bs es rs) → Scopes (bs |> b) (es |> (Epoch 0, [])) rs
+withBinding' ∷ Has (Lift ScopesM) sig m ⇒ Binding → m a → m a
+withBinding' b act = do
+  sendM @ScopesM $ modify @Scopes \(Scopes bs es rs) → Scopes (bs |> b) (es |> (Epoch 0, [])) rs
   res ← act
-  modify @Scopes \(Scopes bs es rs) →
+  sendM @ScopesM $ modify @Scopes \(Scopes bs es rs) →
     Scopes
       (maybe (error "Missing binding") fst $ viewr bs)
       (maybe (error "Missing ex scope") fst $ viewr es)
       rs
   pure res
+
+withBinding :: Binding → ScopesM a → ScopesM a
+withBinding b act = runM $ withBinding' b (LiftC act)
 
 {- | Executes action in context with some marked EEntry region, returns the transformed EEntry region.
 Basically, needed for EMarker + EVar pattern. Marker is needed to ensure the start is still identifiable.
@@ -146,8 +152,8 @@ fetchLambda = fmap Lambda . fetchWith (normalize' [Nothing]) . unLambda
 
 -- | Only normalized & non-ExVar
 -- Please look rollbackNonEq
-traverseIsEq ::((Term, Term) → ScopesM EqRes) → (Int → (Lambda Term, Lambda Term) → ScopesM EqRes) → (TermF Term, TermF Term) → ScopesM EqRes
-traverseIsEq c cNest (l0, r0) = getEpoch >>= \e0 → case (fDyn e0 $ Term l0, fDyn e0 $ Term r0) of
+traverseIsEq :: Has (Lift ScopesM) sig m ⇒ ((Term, Term) → m EqRes) → (Int → (Lambda Term, Lambda Term) → m EqRes) → (TermF Term, TermF Term) → m EqRes
+traverseIsEq c cNest (l0, r0) = sendM @ScopesM getEpoch >>= \e0 → case (fDyn e0 $ Term l0, fDyn e0 $ Term r0) of
   ((Lam QEra _ _; BuiltinsVar; Block{}; AppErased{}; Refine (RefinePost{}; RefinePre{}); RefineGet _ (_, Nothing); Import{}), _) → undefined
   (_, (Lam QEra _ _; BuiltinsVar; Block{}; AppErased{}; Refine (RefinePost{}; RefinePre{}); RefineGet _ (_, Nothing); Import{})) → undefined
   (ExVar{}, _) → pure EqUnknown -- We don't handle those here, explicitly. Up to users.
@@ -219,14 +225,14 @@ traverseIsEq c cNest (l0, r0) = getEpoch >>= \e0 → case (fDyn e0 $ Term l0, fD
     | a == b → pure EqYes
   (Builtin _, _) → pure EqNot
   (Lam QNorm i1 bod1, Lam QNorm i2 bod2) →
-    withBinding (QNorm, i1 <|> i2, Nothing, Term $ Builtin Any')
+    withBinding' (QNorm, i1 <|> i2, Nothing, Term $ Builtin Any')
       $ cNestM 1 (fetchLambda bod1) (fetchLambda bod2)
   (Lam QNorm _ _, _) → pure EqNot
   (Pi q1 i1 inT1 outT1, Pi q2 i2 inT2 outT2)
     | q1 == q2 →
         force (cM (fetchT inT1) (fetchT inT2)) do
-          inT1' ← fetchT inT1
-          withBinding (QNorm, i1 <|> i2, Nothing, inT1') $ cNestM 1 (fetchLambda outT1) (fetchLambda outT2)
+          inT1' ← sendM @ScopesM $ fetchT inT1
+          withBinding' (QNorm, i1 <|> i2, Nothing, inT1') $ cNestM 1 (fetchLambda outT1) (fetchLambda outT2)
   (Pi{}, _) → pure EqNot
   (Refine (RefinePreTy i1 ann1 base1), Refine (RefinePreTy _i2 ann2 base2)) → goDepPair (Just i1) (ann1, base1) (ann2, base2)
   (Refine (RefinePostTy base1 i1 ann1), Refine (RefinePostTy base2 _i2 ann2)) → goDepPair (Just i1) (base1, ann1) (base2, ann2)
@@ -235,8 +241,8 @@ traverseIsEq c cNest (l0, r0) = getEpoch >>= \e0 → case (fDyn e0 $ Term l0, fD
   (Concat _ (FRow _), _) → pure EqNot
   where
   -- `c` with monadic args
-  cM aM bM = c =<< ((,) <$> aM <*> bM)
-  cNestM i aM bM = cNest i =<< ((,) <$> aM <*> bM)
+  cM aM bM = c =<< ((,) <$> sendM @ScopesM aM <*> sendM @ScopesM bM)
+  cNestM i aM bM = cNest i =<< ((,) <$> sendM @ScopesM aM <*> sendM @ScopesM bM)
   try act cont =
     act >>= \case
       EqYes → cont
@@ -247,7 +253,7 @@ traverseIsEq c cNest (l0, r0) = getEpoch >>= \e0 → case (fDyn e0 $ Term l0, fD
       x → pure x
   goDepPair i (l1, r1) (l2, r2) =
     force (cM (fetchT l1) (fetchT l2))
-      $ withBinding (QNorm, i, Nothing, Term $ Builtin Any')
+      $ withBinding' (QNorm, i, Nothing, Term $ Builtin Any')
       $ cNestM 1 (fetchLambda r1) (fetchLambda r2)
 
 rollbackNonEq :: ScopesM EqRes → ScopesM EqRes
@@ -259,7 +265,7 @@ rollbackNonEq act = StateC \cont s0 →
   ) s0 act
 
 isEq ∷ (Term, Term) → ScopesM EqRes
-isEq = rollbackNonEq . fix \rec → bimap unTerm unTerm >>> \case
+isEq = rollbackNonEq . runM . fix \rec → bimap unTerm unTerm >>> \case
   (ExVar{}, _) → pure EqUnknown
   (_, ExVar{}) → pure EqUnknown
   x → traverseIsEq rec (\_ (l, r) → rec (unLambda l, unLambda r)) x
@@ -303,37 +309,41 @@ tryRewrite (nest, Rewrite forallsCount lfromto0) t = do
   -- Honestly, I don't see an issue with this, although this is *technically* a cutch.
   -- TODO: Arrays?
   -- stores instantiated meta-variables, with indices adjusted for the current scope.
-  params :: Vector (IORef (Maybe Term)) ← for [1..forallsCount] \_ → sendIO $ newIORef Nothing
+  -- params :: Vector (IORef (Maybe Term)) ← for ([1..forallsCount] :: Vector Int) \_ → sendIO $ newIORef Nothing
   let
+    inst :: Int → Term → StateC (IntMap Term) (LiftC ScopesM) EqRes
     inst relI curr = do
-      let param = fromMaybe undefined $ params !? relI
-      sendIO (readIORef param) >>= \case
-        Nothing → sendIO (writeIORef param $ Just curr) $> EqYes
-        Just written → isEq (curr, written)
-  matchesPattern ← (0, (fst $ unLambda lfromto0, t)) & fix \rec → uncurry \locs → \case
-    (a0@(Term (Var i)), b)
-      | i < locs → -- Locally bound, shared for both
-        pure $ if a0 == b then EqYes else EqUnknown
-      | i < locs + forallsCount → do -- Rewrite parameter
-        let relI = i - locs -- index of rewrite parameter
-        case nestedBy' 0 b (-locs) of
-          Just curr → inst relI curr
-          Nothing → pure EqUnknown
-      | otherwise → pure $ if Term (Var $ i - forallsCount + nest) == b then EqYes else EqUnknown
-    (a0@(Term (RefineGet i (skips, final))), b)
-      | i < locs → pure $ if a0 == b then EqYes else EqUnknown
-      | i < locs + forallsCount → do -- TODO: write tests
-        let relI = i - locs
-        case b of
-          Term (RefineGet i2 (skips2, final2)) | i2 >= locs && skips == skips2 && final == final2 →
-            inst relI $ Term $ Var (i2 - locs)
-          _ → pure EqUnknown
-      | otherwise → pure $ if Term (RefineGet (i - forallsCount + nest) (skips, final)) == b then EqYes else EqUnknown
-    x → traverseIsEq (rec . (locs,)) (\i → rec . (locs+i,) . bimap unLambda unLambda) (bimap unTerm unTerm x)
+      writtenM ← state @(IntMap Term) $ swap . IM.insertLookupWithKey (\_k _new written → written) relI curr
+      case writtenM of
+        Nothing → pure EqYes
+        Just written → lift (lift $ isEq (curr, written))
+    match :: Int → (Term, Term) → StateC (IntMap Term) (LiftC ScopesM) EqRes
+    match locs = \case
+      (a0@(Term (Var i)), b)
+        | i < locs → -- Locally bound, shared for both
+          pure $ if a0 == b then EqYes else EqUnknown
+        | i < locs + forallsCount → do -- Rewrite parameter
+          let relI = i - locs -- index of rewrite parameter
+          case nestedBy' 0 b (-locs) of
+            Just curr → inst relI curr
+            Nothing → pure EqUnknown
+        | otherwise → pure $ if Term (Var $ i - forallsCount + nest) == b then EqYes else EqUnknown
+      (a0@(Term (RefineGet i (skips, final))), b)
+        | i < locs → pure $ if a0 == b then EqYes else EqUnknown
+        | i < locs + forallsCount → do -- TODO: write tests
+          let relI = i - locs
+          case b of
+            Term (RefineGet i2 (skips2, final2)) | i2 >= locs && skips == skips2 && final == final2 →
+              inst relI $ Term $ Var (i2 - locs)
+            _ → pure EqUnknown
+        | otherwise → pure $ if Term (RefineGet (i - forallsCount + nest) (skips, final)) == b then EqYes else EqUnknown
+      x → traverseIsEq (match locs) (\i → match (locs+i) . bimap unLambda unLambda) (bimap unTerm unTerm x)
+  (params, matchesPattern) ← runM $ runState @(IntMap Term) (curry pure) mempty $ match 0 (fst $ unLambda lfromto0, t)
   if matchesPattern == EqYes
     then do
       -- All these exist in the same, current scope.
-      valsCurrScope ← reverse <$> for params (fmap (fromMaybe (error "Internal error: param unresolved during rewrite")) . sendIO . readIORef)
+      let valsCurrScope = fromList (snd <$> IM.toDescList params)
+      unless (length valsCurrScope == forallsCount) $ stackError \_ → "Not all existentials resolved"
       let vals = imap (\i → Just . (`nestedByP` i)) valsCurrScope
       final ← normalize' vals (nestedByP' forallsCount (snd $ unLambda lfromto0) nest)
       stackLog \p → "Rewrote" <+> p t <+> "with" <+> p final
