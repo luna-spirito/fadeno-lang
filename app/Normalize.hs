@@ -5,28 +5,18 @@ module Normalize where
 
 import Arithmetic (normalizePoly)
 import Control.Algebra
-import Control.Carrier.Empty.Church (runEmpty)
-import Control.Carrier.Reader (ReaderC, runReader)
-import Control.Carrier.State.Church (StateC (..), evalState, put, runState)
-import Control.Effect.Empty (empty)
-import Control.Effect.Reader (Reader, ask, local)
+import Control.Carrier.Reader (runReader)
+import Control.Carrier.State.Church (StateC (..), runState)
+import Control.Effect.Reader (ask, local)
 import Control.Effect.State (State, get, modify, state)
-import Data.Bitraversable (bimapM)
 import Data.ByteString.Char8 (pack)
-import Data.Foldable (foldlM)
-import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, ifoldr, replicate, take, viewl, viewr, zip, (!?), (<|), (|>))
+import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, ifoldr, replicate, take, viewl, viewr, zip, (!?), (<|), (|>), reverse, imap)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedByP, nestedByP', pTerm, parse, recordGet, render, splitAt3, traverseTermF, pattern TApp, pattern TBuiltin, regIdent)
-import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, take, to, toList, try, zip, catch)
-import Control.Carrier.Fresh.Church (Fresh, runFresh, fresh, FreshC)
-import qualified Data.IntSet as IS
-import GHC.Exts (IsList(..))
+import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedByP, nestedByP', parse, recordGet, splitAt3, traverseTermF, pattern TApp, pattern TBuiltin, regIdent, nestedBy')
+import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, take, to, toList, try, zip, catch, reverse)
 import System.IO.Unsafe (unsafePerformIO)
-import Data.Time.Clock (getCurrentTime, diffUTCTime)
-import Prelude (putStrLn)
-import Control.Carrier.Lift (Lift, sendIO, liftWith, sendM)
-import Context (ScopesM, Imports (..), Binding, Scopes (..), EEntry (..), Epoch (..), Dyn (..), Rewrite (..), EnvM, Err (..), runScopes, runApp, printErr, Env (..), fetchWith, getEpoch, getScopeId, askImports)
-import Control.Effect.Error (throwError, catchError)
+import Context (ScopesM, Imports (..), Binding, Scopes (..), EEntry (..), Epoch (..), Dyn (..), Rewrite (..), runScopes, runApp, fetchWith, getEpoch, getScopeId, stackError)
+import Control.Effect.Lift (sendIO)
 
 -- Crazy thoughts:
 -- 1) Normalizer has pretty simple logic, we could ± easily offload it to Rust.
@@ -59,7 +49,7 @@ appBuiltin locals = curry \case
       let
         search a' = case unconsField a' of
           Nothing → pure $ recordGet name1 a'
-          Just ((name2, v), rest) → isEq name1 name2 >>= \case
+          Just ((name2, v), rest) → isEq (name1, name2) >>= \case
             EqYes → pure v
             EqNot → search rest
             EqUnknown → pure $ recordGet name1 a'
@@ -77,14 +67,13 @@ appBuiltin locals = curry \case
   listLitDrop ∷ Term → Vector' Term → ScopesM ListDropRes
   listLitDrop x (Vector' fi) =
     ifoldr
-      ( \i n rec → isEq x n >>= \case
+      ( \i n rec → isEq (x, n) >>= \case
           EqYes → pure $ TDFound $ Vector' $ deleteAt i fi
           EqNot → rec
           EqUnknown → pure $ TDUnknown
       )
       (pure TDMissing)
       fi
-
   recordDropFields ∷ Vector' Term → Term → ScopesM Term
   recordDropFields tags fields0 = case tags of
     Vector' (null → True) → pure $ Term $ FieldsLit (FRecord ()) []
@@ -106,16 +95,6 @@ data EqRes
   | EqNot -- provably uneq
   | EqUnknown
   deriving (Eq)
-
--- Global timer for tryRewrite
-{-# NOINLINE tryRewriteTime #-}
-tryRewriteTime :: IORef Double
-tryRewriteTime = unsafePerformIO $ newIORef 0.0
-
--- Global counter for tryRewrite calls
-{-# NOINLINE tryRewriteCalls #-}
-tryRewriteCalls :: IORef Int
-tryRewriteCalls = unsafePerformIO $ newIORef 0
 
 withBinding ∷ Has (State Scopes) sig m ⇒ Binding → m a → m a
 withBinding b act = do
@@ -164,129 +143,99 @@ fetchT = fetchWith normalize
 fetchLambda ∷ Lambda Dyn → ScopesM (Lambda Term)
 fetchLambda = fmap Lambda . fetchWith (normalize' [Nothing]) . unLambda
 
-isEq' ∷ ((Int, Int) → Term → ScopesM Bool) → Term → Term → ScopesM EqRes
-isEq' tryInst = \l0 r0 → transactContext $ go l0 r0
- where
-  -- | Perform an effectful operation, comitting changes after the operation iff not aborted and EqYes.
-  transactContext ∷ ScopesM EqRes → ScopesM EqRes
-  transactContext act = StateC \cont s0 →
-    runState (\s1 res →
-        if res == EqYes
-          then cont s1 res
-          else cont s0 res
-    ) s0 act
-  go l0 r0 =
-    getEpoch >>= \e0 → case (fDyn e0 l0, fDyn e0 r0) of
-      (Lam QEra _ _, _) → undefined
-      (_, Lam QEra _ _) → undefined
-      (BuiltinsVar, _) → undefined
-      (_, BuiltinsVar) → undefined
-      (Block{}, _) → undefined
-      (_, Block{}) → undefined
-      (AppErased{}, _) → undefined
-      (_, AppErased{}) → undefined
-      (Refine (RefinePost{}), _) → undefined
-      (Refine (RefinePre{}), _) → undefined
-      (_, Refine (RefinePost{})) → undefined
-      (_, Refine (RefinePre{})) → undefined
-      (RefineGet _ (_, Nothing), _) → undefined
-      (_, RefineGet _ (_, Nothing)) → undefined
-      (Import{}, _) → undefined
-      (_, Import{}) → undefined
-      (ExVar i, _) → inst i r0
-      (_, ExVar i) → inst i l0
-      -- Unknown
-      (Var a, Var b)
-        | a == b → pure EqYes
-      (Var _, _) → pure EqUnknown
-      (_, Var _) → pure EqUnknown
-      (UniVar i1 _, UniVar i2 _)
-        | i1 == i2 → pure EqYes
-      (UniVar{}, _) → pure EqUnknown
-      (_, UniVar{}) → pure EqUnknown
-      (App f1 a1, App f2 a2) →
-        try (isEqD (fetchT f1) (fetchT f2))
-          $ try (isEqD (fetchT a1) (fetchT a2))
-          $ pure EqYes
-      (App{}, _) → pure EqUnknown
-      (_, App{}) → pure EqUnknown
-      (Sorry, _) → pure EqUnknown
-      (_, Sorry) → pure EqUnknown
-      (RefineGet e1 (skips1, Just f1), RefineGet e2 (skips2, Just f2)) →
-        pure $ if e1 == e2 && skips1 == skips2 && f1 == f2 then EqYes else EqUnknown
-      (RefineGet{}, _) → pure EqUnknown
-      (_, RefineGet{}) → pure EqUnknown
-      (Concat a1 (FRecord b1), Concat a2 (FRecord b2)) →
-        try (isEqD (fetchT a1) (fetchT a2))
-          $ try (isEqD (fetchT b1) (fetchT b2))
-          $ pure EqYes
-      (Concat _ (FRecord _), _) → pure EqUnknown
-      (_, Concat _ (FRecord _)) → pure EqUnknown
-      -- Literals
-      (NumLit a, NumLit b)
-        | a == b → pure EqYes
-      (NumLit _, _) → pure EqNot
-      (TagLit a, TagLit b)
-        | a == b → pure EqYes
-      (TagLit _, _) → pure EqNot
-      (BoolLit a, BoolLit b)
-        | a == b → pure EqYes
-      (BoolLit _, _) → pure EqNot
-      (ListLit (Vector' as), ListLit (Vector' bs)) →
-        if length as /= length bs
+-- | Only normalized & non-ExVar
+-- Please look rollbackNonEq
+traverseIsEq ::((Term, Term) → ScopesM EqRes) → (Int → (Lambda Term, Lambda Term) → ScopesM EqRes) → (TermF Term, TermF Term) → ScopesM EqRes
+traverseIsEq c cNest (l0, r0) = getEpoch >>= \e0 → case (fDyn e0 $ Term l0, fDyn e0 $ Term r0) of
+  ((Lam QEra _ _; BuiltinsVar; Block{}; AppErased{}; Refine (RefinePost{}; RefinePre{}); RefineGet _ (_, Nothing); Import{}), _) → undefined
+  (_, (Lam QEra _ _; BuiltinsVar; Block{}; AppErased{}; Refine (RefinePost{}; RefinePre{}); RefineGet _ (_, Nothing); Import{})) → undefined
+  (ExVar{}, _) → pure EqUnknown -- We don't handle those here, explicitly. Up to users.
+  (_, ExVar{}) → pure EqUnknown
+  -- Unknown
+  (Var a, Var b)
+    | a == b → pure EqYes
+  (Var _, _) → pure EqUnknown
+  (_, Var _) → pure EqUnknown
+  (UniVar i1 _, UniVar i2 _)
+    | i1 == i2 → pure EqYes
+  (UniVar{}, _) → pure EqUnknown
+  (_, UniVar{}) → pure EqUnknown
+  (App f1 a1, App f2 a2) →
+    try (cM (fetchT f1) (fetchT f2))
+      $ try (cM (fetchT a1) (fetchT a2))
+      $ pure EqYes
+  (App{}, _) → pure EqUnknown
+  (_, App{}) → pure EqUnknown
+  (Sorry, _) → pure EqUnknown
+  (_, Sorry) → pure EqUnknown
+  (RefineGet e1 (skips1, Just f1), RefineGet e2 (skips2, Just f2)) →
+    pure $ if e1 == e2 && skips1 == skips2 && f1 == f2 then EqYes else EqUnknown
+  (RefineGet{}, _) → pure EqUnknown
+  (_, RefineGet{}) → pure EqUnknown
+  (Concat a1 (FRecord b1), Concat a2 (FRecord b2)) →
+    try (cM (fetchT a1) (fetchT a2))
+      $ try (cM (fetchT b1) (fetchT b2))
+      $ pure EqYes
+  (Concat _ (FRecord _), _) → pure EqUnknown
+  (_, Concat _ (FRecord _)) → pure EqUnknown
+  -- Literals
+  (NumLit a, NumLit b)
+    | a == b → pure EqYes
+  (NumLit _, _) → pure EqNot
+  (TagLit a, TagLit b)
+    | a == b → pure EqYes
+  (TagLit _, _) → pure EqNot
+  (BoolLit a, BoolLit b)
+    | a == b → pure EqYes
+  (BoolLit _, _) → pure EqNot
+  (ListLit (Vector' as), ListLit (Vector' bs)) →
+    if length as /= length bs
+      then pure EqNot
+      else foldr (\(a, b) next → force (cM (fetchT a) (fetchT b)) next) (pure EqYes) (zip as bs)
+  (ListLit _, _) → pure EqNot
+  (FieldsLit f1 (Vector' as0), FieldsLit f2 (Vector' bs0))
+    | f1 == f2 →
+        if length as0 /= length bs0
           then pure EqNot
-          else foldr (\(a, b) next → force (isEqD (fetchT a) (fetchT b)) next) (pure EqYes) (zip as bs)
-      (ListLit _, _) → pure EqNot
-      (FieldsLit f1 (Vector' as0), FieldsLit f2 (Vector' bs0))
-        | f1 == f2 →
-            if length as0 /= length bs0
-              then pure EqNot
-              else
-                foldr
-                  ( \(tag1, val1) recO bs →
-                      ifoldr
-                        ( \i (tag2, val2) recI →
-                            isEqD (fetchT tag1) (fetchT tag2) >>= \case
-                              EqYes → force (isEqD (fetchT val1) (fetchT val2)) $ recO $ deleteAt i bs
-                              EqNot → recI
-                              EqUnknown → pure EqUnknown
-                        )
-                        (pure EqNot)
-                        bs
-                  )
-                  (\_ → pure EqYes)
-                  as0
-                  bs0
-      (FieldsLit{}, _) → pure EqNot
-      (Builtin a, Builtin b)
-        | a == b → pure EqYes
-      (Builtin _, _) → pure EqNot
-      (Lam QNorm i1 bod1, Lam QNorm i2 bod2) →
-        withBinding (QNorm, i1 <|> i2, Nothing, Term $ Builtin Any')
-          $ isEqD (unLambda <$> fetchLambda bod1) (unLambda <$> fetchLambda bod2)
-      (Lam QNorm _ _, _) → pure EqNot
-      (Pi q1 i1 inT1 outT1, Pi q2 i2 inT2 outT2)
-        | q1 == q2 →
-            force (isEqD (fetchT inT1) (fetchT inT2)) do
-              inT1' ← fetchT inT1
-              withBinding (QNorm, i1 <|> i2, Nothing, inT1') $ isEqD (unLambda <$> fetchLambda outT1) (unLambda <$> fetchLambda outT2)
-      (Pi{}, _) → pure EqNot
-      (Refine (RefinePreTy i1 ann1 base1), Refine (RefinePreTy _i2 ann2 base2)) → goDepPair (Just i1) (ann1, base1) (ann2, base2)
-      (Refine (RefinePostTy base1 i1 ann1), Refine (RefinePostTy base2 _i2 ann2)) → goDepPair (Just i1) (base1, ann1) (base2, ann2)
-      (Refine{}, _) → pure EqNot
-      (Concat l1 (FRow r1), Concat l2 (FRow r2)) → goDepPair (Just dotvar) (l1, r1) (l2, r2)
-      (Concat _ (FRow _), _) → pure EqNot
-  goDepPair i (l1, r1) (l2, r2) =
-    force (isEqD (fetchT l1) (fetchT l2))
-      $ withBinding (QNorm, i, Nothing, Term $ Builtin Any')
-      $ isEqD (unLambda <$> fetchLambda r1) (unLambda <$> fetchLambda r2)
-  --
-  inst a b =
-    tryInst a b <&> \case
-      True → EqYes
-      False → EqUnknown
-  isEqD a b = uncurry go =<< ((,) <$> a <*> b)
-  -- TODO: FRow???
+          else
+            foldr
+              ( \(tag1, val1) recO bs →
+                  ifoldr
+                    ( \i (tag2, val2) recI →
+                        cM (fetchT tag1) (fetchT tag2) >>= \case
+                          EqYes → force (cM (fetchT val1) (fetchT val2)) $ recO $ deleteAt i bs
+                          EqNot → recI
+                          EqUnknown → pure EqUnknown
+                    )
+                    (pure EqNot)
+                    bs
+              )
+              (\_ → pure EqYes)
+              as0
+              bs0
+  (FieldsLit{}, _) → pure EqNot
+  (Builtin a, Builtin b)
+    | a == b → pure EqYes
+  (Builtin _, _) → pure EqNot
+  (Lam QNorm i1 bod1, Lam QNorm i2 bod2) →
+    withBinding (QNorm, i1 <|> i2, Nothing, Term $ Builtin Any')
+      $ cNestM 1 (fetchLambda bod1) (fetchLambda bod2)
+  (Lam QNorm _ _, _) → pure EqNot
+  (Pi q1 i1 inT1 outT1, Pi q2 i2 inT2 outT2)
+    | q1 == q2 →
+        force (cM (fetchT inT1) (fetchT inT2)) do
+          inT1' ← fetchT inT1
+          withBinding (QNorm, i1 <|> i2, Nothing, inT1') $ cNestM 1 (fetchLambda outT1) (fetchLambda outT2)
+  (Pi{}, _) → pure EqNot
+  (Refine (RefinePreTy i1 ann1 base1), Refine (RefinePreTy _i2 ann2 base2)) → goDepPair (Just i1) (ann1, base1) (ann2, base2)
+  (Refine (RefinePostTy base1 i1 ann1), Refine (RefinePostTy base2 _i2 ann2)) → goDepPair (Just i1) (base1, ann1) (base2, ann2)
+  (Refine{}, _) → pure EqNot
+  (Concat l1 (FRow r1), Concat l2 (FRow r2)) → goDepPair (Just dotvar) (l1, r1) (l2, r2)
+  (Concat _ (FRow _), _) → pure EqNot
+  where
+  -- `c` with monadic args
+  cM aM bM = c =<< ((,) <$> aM <*> bM)
+  cNestM i aM bM = cNest i =<< ((,) <$> aM <*> bM)
   try act cont =
     act >>= \case
       EqYes → cont
@@ -295,11 +244,24 @@ isEq' tryInst = \l0 r0 → transactContext $ go l0 r0
     act >>= \case
       EqYes → cont
       x → pure x
+  goDepPair i (l1, r1) (l2, r2) =
+    force (cM (fetchT l1) (fetchT l2))
+      $ withBinding (QNorm, i, Nothing, Term $ Builtin Any')
+      $ cNestM 1 (fetchLambda r1) (fetchLambda r2)
 
-isEq ∷ Term → Term → ScopesM EqRes
-isEq a b = isEq' (\_ _ → throwError ErrRollback) a b `catchError` \case
-  ErrRollback → pure EqUnknown
-  e → throwError e
+rollbackNonEq :: ScopesM EqRes → ScopesM EqRes
+rollbackNonEq act = StateC \cont s0 →
+  runState (\s1 res →
+      if res == EqYes
+        then cont s1 res
+        else cont s0 res
+  ) s0 act
+
+isEq ∷ (Term, Term) → ScopesM EqRes
+isEq = rollbackNonEq . fix \rec → bimap unTerm unTerm >>> \case
+  (ExVar{}, _) → pure EqUnknown
+  (_, ExVar{}) → pure EqUnknown
+  x → traverseIsEq rec (\_ (l, r) → rec (unLambda l, unLambda r)) x
 
 -- | Produces a non-dependent concat (of normalized terms)
 concat ∷ Term → Term → Term
@@ -336,52 +298,35 @@ data ListDropRes = TDFound !(Vector' Term) | TDMissing | TDUnknown
 
 tryRewrite ∷ (Int, Rewrite) → Term → ScopesM (Maybe Term)
 tryRewrite (nest, Rewrite forallsCount lfromto0) t = do
-  scopeId ← getScopeId
-  foralls ← sendM @EnvM $ state @Env \e → (e { envFresh = envFresh e + forallsCount }, [envFresh e..envFresh e + forallsCount - 1])
-  let
-    exVars = Just . Term . ExVar . (scopeId,) <$> foralls
-    forallsSet = fromList @IntSet $ toList foralls -- likely much slower than array
-  (resolvedForalls, res) ← withMarked ((`EVar` Right (Term $ Builtin Any')) <$> foralls) do
-    let (lfrom0, lto0) = bimap Lambda Lambda $ unLambda lfromto0
-    let contextualize = fmap (`nestedByP` nest) . lift . runScopes {- optimization -} . normalize' exVars . unLambda
-    from ← contextualize lfrom0
-    let
-      inst' foral with = modify @Scopes \(Scopes bs exs rs) →
-        Scopes
-          bs
-
-          ( adjust'
-              scopeId
-              ( \(Epoch e, entries) →
-                  let (bef, fromMaybe (error "impossible") → target, aft) =
-                        splitAt3
-                          ( fromMaybe (error "Metavariable disappeared")
-                              $ findIndexL
-                                ( \case
-                                    EVar i _ → i == foral
-                                    _ → False
-                                )
-                                entries
-                          )
-                          entries
-                   in case target of
-                        EVar _ (Right (Term (Builtin Any'))) → (Epoch $ e + 1, bef <> [EVar foral $ Left (0, with)] <> aft)
-                        _ → error "Attempted to re-instantiate meta"
-              )
-              exs
-          )
-          rs
-      inst = curry \case
-        ((scopeId2, foral), with) | scopeId2 == scopeId, foral `IS.member` forallsSet → inst' foral with $> True
-        _ → pure False
-    isEq' inst from t >>= \case
-      EqYes → Just <$> contextualize lto0
-      _ → pure Nothing
-  when (isJust res) do
-    for_ resolvedForalls \case
-      EVar _ (Left _) → pure ()
-      _ → error $ "Unresolved while trying to rewrite " <> show t <> " with " <> show lfromto0
-  pure res
+  -- We'll use IORefs here to store variables. Just not to ruin monadic stack.
+  -- Honestly, I don't see an issue with this, although this is *technically* a cutch.
+  -- TODO: Arrays?
+  -- stores instantiated meta-variables, with indices adjusted for the current scope.
+  -- stackError \p → p t
+  params :: Vector (IORef (Maybe Term)) ← for [1..forallsCount] \_ → sendIO $ newIORef Nothing
+  matchesPattern ← (0, (fst $ unLambda lfromto0, t)) & fix \rec → uncurry \locs → \case
+    (Term (Var i), b)
+      | i < locs → -- Locally bound, shared for both
+        pure $ if Term (Var i) == b then EqYes else EqUnknown
+      | i < locs + forallsCount → do -- Rewrite parameter
+        let relI = i - locs -- index of rewrite parameter
+        case nestedBy' 0 b (-locs) of
+          Nothing → pure EqUnknown
+          Just curr → do
+            let param = fromMaybe undefined $ params !? relI
+            sendIO (readIORef param) >>= \case
+              Nothing → sendIO (writeIORef param $ Just curr) $> EqYes
+              Just written → isEq (curr, written)
+    x → traverseIsEq (rec . (locs,)) (\i → rec . (locs+i,) . bimap unLambda unLambda) (bimap unTerm unTerm x)
+  if matchesPattern == EqYes
+    then do
+      -- All these exist in the same, current scope.
+      valsCurrScope ← reverse <$> for params (fmap (fromMaybe (error "Internal error: param unresolved during rewrite")) . sendIO . readIORef)
+      let vals = imap (\i → Just . (`nestedByP` i)) valsCurrScope
+      final ← normalize' vals (nestedByP' forallsCount (snd $ unLambda lfromto0) nest)
+      -- stackLog \p → "Rewrote " <> p t <> " with " <> p final
+      pure $ Just final
+    else pure Nothing
 
 traverseNormTermF ∷ (Vector (Maybe Term) → Term → ScopesM Term) → Vector (Maybe Term) → TermF Term → ScopesM Term
 traverseNormTermF c locals t0 = rewr =<< trav
@@ -479,7 +424,7 @@ traverseNormTermF c locals t0 = rewr =<< trav
         Just (Left val) → pure $ uncurry nestedByP' val $ length locals + (length globals - i) -- no -1 because of ridiculous scope counting
         _ → pure $ Term $ ExVar (i, subi)
     Import (fromMaybe (error "Unresolved import") → n) _ → do
-      Imports imps ← lift askImports
+      Imports imps ← ask
       pure $ maybe (error "Incomplete context") fst $ imps !? n
     _ → Term <$> traverseTermF (c locals) (\n → fmap Lambda . c (locals <> replicate n Nothing) . unLambda) t0
   countErasedLocals = countErased locals
@@ -551,21 +496,9 @@ termQQ =
           (term, _) ← case parse (ParserContext (IsErased False) $ (QNorm,) . fst <$> scope) 0 (pack s) of
             Left e → fail $ "termQQ: Parse error: " ++ show e
             Right t → pure t
-          let normed = either (error . show) id $ snd $ unsafePerformIO $ runApp $ runScopes $ normalize' (Just . snd <$> scope) term
+          let normed = either (error . show) id $ snd $ unsafePerformIO $ runApp $ runScopes (Imports []) $ normalize' (Just . snd <$> scope) term
           ⟦normed⟧
       , quotePat = error "termQQ: No pattern support"
       , quoteType = error "termQQ: No type support"
       , quoteDec = error "termQQ: No declaration support"
       }
-
--- | Print cumulative tryRewrite timing statistics
-printTryRewriteStats ∷ IO ()
-printTryRewriteStats = do
-  totalTime <- readIORef tryRewriteTime
-  totalCalls <- readIORef tryRewriteCalls
-  putStrLn $ "tryRewrite stats:"
-  putStrLn $ "  Total calls: " ++ show totalCalls
-  putStrLn $ "  Total time: " ++ show totalTime ++ " seconds"
-  if totalCalls > 0
-    then putStrLn $ "  Average time per call: " ++ show (totalTime / fromIntegral totalCalls) ++ " seconds"
-    else putStrLn $ "  Average time per call: N/A"

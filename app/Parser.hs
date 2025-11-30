@@ -56,14 +56,14 @@ import Control.Algebra
 import Control.Carrier.Empty.Church (runEmpty)
 import Control.Carrier.Lift (sendIO)
 import Control.Carrier.Reader (ReaderC, runReader)
-import Control.Carrier.State.Church (State, StateC, evalState, execState, get, modify, runState, put)
+import Control.Carrier.State.Church (StateC, evalState, execState, get, modify, runState, put)
 import Control.Carrier.Writer.Church (Writer, WriterC, censor, listen, runWriter, tell)
 import Control.Effect.Empty qualified as E
 import Control.Effect.Reader qualified as R
 import Data.ByteString.Char8 qualified as BS
 import Data.Functor.Classes (Eq1, Ord1)
 import Data.Kind (Type)
-import Data.RRBVector (Vector, findIndexR, splitAt, viewl, zip, (!?), (|>))
+import Data.RRBVector (Vector, findIndexR, splitAt, viewl, (!?), (|>))
 import FlatParse.Stateful (Parser, Pos, Result (..), anyAsciiChar, ask, byteStringOf, char, empty, eof, err, failed, getPos, local, notFollowedBy, posLineCols, runParser, satisfyAscii, skipMany, skipSatisfy, skipSatisfyAscii, skipSome, string, try)
 import FlatParse.Stateful qualified as FP
 import GHC.Exts (IsList (..))
@@ -71,7 +71,7 @@ import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (Lift (..))
 import Language.Haskell.TH.Syntax qualified as TH
 import NameGen qualified as N
-import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, encloseSep, hcat, layoutSmart, line, nest, softline, vsep, (<+>), hsep)
+import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, encloseSep, hcat, layoutSmart, line, nest, softline, (<+>), hsep)
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderIO)
 import RIO hiding (Reader, Vector, ask, local, runReader, toList, try, zip)
 import RIO.HashMap qualified as HM
@@ -711,6 +711,8 @@ parseTop =
 
 -- traversing
 
+-- TODO: Do we need Int? I have a feeling that it's generally not a bad idea to actually, really fuse `App`/`Lam` levels on the compiler level.
+-- That doesn't give a better memory representation, but speeds up certain operations.
 traverseTermF ∷ (Applicative m) ⇒ (a → m b) → (Int → Lambda a → m (Lambda b)) → TermF a → m (TermF b)
 traverseTermF c cNest = \case
   NumLit x → pure $ NumLit x

@@ -1,6 +1,8 @@
-dist-newstyle
-**.fadobj
-.pre-commit-config.yaml
-thinking
-test
+/.pre-commit-config.yaml
+/dist-newstyle
+/thinking
+/test
+
 *.prof
+*.fadobj
+diff

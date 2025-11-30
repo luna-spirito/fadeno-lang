@@ -1,0 +1,6 @@
+unpack fadeno. refl Any Eq
+
+/: Fun {a : Any} {b : Any} (Eq a b) -> Eq b a
+~sym = \@_ @_ aToB. rewrite aToB in refl
+
+in ~sym

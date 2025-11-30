@@ -1,0 +1,17 @@
+unpack fadeno. Eq Any
+
+// TODO: Rewrite with opaques
+/: Any
+boink = 100
+/: Any
+gloink = 200
+/: Any
+doing = 300
+
+/: doing (boink gloink)
+myval = SORRY
+
+/: Fun {x} {y} -> Eq (doing (x y)) (x y)
+myeq = SORRY
+
+in rewrite myeq in myval

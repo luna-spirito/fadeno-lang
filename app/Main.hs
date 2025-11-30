@@ -3,40 +3,36 @@
 
 module Main {-(main, parseFile, formatFile, formatModule, loadModule, compileModule, decompileModule)-} where
 
-import Compiler (compileModule, decompileModule)
+import Compiler (compileModule)
 import Control.Algebra
 import Control.Carrier.Error.Church (ErrorC, runError)
 import Control.Carrier.Fresh.Church (FreshC, evalFresh)
 import Control.Carrier.Reader (ReaderC, runReader)
-import Control.Carrier.State.Church (State, StateC, evalState)
+import Control.Carrier.State.Church (StateC, evalState)
 import Control.Carrier.Writer.Church (WriterC, runWriter)
 import Control.Effect.Error (throwError)
-import Control.Effect.Lift (Lift, sendIO, sendM)
-import Control.Effect.Reader (Reader, ask, local)
-import Control.Effect.State (get, modify, put, state)
-import Control.Effect.Throw (Throw)
-import Control.Effect.Writer (Writer, censor, tell)
+import Control.Effect.Reader (ask, local)
+import Control.Effect.State (get, modify, put)
 import Data.Bitraversable (bimapM)
 import Data.Foldable (foldlM)
 import Data.List (find)
 import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, replicate, splitAt, take, viewl, viewr, zip, (!?), (<|), (|>))
 import GHC.Exts (IsList (..))
 import NameGen
-import Context (Dyn (..), EEntry (..), Epoch (..), Imports (..), Rewrite (..), Scopes (..), dyn, getEpoch, getScopeId, ScopesM, stackLog, stackError, stackScope, fresh, freshIdent, registerOpaque, askImports, getOpaques, AppM, runScopes, Env (..), EnvM, runApp, Err, loadModule, execAppStd)
-import Normalize (EqRes (..), applyLambda, applyLambdaRefineGetSkip, fDyn, fetchLambda, fetchT, isEq', normalize, normalize', numDecDispatch, termQQ, withBinding, withMarked, printTryRewriteStats)
-import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, loadModule', maxOf, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, render, rowOf, splitAt3, traverseTermF, typ, typOf, pattern TApp, pattern TBuiltin, OpaqueId (..), regIdent, nestedByP')
-import Prettyprinter (Doc, annotate, group, indent, line, list, nest, pretty, (<+>))
-import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
+import Context (Dyn (..), EEntry (..), Epoch (..), Imports (..), Rewrite (..), Scopes (..), dyn, getEpoch, getScopeId, ScopesM, stackLog, stackError, stackScope, freshIdent, registerOpaque, AppM, runScopes, loadModule, execAppStd)
+import Normalize (EqRes (..), applyLambda, applyLambdaRefineGetSkip, fDyn, fetchLambda, fetchT, normalize, normalize', numDecDispatch, termQQ, withBinding, withMarked, traverseIsEq)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, maxOf, nested, nestedBy', nestedByP, pIdent, pQuant, pTerm, render, rowOf, splitAt3, traverseTermF, typ, typOf, pattern TApp, pattern TBuiltin, OpaqueId (..), regIdent)
+import Prettyprinter (annotate, group, line, list, pretty, (<+>))
+import Prettyprinter.Render.Terminal (Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, replicate, runReader, take, to, toList, zip)
-import RIO.Time (UTCTime)
 import Ser (serializeCompileResult)
-import System.Directory.OsPath (getModificationTime)
 import System.File.OsPath (writeFile')
-import System.IO (print)
 import System.OsPath (OsPath, encodeUtf, replaceExtension, unsafeEncodeUtf)
 import System.Environment (getArgs)
 import qualified RIO.HashMap as HM
-import Control.Monad (when)
+import Control.Effect.Fresh (fresh)
+import Control.Effect.Writer (tell)
+import Control.Effect.Lift (sendIO)
 
 -- TODO: Permit inference of dependent Pis?
 -- TODO: Concat uncomfortably replicates Pi.
@@ -119,7 +115,7 @@ writeMeta exId0@(scope0, subi0) (valLocals0, valNow0) = do
 scopedUniVar ∷ ((Term → ScopesM Term) → a → ScopesM a) → Term → (Term → ScopesM a) → ScopesM a
 scopedUniVar mapTerm ty act = do
   scope1 ← getScopeId
-  sub1 ← lift fresh
+  sub1 ← fresh
   modify @Scopes \(Scopes bs es rs) → Scopes bs (adjust' scope1 (fmap (<> [EUniVar sub1])) es) rs
   let ensureNotOcc = fix \rec →
         unTerm >>> fmap Term . \case
@@ -172,7 +168,7 @@ scopedExVar mapTerm ty0 act = do
                       )
              in foldr
                   ( \(newBindId, newBindTy0) rec binds → do
-                      n ← lift freshIdent
+                      n ← lift $ lift freshIdent
                       let newBindTy = resolve binds newBindTy0
                       Term . Pi QEra (Just n) newBindTy . Lambda <$> rec (binds |> (newBindId, newBindTy))
                   )
@@ -362,7 +358,7 @@ inferApp ie f0 args0 (em, mode) = case f0 of
       . ([],)
       =<< infer ie f0 Infer
 
-checkDepLam ∷ ∀ sig. IsErased → Quant → Maybe Ident → Lambda Term → Dyn → Lambda Dyn → ScopesM ()
+checkDepLam ∷ IsErased → Quant → Maybe Ident → Lambda Term → Dyn → Lambda Dyn → ScopesM ()
 checkDepLam ie q i bod inT outT = do
   inT' ← fetchT inT
   outT' ← fetchLambda outT
@@ -371,7 +367,7 @@ checkDepLam ie q i bod inT outT = do
     $ Check
     $ unLambda outT'
 
-checkDepPair ∷ ∀ sig. IsErased → ((Quant, Term), (Quant, Term)) → (Dyn, Lambda Dyn) → ScopesM ()
+checkDepPair ∷ IsErased → ((Quant, Term), (Quant, Term)) → (Dyn, Lambda Dyn) → ScopesM ()
 checkDepPair ie ((lQ, l), (rQ, r)) (lT, rT) = do
   infer (restrictEra lQ ie) l . Check =<< fetchT lT
   l' ← normalize l
@@ -408,7 +404,7 @@ rowGet mapTerm tag cont = go -- tag is source term
             (fDyn e → FieldsLit (FRow ()) (Vector' l)) →
               foldr
                 ( \(n, v) rec → do
-                    eqTag ← isEqUnify tag =<< fetchT n
+                    eqTag ← isEqUnify . (tag,) =<< fetchT n
                     case eqTag of
                       EqYes → LookupFound <$> (fetchT v >>= cont)
                       EqUnknown → pure LookupUnknown
@@ -441,7 +437,7 @@ forRightFields fetchTag1 f orig2 =
     ( \fields1' (tag2, ty2) →
         ifoldr
           ( \i (tag, ty) rec →
-              ((,) <$> fetchTag1 tag <*> fetchT tag2) >>= uncurry isEqUnify >>= \case
+              ((,) <$> fetchTag1 tag <*> fetchT tag2) >>= isEqUnify >>= \case
                 EqYes → do
                   f ty ty2
                   pure $ deleteAt i fields1'
@@ -584,7 +580,7 @@ infer ie = logAndRunInfer $ \case
       Just x → stackLog \p → "Opaque type" <+> pIdent name <+> "mentions free variable" <+> p (Term $ Var x) -- TODO: Mention the exact declaration?
       Nothing → pure ()
     -- TODO: support check as well
-    lift $ registerOpaque oid kind
+    lift $ lift $ registerOpaque oid kind
     -- slooooow
     -- let
     --   -- T :⇒ Fun {arg1} {arg2} {...} T
@@ -617,7 +613,7 @@ infer ie = logAndRunInfer $ \case
       (_, Infer) → withRewr rewr $ infer ie inner Infer
       (e, Check ty) → withRewr rewr $ infer ie inner . Check =<< normalize =<< fetchT (Dyn e ty)
   (Import (fromMaybe (error "unresolved import") → n) _, (_, Infer)) → do
-    Imports imps ← lift askImports
+    Imports imps ← ask
     pure $ maybe (error "Incomplete context") snd $ imps !? n
   -- main
   (NumLit x, CheckL (Builtin (Int' d))) →
@@ -658,7 +654,7 @@ infer ie = logAndRunInfer $ \case
       $ (\b → (Term $ TagLit $ identOfBuiltin b, typOfBuiltin mempty b))
       <$> builtinsList
   (Builtin x, (_, Infer)) → do
-    opaques ← lift getOpaques
+    opaques ← get
     pure $ typOfBuiltin opaques x
   (Lam q1 n1 bod, CheckL (Pi q2 n2 inT outT)) | q1 == q2 → checkDepLam ie q1 (n1 <|> n2) bod inT outT
   (term, CheckL (Pi QEra _ xTy yT)) → do
@@ -669,7 +665,7 @@ infer ie = logAndRunInfer $ \case
     scopedExVar id (Term $ Builtin Any') $ dyn >=> \inT → do
       outT ← fetchT inT >>= \inT' → fmap Lambda $ withBinding (QNorm, n, Nothing, inT') $ infer ie (unLambda bod) Infer
       let isDependent = isNothing (nestedBy' 0 (unLambda outT) (-1))
-      n' ← if isDependent then Just <$> maybe (lift freshIdent) pure n else pure Nothing
+      n' ← if isDependent then Just <$> maybe (lift $ lift freshIdent) pure n else pure Nothing
       inT' ← fetchT inT
       pure $ Term $ Pi QNorm n' inT' outT
   (Lam QEra _ _, (_, Infer)) → stackError \_ → "TODO Cannot infer a type of an erased lambda" -- Probably we could, but the idea overall is oxymoron.
@@ -755,7 +751,7 @@ infer ie = logAndRunInfer $ \case
     annT' ← uncurry applyLambda =<< (,) <$> fetchLambda annT <*> normalize (Term t)
     case annT' of
       TBuiltin Eq `TApp` a `TApp` b →
-        isEqUnify a b >>= \case
+        isEqUnify (a, b) >>= \case
           -- TODO: Drop unify?
           EqYes → infer ie (Term t) . Check =<< fetchT baseT
           _ → viaInfer t e c
@@ -806,7 +802,7 @@ typOfBuiltin opaques = \case
 -- TODO: Allow instantiation with erased functions
 
 -- | Instantiate meta to a normalized value
-instMeta ∷ ∀ sig. (Int, Int) → Term → ScopesM ()
+instMeta ∷ (Int, Int) → Term → ScopesM ()
 instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) →
   let
     getOrd (scopeI, subI) = do
@@ -894,8 +890,11 @@ instMeta = (\f a b → stackScope (\_ → "instMeta") $ f a b) \(scope1, sub1) �
               unless ((scope1, sub1) == var2) r
             _ → r
 
-isEqUnify ∷ Term → Term → ScopesM EqRes
-isEqUnify = isEq' (\a b → instMeta a b $> True)
+isEqUnify ∷ (Term, Term) → ScopesM EqRes
+isEqUnify = fix \rec → \case
+  (Term (ExVar i), b) → instMeta i b $> EqYes
+  (a, Term (ExVar i)) → instMeta i a $> EqYes
+  x → traverseIsEq rec (\_i → rec . bimap unLambda unLambda) (bimap unTerm unTerm x)
 
 -- -- TODO: Use isEq.
 
@@ -970,19 +969,19 @@ subtype = \a b →
           (fDyn e → ExVar ex, b) → instMeta ex b
           (a, fDyn e → ExVar ex) → instMeta ex a
           (a, b) →
-            isEqUnify a b >>= \case
+            isEqUnify (a, b) >>= \case
               -- Skippind `dyn`'s here since non-EqYes doesn't update a & b.
               EqYes → pure ()
               _ → do
                 let negA = Term $ Term (Builtin $ IntNeg NumInf) `App` a
                 evaluated ← normalize (TBuiltin IntGte0 `TApp` (TBuiltin (IntAdd NumInf) `TApp` b `TApp` negA))
                 stackLog \p → p evaluated
-                isEqUnify evaluated (Term $ BoolLit True) >>= \case
+                isEqUnify (evaluated, Term $ BoolLit True) >>= \case
                   EqYes → pure ()
                   _ → stackError \p → "Cannot subtype universes with levels:" <+> p a <+> "≤" <+> p b <> line <> "Stuck at:" <+> p evaluated
       (Term (App (fDyn e → Builtin List) a), Term (App (fDyn e → Builtin List) b)) → subtype a b
       (Term (App (fDyn e → Builtin W) a), Term (App (fDyn e → Builtin W) b)) →
-        isEqUnify a b >>= \case
+        isEqUnify (a, b) >>= \case
           EqYes → pure ()
           _ → stackError \p → "Cannot equate wrapped types" <+> p a <+> "and" <+> p b
       (Term (App (fDyn e → Builtin RowPlus) a), Term (App (fDyn e → Builtin RowPlus) b)) → subtype (typOf a) (typOf b)
@@ -1008,7 +1007,7 @@ subtype = \a b →
         branch False el
       -- Catch-all: if no rule matches, check equality
       (t1, t2) →
-        isEqUnify t1 t2 >>= \case
+        isEqUnify (t1, t2) >>= \case
           EqYes → pure ()
           _ → stackError \p → "Subtype check failed, no rule applies for:" <+> p t1 <+> "<:" <+> p t2
 
@@ -1025,36 +1024,22 @@ runChecker' n =
 --   checkSubModule xs x = (xs |>) <$> runSubContext (Imports xs) ((,) <$> normalize x <*> infer x Infer)
 
 checkModule :: Module → AppM Term
-checkModule = \(Module ms) → do
-  for_ ms \m → runScopes do
-    t ← normalize m
-    ty ← infer (IsErased False) m Infer
-    sendM @EnvM $ modify \e@(Env { envImports = Imports is }) → e { envImports = Imports (is |> (t, ty)) }
-  snd <$> sendM @EnvM (state \e@(Env { envImports = Imports is }) → (e { envImports = Imports [] }, maybe (error "module must be non-empty") snd $ viewr is))
-
--- checkModule ∷ (UsedNames, Module) → IO ()
--- checkModule (names, m) = do
---   (stacks, res) ← runStackAccC $ runChecker' names $ checkModule' m
---   render case res of
---     Left e →
---       pStacks stacks
---         <> line
---         <> annotate (color Red) "error: "
---         <> e
---     Right r → pTerm [] r
+checkModule (Module ms) = do
+  imports ← foldlM (\is m → (is |>) <$> runScopes (Imports is) ((,) <$> normalize m <*> infer (IsErased False) m Infer)) [] ms
+  pure $ maybe (error "module must be non-empty") (snd . snd) $ viewr imports
 
 -- Loads, checks, builds
 build' ∷ OsPath → AppM (Vector OsPath)
 build' path' = do
   (m, paths) ← loadModule path'
-  sendM @EnvM . sendM @IO . render . pTerm [] =<< checkModule m
-  sendM @EnvM $ sendM @IO $ writeFile' (path' `replaceExtension` unsafeEncodeUtf ".fadobj")
+  sendIO . render . pTerm [] =<< checkModule m
+  sendIO $ writeFile' (path' `replaceExtension` unsafeEncodeUtf ".fadobj")
     $ serializeCompileResult
     $ compileModule m
   pure paths
 
 build ∷ FilePath → IO ()
-build = (encodeUtf >=> void . execAppStd . build')
+build = encodeUtf >=> void . execAppStd . build'
 
 -- watch ∷ FilePath → IO ()
 -- watch path = do

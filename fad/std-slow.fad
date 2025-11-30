@@ -57,7 +57,6 @@ opaque Opt R. {( .has = Bool )} \./ (if ..has R Unit)
 
 /: Fun {A} -> Opt A
 none = rewrite Opt.@un in ({ .has = false } \/ {})
-
 /: Fun {A} (A) -> Opt A
 some = \val. rewrite Opt.@un in ({ .has = true } \/ val)
 
