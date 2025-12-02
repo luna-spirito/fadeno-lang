@@ -53,7 +53,7 @@ int-clamp>int+ = \x.
 /: Fun {a : Any} {b : Any} (Eq a b) -> Eq b a
 ~sym = \@_ @_ aToB. rewrite aToB in refl
 
-opaque Opt R. {( .has = Bool )} \./ (if ..has R Unit)
+opaque Opt = \R. {( .has = Bool )} \./ (if ..has R Unit)
 
 /: Fun {A} -> Opt A
 none = rewrite Opt.@un in ({ .has = false } \/ {})
@@ -70,11 +70,11 @@ Trait^ = \u. Fun (Type^ u) -> Type^ u
 Trait = Trait^ 0
 
 //// Any implementer of trait
-opaque ImplOf^ u trait. @|T: Type^ u| {( .obj = T | .impl = trait T )}
+opaque ImplOf^ = \u trait. @|T: Type^ u| {( .obj = T | .impl = trait T )}
 
-opaque Iter ElT T. Fun (T) -> Opt {( .curr = ElT | .rest = T)}
+opaque Iter = \ElT T. Fun (T) -> Opt {( .curr = ElT | .rest = T)}
 
-opaque FinIter ElT T.
+opaque FinIter = \ElT T.
   rewrite Opt.@un in
   rewrite Iter.@un in
   @|maxsize : Fun (T) -> Int+|

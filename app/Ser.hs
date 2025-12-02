@@ -149,7 +149,7 @@ putBuiltin = \case
   ListLength → S.putWord8 9
   ListViewL → S.putWord8 10
   Never → S.putWord8 11
-  OpaqueType (OpaqueId _ x) → S.putWord8 12 *> S.putWord64le (fromIntegral x)
+  OpaqueVal (OpaqueId _ x) → S.putWord8 12 *> S.putWord64le (fromIntegral x)
   RecordDropFields → S.putWord8 13
   RecordGet → S.putWord8 14
   RecordKeepFields → S.putWord8 15

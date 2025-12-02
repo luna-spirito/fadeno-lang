@@ -4,23 +4,23 @@
 module Normalize where
 
 import Arithmetic (normalizePoly)
+import Context (Binding, Dyn (..), EEntry (..), Epoch (..), Imports (..), Rewrite (..), Scopes (..), ScopesM, fetchWith, getEpoch, getScopeId, runApp, runScopes, stackError, stackLog)
 import Control.Algebra
+import Control.Carrier.Lift (LiftC (..), runM)
 import Control.Carrier.Reader (runReader)
 import Control.Carrier.State.Church (StateC (..), runState)
+import Control.Effect.Lift (Lift, sendM)
 import Control.Effect.Reader (ask, local)
 import Control.Effect.State (State, get, modify, state)
 import Data.ByteString.Char8 (pack)
-import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, ifoldr, replicate, take, viewl, viewr, zip, (!?), (<|), (|>), imap, fromList)
-import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedByP, nestedByP', parse, recordGet, splitAt3, traverseTermF, pattern TApp, pattern TBuiltin, regIdent, nestedBy')
-import RIO hiding (Reader, Vector, ask, concat, drop, force, link, local, replicate, runReader, take, to, toList, try, zip, catch, reverse)
-import System.IO.Unsafe (unsafePerformIO)
-import Context (ScopesM, Imports (..), Binding, Scopes (..), EEntry (..), Epoch (..), Dyn (..), Rewrite (..), runScopes, runApp, fetchWith, getEpoch, getScopeId, stackLog, stackError)
-import Control.Effect.Lift (Lift, sendM)
-import Prettyprinter ((<+>))
-import Control.Carrier.Lift (runM, LiftC (..))
+import Data.IntMap.Strict qualified as IM
+import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, fromList, ifoldr, imap, replicate, take, viewl, viewr, zip, (!?), (<|), (|>))
 import Data.Tuple (swap)
-import qualified Data.IntMap.Strict as IM
+import Language.Haskell.TH.Quote (QuasiQuoter (..))
+import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedBy', nestedByP, nestedByP', parse, recordGet, regIdent, splitAt3, traverseTermF, pattern TApp, pattern TBuiltin)
+import Prettyprinter ((<+>))
+import RIO hiding (Reader, Vector, ask, catch, concat, drop, force, link, local, replicate, reverse, runReader, take, to, toList, try, zip)
+import System.IO.Unsafe (unsafePerformIO)
 
 -- Crazy thoughts:
 -- 1) Normalizer has pretty simple logic, we could ± easily offload it to Rust.
@@ -36,7 +36,7 @@ import qualified Data.IntMap.Strict as IM
 -- (returns `n ** (Vec n Term -> Term)`)
 appBuiltin ∷ Vector (Maybe Term) → BuiltinT → Vector Term → ScopesM (Maybe Term)
 appBuiltin locals = curry \case
-  ((Any'; Bool; Eq; Int' _; List; Never; OpaqueType{}; PropLteTrans; PropListViewlDec; Refl; RowPlus; Tag; TypePlus; W), _) → pure Nothing
+  ((Any'; Bool; Eq; Int' _; List; Never; OpaqueVal{}; PropLteTrans; PropListViewlDec; Refl; RowPlus; Tag; TypePlus; W), _) → pure Nothing
   (Loop, [i0, f]) | not (isStuck i0) → fmap Just $ normalize' locals $ f `TApp` i0 `TApp` Term (Lam QNorm (Just $ regIdent "i") $ Lambda $ TBuiltin Loop `TApp` Term (Var 0) `TApp` f)
   (If, [Term (BoolLit cond), th, el]) → pure $ Just $ if cond then th else el
   (IntEq, [Term (NumLit a), Term (NumLit b)]) → pure $ Just $ Term $ BoolLit $ a == b
@@ -49,32 +49,36 @@ appBuiltin locals = curry \case
       Term $ FieldsLit (FRecord ()) [(Term $ TagLit (regIdent "left"), left), (Term $ TagLit (regIdent "rest"), Term $ ListLit $ Vector' rest)]
   (RecordDropFields, [Term (ListLit tags), a]) → Just <$> recordDropFields tags a
   (RecordGet, [name1, a]) →
-    Just <$>
-      let
-        search a' = case unconsField a' of
-          Nothing → pure $ recordGet name1 a'
-          Just ((name2, v), rest) → isEq (name1, name2) >>= \case
-            EqYes → pure v
-            EqNot → search rest
-            EqUnknown → pure $ recordGet name1 a'
-        in search a
+    Just
+      <$> let
+            search a' = case unconsField a' of
+              Nothing → pure $ recordGet name1 a'
+              Just ((name2, v), rest) →
+                isEq (name1, name2) >>= \case
+                  EqYes → pure v
+                  EqNot → search rest
+                  EqUnknown → pure $ recordGet name1 a'
+           in
+            search a
   (RecordKeepFields, [Term (ListLit tags), a]) → pure $ Just $ Term $ FieldsLit (FRecord ()) $ (\tag → (tag, recordGet tag a)) <$> tags
   (TagEq, [Term (TagLit a), Term (TagLit b)]) → pure $ Just $ Term $ BoolLit $ a == b
   (WUnwrap, [a]) → pure $ Just a
   (WWrap, [a]) → pure $ Just a
   ((Loop; If; IntEq; IntGte0; ListIndexL; ListLength; ListViewL; RecordDropFields; RecordGet; RecordKeepFields; TagEq; WWrap; WUnwrap), _) → pure Nothing
  where
-  isStuck = unTerm >>> \case
-    (NumLit{}; TagLit{}; BoolLit{}; ListLit{}; FieldsLit{}; Builtin{}; Lam{}; Pi{}; Concat{}) → False
-    (BuiltinsVar{}; App{}; Var{}; Sorry; RefineGet{}; Block{}; AppErased{}; Refine{}; Import{}; ExVar{}; UniVar{}) → True
+  isStuck =
+    unTerm >>> \case
+      (NumLit{}; TagLit{}; BoolLit{}; ListLit{}; FieldsLit{}; Builtin{}; Lam{}; Pi{}; Concat{}) → False
+      (BuiltinsVar{}; App{}; Var{}; Sorry; RefineGet{}; Block{}; AppErased{}; Refine{}; Import{}; ExVar{}; UniVar{}) → True
   -- Drop `x` from ListLit.
   listLitDrop ∷ Term → Vector' Term → ScopesM ListDropRes
   listLitDrop x (Vector' fi) =
     ifoldr
-      ( \i n rec → isEq (x, n) >>= \case
-          EqYes → pure $ TDFound $ Vector' $ deleteAt i fi
-          EqNot → rec
-          EqUnknown → pure $ TDUnknown
+      ( \i n rec →
+          isEq (x, n) >>= \case
+            EqYes → pure $ TDFound $ Vector' $ deleteAt i fi
+            EqNot → rec
+            EqUnknown → pure $ TDUnknown
       )
       (pure TDMissing)
       fi
@@ -87,11 +91,12 @@ appBuiltin locals = curry \case
        in
         case unconsField fields0 of
           Nothing → pure stuck
-          Just ((n, v), fields) → listLitDrop n tags >>= \case
-            TDFound tags' → recordDropFields tags' fields
-            TDMissing →
-              concat (Term $ FieldsLit (FRecord ()) [(n, v)]) <$> recordDropFields tags fields
-            TDUnknown → pure stuck
+          Just ((n, v), fields) →
+            listLitDrop n tags >>= \case
+              TDFound tags' → recordDropFields tags' fields
+              TDMissing →
+                concat (Term $ FieldsLit (FRecord ()) [(n, v)]) <$> recordDropFields tags fields
+              TDUnknown → pure stuck
 
 -- | Intensional equality.
 data EqRes
@@ -100,7 +105,7 @@ data EqRes
   | EqUnknown
   deriving (Eq)
 
-withBinding' ∷ Has (Lift ScopesM) sig m ⇒ Binding → m a → m a
+withBinding' ∷ (Has (Lift ScopesM) sig m) ⇒ Binding → m a → m a
 withBinding' b act = do
   sendM @ScopesM $ modify @Scopes \(Scopes bs es rs) → Scopes (bs |> b) (es |> (Epoch 0, [])) rs
   res ← act
@@ -111,15 +116,16 @@ withBinding' b act = do
       rs
   pure res
 
-withBinding :: Binding → ScopesM a → ScopesM a
+withBinding ∷ Binding → ScopesM a → ScopesM a
 withBinding b act = runM $ withBinding' b (LiftC act)
 
 {- | Executes action in context with some marked EEntry region, returns the transformed EEntry region.
 Basically, needed for EMarker + EVar pattern. Marker is needed to ensure the start is still identifiable.
 TODO: NOT ERROR-SAFE!
 -}
+
 -- Generic since used by both normalizer & rewriter
-withMarked ∷ Has (State Scopes) sig m ⇒ Vector EEntry → m a → m (Vector EEntry, a)
+withMarked ∷ (Has (State Scopes) sig m) ⇒ Vector EEntry → m a → m (Vector EEntry, a)
 withMarked orig act = do
   scopeId ← getScopeId
   modify @Scopes \(Scopes bs es rs) → Scopes bs (adjust' scopeId (fmap (<> (EMarker <| orig))) es) rs
@@ -150,96 +156,98 @@ fetchT = fetchWith normalize
 fetchLambda ∷ Lambda Dyn → ScopesM (Lambda Term)
 fetchLambda = fmap Lambda . fetchWith (normalize' [Nothing]) . unLambda
 
--- | Only normalized & non-ExVar
--- Please look rollbackNonEq
-traverseIsEq :: Has (Lift ScopesM) sig m ⇒ ((Term, Term) → m EqRes) → (Int → (Lambda Term, Lambda Term) → m EqRes) → (TermF Term, TermF Term) → m EqRes
-traverseIsEq c cNest (l0, r0) = sendM @ScopesM getEpoch >>= \e0 → case (fDyn e0 $ Term l0, fDyn e0 $ Term r0) of
-  ((Lam QEra _ _; BuiltinsVar; Block{}; AppErased{}; Refine (RefinePost{}; RefinePre{}); RefineGet _ (_, Nothing); Import{}), _) → undefined
-  (_, (Lam QEra _ _; BuiltinsVar; Block{}; AppErased{}; Refine (RefinePost{}; RefinePre{}); RefineGet _ (_, Nothing); Import{})) → undefined
-  (ExVar{}, _) → pure EqUnknown -- We don't handle those here, explicitly. Up to users.
-  (_, ExVar{}) → pure EqUnknown
-  -- Unknown
-  (Var a, Var b)
-    | a == b → pure EqYes
-  (Var _, _) → pure EqUnknown
-  (_, Var _) → pure EqUnknown
-  (UniVar i1 _, UniVar i2 _)
-    | i1 == i2 → pure EqYes
-  (UniVar{}, _) → pure EqUnknown
-  (_, UniVar{}) → pure EqUnknown
-  (App f1 a1, App f2 a2) →
-    try (cM (fetchT f1) (fetchT f2))
-      $ try (cM (fetchT a1) (fetchT a2))
-      $ pure EqYes
-  (App{}, _) → pure EqUnknown
-  (_, App{}) → pure EqUnknown
-  (Sorry, _) → pure EqUnknown
-  (_, Sorry) → pure EqUnknown
-  (RefineGet e1 (skips1, Just f1), RefineGet e2 (skips2, Just f2)) →
-    pure $ if e1 == e2 && skips1 == skips2 && f1 == f2 then EqYes else EqUnknown
-  (RefineGet{}, _) → pure EqUnknown
-  (_, RefineGet{}) → pure EqUnknown
-  (Concat a1 (FRecord b1), Concat a2 (FRecord b2)) →
-    try (cM (fetchT a1) (fetchT a2))
-      $ try (cM (fetchT b1) (fetchT b2))
-      $ pure EqYes
-  (Concat _ (FRecord _), _) → pure EqUnknown
-  (_, Concat _ (FRecord _)) → pure EqUnknown
-  -- Literals
-  (NumLit a, NumLit b)
-    | a == b → pure EqYes
-  (NumLit _, _) → pure EqNot
-  (TagLit a, TagLit b)
-    | a == b → pure EqYes
-  (TagLit _, _) → pure EqNot
-  (BoolLit a, BoolLit b)
-    | a == b → pure EqYes
-  (BoolLit _, _) → pure EqNot
-  (ListLit (Vector' as), ListLit (Vector' bs)) →
-    if length as /= length bs
-      then pure EqNot
-      else foldr (\(a, b) next → force (cM (fetchT a) (fetchT b)) next) (pure EqYes) (zip as bs)
-  (ListLit _, _) → pure EqNot
-  (FieldsLit f1 (Vector' as0), FieldsLit f2 (Vector' bs0))
-    | f1 == f2 →
-        if length as0 /= length bs0
-          then pure EqNot
-          else
-            foldr
-              ( \(tag1, val1) recO bs →
-                  ifoldr
-                    ( \i (tag2, val2) recI →
-                        cM (fetchT tag1) (fetchT tag2) >>= \case
-                          EqYes → force (cM (fetchT val1) (fetchT val2)) $ recO $ deleteAt i bs
-                          EqNot → recI
-                          EqUnknown → pure EqUnknown
-                    )
-                    (pure EqNot)
-                    bs
-              )
-              (\_ → pure EqYes)
-              as0
-              bs0
-  (FieldsLit{}, _) → pure EqNot
-  (Builtin a, Builtin b)
-    | a == b → pure EqYes
-  (Builtin _, _) → pure EqNot
-  (Lam QNorm i1 bod1, Lam QNorm i2 bod2) →
-    withBinding' (QNorm, i1 <|> i2, Nothing, Term $ Builtin Any')
-      $ cNestM 1 (fetchLambda bod1) (fetchLambda bod2)
-  (Lam QNorm _ _, _) → pure EqNot
-  (Pi q1 i1 inT1 outT1, Pi q2 i2 inT2 outT2)
-    | q1 == q2 →
-        force (cM (fetchT inT1) (fetchT inT2)) do
-          inT1' ← sendM @ScopesM $ fetchT inT1
-          withBinding' (QNorm, i1 <|> i2, Nothing, inT1') $ cNestM 1 (fetchLambda outT1) (fetchLambda outT2)
-  (Pi{}, _) → pure EqNot
-  (Refine (RefinePreTy i1 ann1 base1), Refine (RefinePreTy _i2 ann2 base2)) → goDepPair (Just i1) (ann1, base1) (ann2, base2)
-  (Refine (RefinePostTy base1 i1 ann1), Refine (RefinePostTy base2 _i2 ann2)) → goDepPair (Just i1) (base1, ann1) (base2, ann2)
-  (Refine{}, _) → pure EqNot
-  (Concat l1 (FRow r1), Concat l2 (FRow r2)) → goDepPair (Just dotvar) (l1, r1) (l2, r2)
-  (Concat _ (FRow _), _) → pure EqNot
-  where
+{- | Only normalized & non-ExVar
+Please look rollbackNonEq
+-}
+traverseIsEq ∷ (Has (Lift ScopesM) sig m) ⇒ ((Term, Term) → m EqRes) → (Int → (Lambda Term, Lambda Term) → m EqRes) → (TermF Term, TermF Term) → m EqRes
+traverseIsEq c cNest (l0, r0) =
+  sendM @ScopesM getEpoch >>= \e0 → case (fDyn e0 $ Term l0, fDyn e0 $ Term r0) of
+    ((Lam QEra _ _; BuiltinsVar; Block{}; AppErased{}; Refine (RefinePost{}; RefinePre{}); RefineGet _ (_, Nothing); Import{}), _) → undefined
+    (_, (Lam QEra _ _; BuiltinsVar; Block{}; AppErased{}; Refine (RefinePost{}; RefinePre{}); RefineGet _ (_, Nothing); Import{})) → undefined
+    (ExVar{}, _) → pure EqUnknown -- We don't handle those here, explicitly. Up to users.
+    (_, ExVar{}) → pure EqUnknown
+    -- Unknown
+    (Var a, Var b)
+      | a == b → pure EqYes
+    (Var _, _) → pure EqUnknown
+    (_, Var _) → pure EqUnknown
+    (UniVar i1 _, UniVar i2 _)
+      | i1 == i2 → pure EqYes
+    (UniVar{}, _) → pure EqUnknown
+    (_, UniVar{}) → pure EqUnknown
+    (App f1 a1, App f2 a2) →
+      try (cM (fetchT f1) (fetchT f2))
+        $ try (cM (fetchT a1) (fetchT a2))
+        $ pure EqYes
+    (App{}, _) → pure EqUnknown
+    (_, App{}) → pure EqUnknown
+    (Sorry, _) → pure EqUnknown
+    (_, Sorry) → pure EqUnknown
+    (RefineGet e1 (skips1, Just f1), RefineGet e2 (skips2, Just f2)) →
+      pure $ if e1 == e2 && skips1 == skips2 && f1 == f2 then EqYes else EqUnknown
+    (RefineGet{}, _) → pure EqUnknown
+    (_, RefineGet{}) → pure EqUnknown
+    (Concat a1 (FRecord b1), Concat a2 (FRecord b2)) →
+      try (cM (fetchT a1) (fetchT a2))
+        $ try (cM (fetchT b1) (fetchT b2))
+        $ pure EqYes
+    (Concat _ (FRecord _), _) → pure EqUnknown
+    (_, Concat _ (FRecord _)) → pure EqUnknown
+    -- Literals
+    (NumLit a, NumLit b)
+      | a == b → pure EqYes
+    (NumLit _, _) → pure EqNot
+    (TagLit a, TagLit b)
+      | a == b → pure EqYes
+    (TagLit _, _) → pure EqNot
+    (BoolLit a, BoolLit b)
+      | a == b → pure EqYes
+    (BoolLit _, _) → pure EqNot
+    (ListLit (Vector' as), ListLit (Vector' bs)) →
+      if length as /= length bs
+        then pure EqNot
+        else foldr (\(a, b) next → force (cM (fetchT a) (fetchT b)) next) (pure EqYes) (zip as bs)
+    (ListLit _, _) → pure EqNot
+    (FieldsLit f1 (Vector' as0), FieldsLit f2 (Vector' bs0))
+      | f1 == f2 →
+          if length as0 /= length bs0
+            then pure EqNot
+            else
+              foldr
+                ( \(tag1, val1) recO bs →
+                    ifoldr
+                      ( \i (tag2, val2) recI →
+                          cM (fetchT tag1) (fetchT tag2) >>= \case
+                            EqYes → force (cM (fetchT val1) (fetchT val2)) $ recO $ deleteAt i bs
+                            EqNot → recI
+                            EqUnknown → pure EqUnknown
+                      )
+                      (pure EqNot)
+                      bs
+                )
+                (\_ → pure EqYes)
+                as0
+                bs0
+    (FieldsLit{}, _) → pure EqNot
+    (Builtin a, Builtin b)
+      | a == b → pure EqYes
+    (Builtin _, _) → pure EqNot
+    (Lam QNorm i1 bod1, Lam QNorm i2 bod2) →
+      withBinding' (QNorm, i1 <|> i2, Nothing, Term $ Builtin Any')
+        $ cNestM 1 (fetchLambda bod1) (fetchLambda bod2)
+    (Lam QNorm _ _, _) → pure EqNot
+    (Pi q1 i1 inT1 outT1, Pi q2 i2 inT2 outT2)
+      | q1 == q2 →
+          force (cM (fetchT inT1) (fetchT inT2)) do
+            inT1' ← sendM @ScopesM $ fetchT inT1
+            withBinding' (QNorm, i1 <|> i2, Nothing, inT1') $ cNestM 1 (fetchLambda outT1) (fetchLambda outT2)
+    (Pi{}, _) → pure EqNot
+    (Refine (RefinePreTy i1 ann1 base1), Refine (RefinePreTy _i2 ann2 base2)) → goDepPair (Just i1) (ann1, base1) (ann2, base2)
+    (Refine (RefinePostTy base1 i1 ann1), Refine (RefinePostTy base2 _i2 ann2)) → goDepPair (Just i1) (base1, ann1) (base2, ann2)
+    (Refine{}, _) → pure EqNot
+    (Concat l1 (FRow r1), Concat l2 (FRow r2)) → goDepPair (Just dotvar) (l1, r1) (l2, r2)
+    (Concat _ (FRow _), _) → pure EqNot
+ where
   -- `c` with monadic args
   cM aM bM = c =<< ((,) <$> sendM @ScopesM aM <*> sendM @ScopesM bM)
   cNestM i aM bM = cNest i =<< ((,) <$> sendM @ScopesM aM <*> sendM @ScopesM bM)
@@ -256,19 +264,24 @@ traverseIsEq c cNest (l0, r0) = sendM @ScopesM getEpoch >>= \e0 → case (fDyn e
       $ withBinding' (QNorm, i, Nothing, Term $ Builtin Any')
       $ cNestM 1 (fetchLambda r1) (fetchLambda r2)
 
-rollbackNonEq :: ScopesM EqRes → ScopesM EqRes
+rollbackNonEq ∷ ScopesM EqRes → ScopesM EqRes
 rollbackNonEq act = StateC \cont s0 →
-  runState (\s1 res →
-      if res == EqYes
-        then cont s1 res
-        else cont s0 res
-  ) s0 act
+  runState
+    ( \s1 res →
+        if res == EqYes
+          then cont s1 res
+          else cont s0 res
+    )
+    s0
+    act
 
 isEq ∷ (Term, Term) → ScopesM EqRes
-isEq = rollbackNonEq . runM . fix \rec → bimap unTerm unTerm >>> \case
-  (ExVar{}, _) → pure EqUnknown
-  (_, ExVar{}) → pure EqUnknown
-  x → traverseIsEq rec (\_ (l, r) → rec (unLambda l, unLambda r)) x
+isEq =
+  rollbackNonEq . runM . fix \rec →
+    bimap unTerm unTerm >>> \case
+      (ExVar{}, _) → pure EqUnknown
+      (_, ExVar{}) → pure EqUnknown
+      x → traverseIsEq rec (\_ (l, r) → rec (unLambda l, unLambda r)) x
 
 -- | Produces a non-dependent concat (of normalized terms)
 concat ∷ Term → Term → Term
@@ -311,33 +324,36 @@ tryRewrite (nest, Rewrite forallsCount lfromto0) t = do
   -- stores instantiated meta-variables, with indices adjusted for the current scope.
   -- params :: Vector (IORef (Maybe Term)) ← for ([1..forallsCount] :: Vector Int) \_ → sendIO $ newIORef Nothing
   let
-    inst :: Int → Term → StateC (IntMap Term) (LiftC ScopesM) EqRes
+    inst ∷ Int → Term → StateC (IntMap Term) (LiftC ScopesM) EqRes
     inst relI curr = do
       writtenM ← state @(IntMap Term) $ swap . IM.insertLookupWithKey (\_k _new written → written) relI curr
       case writtenM of
         Nothing → pure EqYes
         Just written → lift (lift $ isEq (curr, written))
-    match :: Int → (Term, Term) → StateC (IntMap Term) (LiftC ScopesM) EqRes
+    match ∷ Int → (Term, Term) → StateC (IntMap Term) (LiftC ScopesM) EqRes
     match locs = \case
       (a0@(Term (Var i)), b)
         | i < locs → -- Locally bound, shared for both
-          pure $ if a0 == b then EqYes else EqUnknown
-        | i < locs + forallsCount → do -- Rewrite parameter
-          let relI = i - locs -- index of rewrite parameter
-          case nestedBy' 0 b (-locs) of
-            Just curr → inst relI curr
-            Nothing → pure EqUnknown
+            pure $ if a0 == b then EqYes else EqUnknown
+        | i < locs + forallsCount → do
+            -- Rewrite parameter
+            let relI = i - locs -- index of rewrite parameter
+            case nestedBy' 0 b (-locs) of
+              Just curr → inst relI curr
+              Nothing → pure EqUnknown
         | otherwise → pure $ if Term (Var $ i - forallsCount + nest) == b then EqYes else EqUnknown
       (a0@(Term (RefineGet i (skips, final))), b)
         | i < locs → pure $ if a0 == b then EqYes else EqUnknown
-        | i < locs + forallsCount → do -- TODO: write tests
-          let relI = i - locs
-          case b of
-            Term (RefineGet i2 (skips2, final2)) | i2 >= locs && skips == skips2 && final == final2 →
-              inst relI $ Term $ Var (i2 - locs)
-            _ → pure EqUnknown
+        | i < locs + forallsCount → do
+            -- TODO: write tests
+            let relI = i - locs
+            case b of
+              Term (RefineGet i2 (skips2, final2))
+                | i2 >= locs && skips == skips2 && final == final2 →
+                    inst relI $ Term $ Var (i2 - locs)
+              _ → pure EqUnknown
         | otherwise → pure $ if Term (RefineGet (i - forallsCount + nest) (skips, final)) == b then EqYes else EqUnknown
-      x → traverseIsEq (match locs) (\i → match (locs+i) . bimap unLambda unLambda) (bimap unTerm unTerm x)
+      x → traverseIsEq (match locs) (\i → match (locs + i) . bimap unLambda unLambda) (bimap unTerm unTerm x)
   (params, matchesPattern) ← runM $ runState @(IntMap Term) (curry pure) mempty $ match 0 (fst $ unLambda lfromto0, t)
   if matchesPattern == EqYes
     then do
@@ -418,14 +434,14 @@ traverseNormTermF c locals t0 = rewr =<< trav
       termX ← travVar oldX
       pure $ Term $ case unTerm termX of
         Var x → RefineGet x (skips1, final1)
-        _ → if oldX < length locals
-          then error "Internal error: cannot substitute into a RefineGet"
-          else RefineGet (oldX - countErasedLocals) (skips1, final1) -- safe, because global bindings aren't erased.
-    Block (BlockLet _q _name _ty val into) → do
+        _ →
+          if oldX < length locals
+            then error "Internal error: cannot substitute into a RefineGet"
+            else RefineGet (oldX - countErasedLocals) (skips1, final1) -- safe, because global bindings aren't erased.
+    Block (BlockLet _name _q _ty val into) → do
       val' ← c locals val
-      c (locals |> Just val') $ unLambda into
+      c (locals |> Just val') $ unLambda into -- Probably nothing bad at inserting anyway when q = QEra?..
     Block (BlockRewrite _prf into) → c locals into
-    Block (BlockOpaque oid _args _body into) → c (locals |> Just (TBuiltin $ OpaqueType oid)) (unLambda into)
     Concat a b → case b of
       FRecord b' → concat <$> c locals a <*> c locals b'
       FRow b' → Term <$> (Concat <$> c locals a <*> (FRow . Lambda <$> c (locals |> Nothing) (unLambda b')))

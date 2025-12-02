@@ -2,11 +2,11 @@ unpack fadeno. Eq Any
 
 // TODO: Rewrite with opaques
 /: Any
-boink = 100
+opaque boink = SORRY
 /: Any
-gloink = 200
+opaque gloink = SORRY
 /: Any
-doing = 300
+opaque doing = SORRY
 
 /: doing (boink gloink)
 myval = SORRY

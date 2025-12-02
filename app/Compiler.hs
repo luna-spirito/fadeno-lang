@@ -18,10 +18,10 @@ import Data.IntSet qualified as IS
 import Data.RRBVector (Vector, drop, ifoldl, imap, replicate, reverse, splitAt, take, viewl, viewr, zip, (<|), (|>))
 import GHC.Exts (IsList (..))
 import NameGen (UsedNames, emptyUsedNames)
-import Parser (BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), nestedByP, splitAt3, traverseTermF, OpaqueId (..), pattern TBuiltin, regIdent)
+import NameGen qualified as N
+import Parser (BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), nestedByP, regIdent, splitAt3, traverseTermF)
 import RIO hiding (Vector, ask, drop, local, replicate, reverse, runReader, take, toList, zip)
 import RIO.HashMap qualified as HM
-import qualified NameGen as N
 
 -- KEEPS Import's
 -- Unfortunately, not a rewrite', since this just erases & is not meant to simplify anything.
@@ -29,10 +29,8 @@ erase ∷ Vector Bool → Term → Term
 erase reals =
   unTerm >>> \case
     Lam QEra _ body → erase (reals |> False) $ unLambda body
-    Block (BlockLet QEra _ _ _ into) → erase (reals |> False) $ unLambda into
+    Block (BlockLet _ QEra _ _ into) → erase (reals |> False) $ unLambda into
     Block (BlockRewrite _ into) → erase reals into
-    Block (BlockOpaque oid@(OpaqueId name _) _args _body into) →
-      Term $ Block $ BlockLet QNorm (Just name) Nothing (TBuiltin $ OpaqueType oid) $ Lambda $ erase (reals |> True) $ unLambda into
     AppErased f _ → erase reals f
     Var x → Term $ Var $ x - foldl' (\erased isReal → if isReal then erased else erased + 1) 0 (drop (length reals - x) reals)
     RefineGet i (_, Nothing) → erase reals $ Term $ Var i
@@ -198,7 +196,7 @@ toTagM = \case
 compile' ∷ (Has Compile sig m) ⇒ Term → m Code
 compile' =
   unTerm >>> \case
-    (Block (BlockLet QEra _ _ _ _; BlockRewrite {}; BlockOpaque {}); ExVar {}; UniVar {}; Lam QEra _ _; AppErased {}; RefineGet {}; Refine (RefinePre {}; RefinePost {}))  → undefined
+    (Block (BlockLet _ QEra _ _ _; BlockRewrite{}); ExVar{}; UniVar{}; Lam QEra _ _; AppErased{}; RefineGet{}; Refine (RefinePre{}; RefinePost{})) → undefined
     NumLit x → pure $ CConst $ VNum $ fromIntegral x
     TagLit tag → CConst . VTag <$> registry tag
     BoolLit x → pure $ CConst $ VBool x
@@ -252,7 +250,7 @@ compile' =
       f'' ← compile' f'
       pure $ fold args' <> f'' <> CGen (instr $ IApp $ fromIntegral $ length args)
     Var x → pure $ CGen $ icopy x
-    Block (BlockLet QNorm _n _ty val body) → do
+    Block (BlockLet _n QNorm _ty val body) → do
       val' ← compile' val
       body' ← compile' $ unLambda body
       pure $ val' <> CGen (instr IPushVar) <> body' <> CGen (instr IPopVar)
@@ -329,7 +327,7 @@ decompileModule ((tags0, tagSets0), instrs00) =
           val ← popStackVal
           n ← regIdent <$> state N.gen
           res ←
-            Term . Block . BlockLet QNorm (Just n) Nothing val . Lambda <$> do
+            Term . Block . BlockLet (Right $ Just n) QNorm Nothing val . Lambda <$> do
               ctx0 ← get @(Vector (Maybe Term))
               put $ ctx0 |> Nothing
               scope <* put ctx0

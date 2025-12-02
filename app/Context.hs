@@ -1,28 +1,29 @@
 {- HLINT ignore "Use const" -}
 module Context where
 
-import RIO hiding (runReader, Vector)
-import Control.Carrier.State.Church (StateC, evalState, modify)
-import Parser (OpaqueId, Term (..), Lambda, Quant, Ident, TermF (..), pTerm, regIdent, Module, loadModule', render)
-import Prettyprinter.Render.Terminal
-import Prettyprinter (Doc, annotate, (<+>), line, group, nest)
-import Data.RRBVector (Vector, viewr, viewl)
-import Control.Effect.State (get, State, state, put)
-import qualified NameGen as N
-import qualified RIO.HashMap as HM
-import System.OsPath (OsPath)
 import Control.Algebra
 import Control.Carrier.Error.Church (ErrorC, runError)
-import Control.Effect.Error
 import Control.Carrier.Fresh.Church (FreshC, runFresh)
 import Control.Carrier.Reader (ReaderC, runReader)
+import Control.Carrier.State.Church (StateC, evalState, modify)
 import Control.Carrier.Writer.Church (WriterC, runWriter)
-import Control.Effect.Writer (censor, tell)
+import Control.Effect.Error
 import Control.Effect.Lift (sendIO)
+import Control.Effect.State (State, get, put, state)
+import Control.Effect.Writer (censor, tell)
+import Data.RRBVector (Vector, viewl, viewr)
+import NameGen qualified as N
+import Parser (Ident, Lambda, Module, OpaqueId, Quant, Term (..), TermF (..), loadModule', pTerm, regIdent, render)
+import Prettyprinter (Doc, annotate, group, line, nest, (<+>))
+import Prettyprinter.Render.Terminal
+import RIO hiding (Vector, runReader)
+import RIO.HashMap qualified as HM
+import System.OsPath (OsPath)
 
--- | (Un)Surprisinlgly, Church State outperformed IORef and mopped floor with it.
--- TODO: We should *probably* get rid of `IO` in `AppM`. It's dead weight for `infer` & `normalize`, although we probably don't
--- have any _noticeable_ performance hits from it.
+{- | (Un)Surprisinlgly, Church State outperformed IORef and mopped floor with it.
+TODO: We should *probably* get rid of `IO` in `AppM`. It's dead weight for `infer` & `normalize`, although we probably don't
+have any _noticeable_ performance hits from it.
+-}
 
 -- Fused effects & `Has Ctx sig m` is great, but
 -- we have serious performance issues. So this is a dumb monomorphic solution.
@@ -54,36 +55,36 @@ data StackEntry = StackEntry !(Doc AnsiStyle) !(Vector StackEntry)
 type AppM = ErrorC (Doc AnsiStyle) (WriterC (Vector StackEntry) (StateC (HashMap OpaqueId Term) (StateC N.UsedNames (FreshC IO))))
 
 -- | Run app gracefully
-runApp :: AppM a → IO (Vector StackEntry, Either (Doc AnsiStyle) a)
+runApp ∷ AppM a → IO (Vector StackEntry, Either (Doc AnsiStyle) a)
 runApp =
-  runFresh (\_ → pure) 0 .
-  evalState N.emptyUsedNames .
-  evalState @(HashMap OpaqueId Term) mempty .
-  runWriter @(Vector StackEntry) (curry pure) .
-  runError @(Doc AnsiStyle) (pure . Left) (pure . Right)
+  runFresh (\_ → pure) 0
+    . evalState N.emptyUsedNames
+    . evalState @(HashMap OpaqueId Term) mempty
+    . runWriter @(Vector StackEntry) (curry pure)
+    . runError @(Doc AnsiStyle) (pure . Left) (pure . Right)
 
 -- | Execute app, report errors to std
-execAppStd :: AppM a → IO (Maybe a)
+execAppStd ∷ AppM a → IO (Maybe a)
 execAppStd act = do
   (logs, r) ← runApp act
   case r of
     Left e → do
-      render $ pStacks logs
+      render
+        $ pStacks logs
         <> line
         <> annotate (color Red) "error: "
         <> e
       pure Nothing
     Right r2 → pure $ Just r2
 
-
 type ScopesM = StateC Scopes (ReaderC Imports AppM)
 
-runScopes :: Imports → ScopesM a → AppM a
+runScopes ∷ Imports → ScopesM a → AppM a
 runScopes i = runReader i . evalState @Scopes (Scopes [] [(Epoch 0, [])] [])
 
 -- funs
 
-loadModule :: OsPath → AppM (Module, Vector OsPath)
+loadModule ∷ OsPath → AppM (Module, Vector OsPath)
 loadModule p = do
   names0 ← get
   (names, a, b) ← either (throwError . ("parser:" <+>)) pure =<< sendIO (loadModule' names0 p)
@@ -93,7 +94,7 @@ loadModule p = do
 freshIdent ∷ AppM Ident
 freshIdent = regIdent <$> state @N.UsedNames N.gen
 
-registerOpaque :: OpaqueId → Term → AppM ()
+registerOpaque ∷ OpaqueId → Term → AppM ()
 registerOpaque i t = modify $ HM.insert i t
 
 -- logging
@@ -115,18 +116,18 @@ stackError ef = do
   stackLog \_ → "<panic!!!11>"
   throwError . ef =<< termLoggerM
 
-stackScope :: ((Term → Doc AnsiStyle) → Doc AnsiStyle) → ScopesM a → ScopesM a
+stackScope ∷ ((Term → Doc AnsiStyle) → Doc AnsiStyle) → ScopesM a → ScopesM a
 stackScope f act = do
   tl ← termLoggerM
   censor (\sublog → [StackEntry (f tl) sublog]) act
 
-getScopeId ∷ Has (State Scopes) sig m ⇒ m Int
+getScopeId ∷ (Has (State Scopes) sig m) ⇒ m Int
 getScopeId = (\(Scopes bs _es _rs) → length bs) <$> get @Scopes
 
-getEpoch ∷ Has (State Scopes) sig m ⇒ m Epoch
+getEpoch ∷ (Has (State Scopes) sig m) ⇒ m Epoch
 getEpoch = maybe (error "Missing ex scope") (fst . snd) . (\(Scopes _ es _) → viewr es) <$> get @Scopes
 
-dyn ∷ Has (State Scopes) sig m ⇒ Term → m Dyn
+dyn ∷ (Has (State Scopes) sig m) ⇒ Term → m Dyn
 dyn x = (`Dyn` x) <$> getEpoch
 
 -- | Unwraps a term that contains existentials
@@ -138,10 +139,11 @@ fetchWith f (Dyn objEpoch x) = do
     else f x
 
 pStacks ∷ Vector StackEntry → Doc AnsiStyle
-pStacks = viewl >>> \case
-  Nothing → mempty
-  Just (x, []) → line <> "└ " <> pStack x
-  Just (x, xs) → line <> "├ " <> pStack x <> pStacks xs
+pStacks =
+  viewl >>> \case
+    Nothing → mempty
+    Just (x, []) → line <> "└ " <> pStack x
+    Just (x, xs) → line <> "├ " <> pStack x <> pStacks xs
 
 pStack ∷ StackEntry → Doc AnsiStyle
 pStack (StackEntry x xs) = group x <> nest 2 (pStacks xs)
