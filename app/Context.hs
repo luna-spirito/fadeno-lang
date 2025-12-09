@@ -8,17 +8,15 @@ import Control.Carrier.Reader (ReaderC, runReader)
 import Control.Carrier.State.Church (StateC, evalState, modify)
 import Control.Carrier.Writer.Church (WriterC, runWriter)
 import Control.Effect.Error
-import Control.Effect.Lift (sendIO)
-import Control.Effect.State (State, get, put, state)
+import Control.Effect.State (State, get, state)
 import Control.Effect.Writer (censor, tell)
 import Data.RRBVector (Vector, viewl, viewr)
 import NameGen qualified as N
-import Parser (Ident, Lambda, Module, OpaqueId, Quant, Term (..), TermF (..), loadModule', pTerm, regIdent, render)
-import Prettyprinter (Doc, annotate, group, line, nest, (<+>))
+import Parser (Ident, Lambda, OpaqueId, Quant, Term (..), TermF (..), pTerm, regIdent, render)
+import Prettyprinter (Doc, annotate, group, line, nest)
 import Prettyprinter.Render.Terminal
 import RIO hiding (Vector, runReader)
 import RIO.HashMap qualified as HM
-import System.OsPath (OsPath)
 
 {- | (Un)Surprisinlgly, Church State outperformed IORef and mopped floor with it.
 TODO: We should *probably* get rid of `IO` in `AppM`. It's dead weight for `infer` & `normalize`, although we probably don't
@@ -83,13 +81,6 @@ runScopes ∷ Imports → ScopesM a → AppM a
 runScopes i = runReader i . evalState @Scopes (Scopes [] [(Epoch 0, [])] [])
 
 -- funs
-
-loadModule ∷ OsPath → AppM (Module, Vector OsPath)
-loadModule p = do
-  names0 ← get
-  (names, a, b) ← either (throwError . ("parser:" <+>)) pure =<< sendIO (loadModule' names0 p)
-  put names
-  pure (a, b)
 
 freshIdent ∷ AppM Ident
 freshIdent = regIdent <$> state @N.UsedNames N.gen

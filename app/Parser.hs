@@ -1017,14 +1017,14 @@ parseFile fres = parseSource fres <=< readFile'
 render ∷ Doc AnsiStyle → IO ()
 render x = renderIO stdout $ layoutSmart defaultLayoutOptions $ x <> line
 
-type LoaderC = StateC (HashMap OsPath Int) (StateC N.UsedNames (StateC (Vector Term) (WriterC (Vector OsPath) (StateC Int (ErrorC (Doc AnsiStyle) IO)))))
+type LoaderC = StateC (HashMap OsPath Int) (StateC N.UsedNames (StateC (Vector Term) (ErrorC (Doc AnsiStyle) (WriterC (Vector OsPath) (StateC Int IO)))))
 newtype Module = Module (Vector Term) -- non-empty
 
 -- TODO: disallow trailing `/` in Import syntax!
 
 -- | Achtung: Uses internal Fresh, so no mix & matching! Better rewrite the signature to be StateC Int IO _.
-loadModule' ∷ N.UsedNames → OsPath → IO (Either (Doc AnsiStyle) (N.UsedNames, Module, Vector OsPath))
-loadModule' names0 = runError (pure . Left) (pure . Right) . evalState @Int 0 . runWriter (\c (a, b) → pure (a, b, c)) . runState (\t u → pure (u, Module t)) [] . execState names0 . evalState mempty . new
+loadModule' ∷ N.UsedNames → OsPath → IO (Vector OsPath, Either (Doc AnsiStyle) (N.UsedNames, Module))
+loadModule' names0 = evalState @Int 0 . runWriter (curry pure) . runError (pure . Left) (pure . Right) . runState (\t u → pure (u, Module t)) [] . execState names0 . evalState mempty . new
  where
   new ∷ OsPath → LoaderC ()
   new path = do

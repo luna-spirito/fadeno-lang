@@ -53,83 +53,90 @@ int-clamp>int+ = \x.
 /: Fun {a : Any} {b : Any} (Eq a b) -> Eq b a
 ~sym = \@_ @_ aToB. rewrite aToB in refl
 
-/: Fun {u} (Row^ u) -> Type^ u
-Opt = \R. {( .has = Bool )} \./ (if ..has R Unit)
+opaque Opt = \R. {( .has = Bool )} \./ (if ..has R Unit)
 
 /: Fun {A} -> Opt A
-none = { .has = false } \/ {}
+mk_none = rewrite Opt.@un in ({ .has = false } \/ {})
 /: Fun {A} (A) -> Opt A
-some = \val. { .has = true } \/ val
+mk_some = \val. rewrite Opt.@un in ({ .has = true } \/ val)
+
 /: Fun {A} (has : Bool) (Fun {_ : Where has} -> A) -> Opt A
-some_if = \has body. { .has = has } \/ if has
+mk_some_if = \has body. rewrite Opt.@un in ({ .has = has } \/ if has
   (\@yes. rewrite yes in body @refl)
-  (\@no. rewrite no in {})
+  (\@no. rewrite no in {}))
 
 /: Fun (j : Int+) -> Type^ (j + 1)
 Trait^ = \u. Fun (Type^ u) -> Type^ u
 Trait = Trait^ 0
 
-// Any implementer of trait
-/: Fun (u : Int+) (Trait^ u) -> Type^ (u + 1)
-ImplOf^ = \u trait. @|T: Type^ u| {( .obj = T | .impl = trait T )}
-ImplOf = ImplOf^ 0
+//// Any implementer of trait
+opaque ImplOf^ = \u trait. @|T: Type^ u| {( .obj = T | .impl = trait T )}
 
-/: Fun {u} (Type^ u) -> Trait^ u
-Iter = \ElT T. Fun (T) -> Opt {( .curr = ElT | .rest = T)}
+opaque Iter = \ElT T. Fun (T) -> Opt {( .curr = ElT | .rest = T)}
 
-/: Fun {u} (Type^ u) -> Trait^ u
-FinIter = \ElT T.
+opaque FinIter = \ElT T.
+  rewrite Opt.@un in
+  rewrite Iter.@un in
   @|maxsize : Fun (T) -> Int+|
-  (
-  rewrite ~sym @4 @4 refl in
-  rewrite ~sym @4 @4 refl in
-  Iter ElT T)
-  @|dec :
-    Fun (curr : T) {r : Where (. curr).has} ->
-    Where (rewrite r in (maxsize (. curr).rest < maxsize curr)) |
+    Iter ElT T
+    @|dec :
+        Fun (curr : T) {r : Where (. curr).has} ->
+        Where (rewrite r in (maxsize (. curr).rest < maxsize curr)) |
 
-///: Fun (to : Int+) -> ImplOf (FinIter (Int+ @|< : Where (. < to)|))
-//iter_< = \to.
-//  @|Int+|
-//  { .obj = 0 @|refl|
-//  | .impl =
-//    @|\curr. int-clamp>int+ (to - curr)|
-//    (\curr. some_if (curr < to) (\@yes. rewrite yes in { .curr = curr | .rest = curr ++ 1 }))
-//    @|\curr @has.
-//      rewrite has
-//      rewrite <=~trans @curr @(curr + 1) @to refl refl
-//      in refl|
-//  }
+Int+< = \to. Int+ @|< : Where (. < to)|
 
-///: Fun {u} {A : Type^ u} (l : List A) -> ImplOf^ u (FinIter A)
-//iter_list = \@_ @A start.
-//  @|List A|
-//  { .obj = start
-//  | .impl =
-//    @|list_length|
-//    (\curr. some_if (list_length curr > 0) (\@yes.
-//      rewrite yes
-//      res = list_viewl curr
-//      in { .curr = res.left | .rest = res.rest }))
-//    @|\curr @has.
-//      rewrite has
-//      rewrite list_viewl~dec curr
-//      in refl|
-//  }
+/: Fun (to : Int+) -> ImplOf^ 0 (FinIter (Int+< to))
+iter_< = \to.
+  rewrite ImplOf^.@un in
+  @|Int+|
+  { .obj = 0 @|refl|
+  | .impl =
+    /: Iter (Int+< to) Int+
+    iter = rewrite Iter.@un in \curr. mk_some_if (curr < to) (\@yes. rewrite yes in { .curr = curr | .rest = curr ++ 1 })
+    rewrite FinIter.@un
+    in
+      @|\curr. int-clamp>int+ (to - curr)|
+      iter
+      @|\curr @has. rewrite has rewrite <=~trans @curr @(curr + 1) @to refl refl in refl|
+  }
 
-//// Loop, at each iteration getting a new element from an iterator.
-///: Fun {u} {A} {O} (ImplOf^ u (FinIter A)) (Fun (A) (O) -> O) (O) -> O
-//loop_iter = \@_ @A @O iter0 f final.
-//  step = iter0.@_.impl in
-//  loop @iter0.@T @step.@maxsize @O iter0.@_.obj (\iterT rec.
-//    next = step iterT
-//    in if next.has
-//      (\@yes. rewrite yes in f next.curr (rewrite step.@dec iterT @refl in rec next.rest @refl))
-//      final
-//  )
+/: Fun {u} {A : Type^ u} (l : List A) -> ImplOf^ u (FinIter A)
+iter_list = \@_ @A start.
+  rewrite ImplOf^.@un in
+  @|List A|
+  { .obj = start
+  | .impl =
+    /: Iter A (List A)
+    iter = rewrite Iter.@un in \curr. mk_some_if (list_length curr > 0)
+      (\@yes.
+        res = list_viewl curr @yes
+        in { .curr = res.left | .rest = res.rest })
+    rewrite FinIter.@un
+    in @|list_length| iter @|\curr @has. rewrite has rewrite list_viewl~dec curr in refl|
+  }
 
-///: Fun {u} (tag : Tag) (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
-//find_case = \@u tag l. loop_iter (iter_list l) 4 5
+// Loop, at each iteration getting a new element from an iterator.
+/: Fun {u} {A} {O} (ImplOf^ u (FinIter A)) (Fun (A) (O) -> O) (O) -> O
+loop_iter = \@_ @A @O iter0 f final.
+  rewrite ImplOf^.@un
+  step = iter0.@_.impl
+  rewrite FinIter.@un
+  in loop @iter0.@T @step.@maxsize @O iter0.@_.obj (\iterT rec.
+    rewrite Iter.@un
+    next = step iterT
+    rewrite Opt.@un
+    in if next.has
+      (\@yes. rewrite yes in f next.curr (rewrite step.@dec iterT @refl in rec next.rest @refl))
+      final
+  )
+
+/: Fun {u : Int+} (tag : Tag) (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
+find_case = \@u tag l. loop_iter @u (iter_list l) 4 5
+    // crashes, because it instantiates iter_list's {A : Type^ u} to the existential {A : Any}.
+    // ... which is actually kinds surprising since I expected `iter_list l` to type... UH OH...
+    // I have a bad feeling that we're hurrying too much with checking the types for existentials. This should probably be done as we unscope.
+    // EDIT: no. "Meta-variable refinement". in `infer`, if `(ExVar : A) : B`, we first check `A <: B`, and, if that fails,
+    // create a new existential ExVar B and try unify `ExVar A` to it. Shortcut: just restrict type in-place.
 
 ///: Fun {u} (tag : Tag) (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
 //find-case = \@u tag l. int+_unfold @(Row^ u)

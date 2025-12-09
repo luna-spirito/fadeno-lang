@@ -5,7 +5,7 @@
 module Main {-(main, parseFile, formatFile, formatModule, loadModule, compileModule, decompileModule)-} where
 
 import Compiler (compileModule)
-import Context (AppM, Dyn (..), EEntry (..), Epoch (..), Imports (..), Rewrite (..), Scopes (..), ScopesM, dyn, execAppStd, freshIdent, getEpoch, getScopeId, loadModule, registerOpaque, runScopes, stackError, stackLog, stackScope)
+import Context (AppM, Dyn (..), EEntry (..), Epoch (..), Imports (..), Rewrite (..), Scopes (..), ScopesM, dyn, execAppStd, freshIdent, getEpoch, getScopeId, registerOpaque, runScopes, stackError, stackLog, stackScope)
 import Control.Algebra
 import Control.Carrier.Error.Church (ErrorC, runError)
 import Control.Carrier.Fresh.Church (FreshC, evalFresh)
@@ -24,9 +24,8 @@ import Data.Foldable (foldlM)
 import Data.List (find)
 import Data.RRBVector (Vector, adjust, adjust', deleteAt, findIndexL, ifoldr, replicate, splitAt, take, viewl, viewr, zip, (!?), (<|), (|>))
 import GHC.Exts (IsList (..))
-import NameGen
 import Normalize (EqRes (..), applyLambda, applyLambdaRefineGetSkip, fDyn, fetchLambda, fetchT, normalize, normalize', numDecDispatch, termQQ, traverseIsEq, withBinding, withMarked)
-import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), OpaqueId (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, maxOf, nested, nestedBy', nestedByP, pIdent, pOpaqueId, pQuant, pTerm, regIdent, render, rowOf, splitAt3, traverseTermF, typ, typOf, pattern TApp, pattern TBuiltin)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), OpaqueId (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, maxOf, nested, nestedBy', nestedByP, pIdent, pOpaqueId, pQuant, pTerm, regIdent, render, rowOf, splitAt3, traverseTermF, typ, typOf, pattern TApp, pattern TBuiltin, loadModule')
 import Prettyprinter (annotate, group, line, list, pretty, (<+>))
 import Prettyprinter.Render.Terminal (Color (..), color)
 import RIO hiding (Reader, Vector, ask, concat, drop, filter, link, local, replicate, runReader, take, to, toList, zip)
@@ -35,6 +34,9 @@ import Ser (serializeCompileResult)
 import System.Environment (getArgs)
 import System.File.OsPath (writeFile')
 import System.OsPath (OsPath, encodeUtf, replaceExtension, unsafeEncodeUtf)
+import Data.Time (UTCTime)
+import System.Directory.OsPath (getModificationTime)
+import qualified NameGen as N
 
 -- TODO: Permit inference of dependent Pis?
 -- TODO: Concat uncomfortably replicates Pi.
@@ -1003,7 +1005,7 @@ subtype = \a b →
           EqYes → pure ()
           _ → stackError \p → "Subtype check failed, no rule applies for:" <+> p t1 <+> "<:" <+> p t2
 
-runChecker' ∷ (Applicative m) ⇒ UsedNames → StateC (HashMap OpaqueId Term) (StateC UsedNames (FreshC (ErrorC e m))) a → m (Either e a)
+runChecker' ∷ (Applicative m) ⇒ N.UsedNames → StateC (HashMap OpaqueId Term) (StateC N.UsedNames (FreshC (ErrorC e m))) a → m (Either e a)
 runChecker' n =
   runError (pure . Left) (pure . Right)
     . evalFresh 0
@@ -1021,54 +1023,44 @@ checkModule (Module ms) = do
   pure $ maybe (error "module must be non-empty") (snd . snd) $ viewr imports
 
 -- Loads, checks, builds
-build' ∷ OsPath → AppM (Vector OsPath)
+build' ∷ OsPath → IO (Vector OsPath)
 build' path' = do
-  (m, paths) ← loadModule path'
-  sendIO . render . pTerm [] =<< checkModule m
-  sendIO
-    $ writeFile' (path' `replaceExtension` unsafeEncodeUtf ".fadobj")
-    $ serializeCompileResult
-    $ compileModule m
-  pure paths
+  (paths, m) ← loadModule' N.emptyUsedNames path'
+  paths <$ execAppStd do
+    (names, m') ← either (throwError . ("parser:" <>)) pure m
+    put names
+    sendIO . render . pTerm [] =<< checkModule m'
+    sendIO
+      $ writeFile' (path' `replaceExtension` unsafeEncodeUtf ".fadobj")
+      $ serializeCompileResult
+      $ compileModule m'
+    pure paths
 
 build ∷ FilePath → IO ()
-build = encodeUtf >=> void . execAppStd . build'
+build = encodeUtf >=> void . build'
 
--- watch ∷ FilePath → IO ()
--- watch path = do
---   path' ← encodeUtf path
---   let
---     getModTimes files = do
---       tms ← for files \p → getModificationTime (p <> unsafeEncodeUtf ".fad")
---       pure $ zip files tms
---     rebuild = do
---       render $ annotate (color Yellow) "Rebuilding..."
---       res ← tryAny (build' path')
---       case res of
---         Left e → print e *> getModTimes [path'] -- horrible
---         Right paths → getModTimes paths -- TODO: fragile & doesn't work. Just stop throwing errors.
---     loop ∷ Vector (OsPath, UTCTime) → IO never
---     loop oldTimes = do
---       threadDelay 50000 -- 0.05s
---       newTimes ← getModTimes $ fst <$> oldTimes
---       if oldTimes /= newTimes
---         then rebuild >>= loop
---         else loop oldTimes
---   render $ annotate (color Yellow) $ "Watching " <> pretty path
---   rebuild >>= loop
-
--- checkModuleDebug ∷ (UsedNames, Module) → IO ()
--- checkModuleDebug (names, m) = do
---   res ← runStackPrintC $ runChecker' names $ checkModule' m
---   render case res of
---     Left e → annotate (color Red) "error: " <> e
---     Right r → pTerm [] r
+watch ∷ FilePath → IO ()
+watch path = do
+  path' ← encodeUtf path
+  let
+    getModTimes files = do
+      tms ← for files \p → getModificationTime (p <> unsafeEncodeUtf ".fad")
+      pure $ zip files tms
+    rebuild = do
+      render $ annotate (color Yellow) "Rebuilding..."
+      build' path' >>= getModTimes
+    loop ∷ Vector (OsPath, UTCTime) → IO never
+    loop oldTimes = do
+      threadDelay 50000 -- 0.05s
+      newTimes ← getModTimes $ fst <$> oldTimes
+      if oldTimes /= newTimes
+        then rebuild >>= loop
+        else loop oldTimes
+  render $ annotate (color Yellow) $ "Watching " <> pretty path
+  rebuild >>= loop
 
 main ∷ IO ()
 main = do
   getArgs >>= \case
-    [] → render (annotate (color Red) "Usage: fadeno <file>")
-    (arg : _) → void $ build arg
-
--- when res $ printTryRewriteStats
--- main = build "fad/std-slow"
+    [arg] → void $ build arg
+    _ → render (annotate (color Red) "Usage: fadeno <file>")
