@@ -24,4 +24,4 @@ in
     myval
 
 // Expected result: rewrite `myeq` is provided to the type of `myval` after `{x}` and `{y}` are automatically inferred.
-// Final type: `boink glonk` (/test/golden/eq-autorewr.golden)
+// Final type: `boink glonk` (/test/golden/test/eq-autorewr.golden)

@@ -1,9 +1,9 @@
 module Main where
 
 import Data.ByteString.Lazy (ByteString)
-import Data.List (sort)
-import Prelude (IO, filter, map, return, (.), ($), (<$>), (==))
-import System.Directory (listDirectory)
+import Data.List (concat, sort)
+import Prelude (FilePath, IO, filter, fmap, map, mapM, return, (.), ($), (<$>), (==))
+import System.Directory (doesDirectoryExist, listDirectory)
 import System.FilePath
 import System.OsPath (unsafeEncodeUtf)
 import Test.Tasty (TestTree, defaultMain, testGroup)
@@ -12,27 +12,44 @@ import Test.Tasty.HUnit (testCase)
 import Driver (testBuild)
 
 fadSourceDir :: FilePath
-fadSourceDir = "fad/test"
+fadSourceDir = "fad"
 
 goldenDir :: FilePath
 goldenDir = "test/golden"
 
+-- Recursively find all .fad files in a directory
+findFadFiles :: FilePath -> IO [FilePath]
+findFadFiles dir = do
+  entries <- listDirectory dir
+  fmap concat $ mapM (processEntry dir) entries
+  where
+    processEntry :: FilePath -> FilePath -> IO [FilePath]
+    processEntry base entry = do
+      let fullPath = base </> entry
+      isDir <- doesDirectoryExist fullPath
+      if isDir
+        then findFadFiles fullPath
+        else if takeExtension entry == ".fad"
+          then return [fullPath]
+          else return []
+
 mkGoldenTests :: IO TestTree
 mkGoldenTests = do
-  files <- sort . filter ((== ".fad") . takeExtension) <$> listDirectory fadSourceDir
+  files <- sort <$> findFadFiles fadSourceDir
   return $ testGroup "golden build" $ map mkGoldenTest files
 
 mkGoldenTest :: FilePath -> TestTree
-mkGoldenTest fadFile =
+mkGoldenTest fadFilePath =
   goldenVsString
     testName
     goldenPath
     action
   where
-    testName = dropExtension fadFile
-    goldenPath = goldenDir </> replaceExtension fadFile ".golden"
+    testName = makeRelative fadSourceDir (dropExtension fadFilePath)
+    -- Golden file path mirrors the source structure
+    goldenPath = goldenDir </> makeRelative fadSourceDir (replaceExtension fadFilePath ".golden")
     action :: IO ByteString
-    action = testBuild (unsafeEncodeUtf $ fadSourceDir </> dropExtension fadFile)
+    action = testBuild (unsafeEncodeUtf $ dropExtension fadFilePath)
 
 smokeTest :: TestTree
 smokeTest = testCase "fadeno-lang runs" $ return ()

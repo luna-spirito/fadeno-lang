@@ -1,0 +1,78 @@
+// Comments
+
+// Unpacks Int, Type^, List, if... from built-in "fadeno" library into current context
+unpack fadeno. Int Type^ List if Eq refl Bool
+
+// Constants
+x = true
+
+// Assigning lambda to constant
+add =
+  // Lamba of arguments "a" and "b"
+  \a b.
+  // Call to the builtin function `fadeno.int_add`, savin the result to constant `result`
+  result = fadeno.int_add a b
+  in result
+
+// Type annotations for constants, checked
+// If no annotation is provided, it's infered automatically
+/: Int
+y = 4
+
+// Type of functions is `Fun (A) (B) (C) -> Z`
+
+// Function of two Int's that returns Int.
+/: Fun (Int) (Int) -> Int
+constf = \arg1 arg2.
+  arg2 // returns the second argument passed
+
+// Lists
+/: List Int
+list = [1 | 3 | 5 | 4 | -1]
+
+// Records and row types
+/: {( .field1 = Int | .field2 = Fun (Int) (Int) -> Int | .zer = List Int )}
+record =
+  { .field1 = 4
+  | .field2 = constf
+  | .zer = [ 1 | 3 ]
+  }
+
+// Accesing fields of records
+accessedField1 = record.field1
+
+// Type aliases
+/: Type^ 0
+MyRecord = {( .a = List Int )}
+
+/: MyRecord
+my_record = { .a = [] }
+
+// Type universes
+/: Type^ 1
+Type = Type^ 0
+/: Type^ 2
+Kind = Type^ 1
+
+// Polymorphism
+/: Fun {A} (A) -> A
+id = \@A x.
+  x
+
+// Theorem proving capabilities
+/: Fun {a} {b} {c} (Eq a b) (Eq b c) -> Eq a c
+proof = \ab bc.
+  rewrite ab
+  in bc
+
+// Dependent types
+/: Fun (x : Bool) -> if x (Int) (List (List Int))
+cond = \x.
+  if x
+  (\@x_is_true. rewrite x_is_true in 3)
+  (\@x_is_false. rewrite x_is_false in [[3]])
+
+// Importing other files
+other_file = ./test/myif
+
+in {}

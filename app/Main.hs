@@ -1,3 +1,3 @@
-module Main (main) where
+module Main (main, watch) where
 
-import Driver (main)
+import Driver (main, watch)

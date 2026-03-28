@@ -1,0 +1,1 @@
+Fun (u : fadeno.Int @|>=0 : fadeno.Eq (fadeno.int_>=0 .) true|) (Fun (fadeno.Type^ u) -> fadeno.Type^ u) -> fadeno.Type^ (fadeno.int_add u 1)
