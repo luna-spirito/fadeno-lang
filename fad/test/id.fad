@@ -1,3 +1,5 @@
+// Regression test for inference of polymorphic functions
+
 unpack fadeno. Type^ Int
 
 /: Fun {T} (T) -> T
@@ -8,5 +10,7 @@ useful = @|Int| 4
 
 in
   { .idid = id id
+  // ^ Expected `: Fun {A} (A) -> A`
   | .iduseful = id @(@|T : Type^ 0| T) useful
+  // ^ Expected `: Fun @|T : fadeno.Type^ 0|
   }

@@ -36,7 +36,7 @@ data Rewrite = Rewrite !Int !(Lambda (Term, Term)) deriving (Eq, Show) -- (foral
 
 data EEntry
   = EMarker
-  | EVar !Int !(Either (Int, Term) Term) -- ExVarId, valty
+  | EVar !Int !(Either (Int, Term) Term) -- ExVarId, ((locs, value) | type)
   | EUniVar !Int
   | ERewrite !Rewrite
   deriving (Eq, Show)
@@ -116,7 +116,7 @@ getScopeId ∷ (Has (State Scopes) sig m) ⇒ m Int
 getScopeId = (\(Scopes bs _es _rs) → length bs) <$> get @Scopes
 
 getEpoch ∷ (Has (State Scopes) sig m) ⇒ m Epoch
-getEpoch = maybe (error "Missing ex scope") (fst . snd) . (\(Scopes _ es _) → viewr es) <$> get @Scopes
+getEpoch = maybe (error "Internal error: Missing ex scope") (fst . snd) . (\(Scopes _ es _) → viewr es) <$> get @Scopes
 
 dyn ∷ (Has (State Scopes) sig m) ⇒ Term → m Dyn
 dyn x = (`Dyn` x) <$> getEpoch

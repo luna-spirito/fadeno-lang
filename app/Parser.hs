@@ -775,7 +775,7 @@ nestedBy' locs0 t00 by =
       t00
 
 nestedByP' ∷ Int → Term → Int → Term
-nestedByP' locs t by = fromMaybe (error "Expected positive nesting") $ nestedBy' locs t by
+nestedByP' locs t by = fromMaybe (error "Internal error: Expected positive nesting") $ nestedBy' locs t by
 
 nestedByP ∷ Term → Int → Term
 nestedByP = nestedByP' 0

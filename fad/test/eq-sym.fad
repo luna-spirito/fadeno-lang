@@ -1,3 +1,5 @@
+// Proof that `a = b` <=> `b = a
+
 unpack fadeno. refl Any Eq
 
 /: Fun {a : Any} {b : Any} (Eq a b) -> Eq b a

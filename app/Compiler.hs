@@ -162,7 +162,7 @@ icopy varDepth0 = do
               then if varDepth == 0 then slotI else rec (varDepth - 1)
               else rec varDepth
         )
-        (\_ → error "Variable not found")
+        (\_ → error "Internal error: Variable not found")
         vars
         varDepth0
   instr $ ICopy $ fromIntegral $ length vars - slotI' - 1
@@ -256,7 +256,7 @@ compile' =
       pure $ val' <> CGen (instr IPushVar) <> body' <> CGen (instr IPopVar)
     Refine (RefinePostTy{}) → pure $ CConst VPanic -- TODO
     Refine (RefinePreTy{}) → pure $ CConst VPanic -- TODO
-    Import (fromMaybe (error "unresolved import") → n) _ → pure $ CConst $ VImport $ fromIntegral n
+    Import (fromMaybe (error "Internal error: unresolved import") → n) _ → pure $ CConst $ VImport $ fromIntegral n
     Sorry → pure $ CConst VPanic
     Pi{} → pure $ CConst VPanic -- TODO
     Concat{} → pure $ CConst VPanic -- TODO

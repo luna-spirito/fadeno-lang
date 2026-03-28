@@ -1,0 +1,1 @@
+Fun (fadeno.Int) -> fadeno.Int @|>=0 : fadeno.Eq (fadeno.int_>=0 .) true|

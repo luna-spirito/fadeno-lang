@@ -1,0 +1,1 @@
+{(.idid = Fun {a : fadeno.Any} (a) -> a | .iduseful = @|T : fadeno.Type^ 0| T)}

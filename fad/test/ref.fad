@@ -1,3 +1,5 @@
+// Test for erased refinement types
+
 unpack fadeno. Any Int Eq refl int_>=0 Type^
 
 Where = \x. Eq x true

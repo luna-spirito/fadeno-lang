@@ -1,3 +1,5 @@
+// Test for dependent `if`
+
 unpack fadeno. if Int int_>=0 Eq refl
 
 Int+ = Int @|>=0 : Eq (int_>=0 .) true|

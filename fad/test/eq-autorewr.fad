@@ -1,6 +1,9 @@
+// Tests for automatic inference of parameters for rewrites.
+// We construct parametric rewrite `myeq` and verify that parameters `{x}`, `{y}` get inferred
+// automatically.
+
 unpack fadeno. Eq Any
 
-// TODO: Rewrite with opaques
 /: Any
 opaque boink = SORRY
 /: Any
@@ -11,7 +14,14 @@ opaque doing = SORRY
 /: doing (boink gloink)
 myval = SORRY
 
+// Parametric rewrite with implicit arguments `{x}` and `{y}`
 /: Fun {x} {y} -> Eq (doing (x y)) (x y)
 myeq = SORRY
 
-in rewrite myeq in myval
+in
+  // Begin scoped rewrite without providing explicit `{x}` and `{y}
+  rewrite myeq in
+    myval
+
+// Expected result: rewrite `myeq` is provided to the type of `myval` after `{x}` and `{y}` are automatically inferred.
+// Final type: `boink glonk` (/test/golden/eq-autorewr.golden)

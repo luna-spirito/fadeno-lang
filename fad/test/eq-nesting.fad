@@ -1,3 +1,5 @@
+// Regression test for De-bruijn indexes
+
 unpack fadeno. Eq refl
 
 /: Fun {A} {B} (a : A) (Eq a true) (B) -> Eq a true

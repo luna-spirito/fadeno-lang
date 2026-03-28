@@ -1,0 +1,1 @@
+Fun {A : fadeno.Any} (cond : fadeno.Bool) (Fun {fadeno.Eq cond true} -> A) (Fun {fadeno.Eq cond false} -> A) -> A

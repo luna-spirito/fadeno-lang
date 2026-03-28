@@ -50,7 +50,7 @@ use = \i s → fromMaybe s $ go Nothing Nothing (Just s) (B.unpack i)
       , allowed aM bM x →
           let
             (UsedNames old) = fromMaybe emptyUsedNames oldM
-            (innerCnt0, inner0) = fromMaybe (error "impossible") $ old !? letterI
+            (innerCnt0, inner0) = fromMaybe (error "Internal error: impossible") $ old !? letterI
            in
             (\inner → UsedNames $ adjust' letterI (\_ → (innerCnt0 + 1, Just inner)) old) <$> go bM (Just x) inner0 xs
     _ → Nothing

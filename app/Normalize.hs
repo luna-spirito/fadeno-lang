@@ -111,8 +111,8 @@ withBinding' b act = do
   res ← act
   sendM @ScopesM $ modify @Scopes \(Scopes bs es rs) →
     Scopes
-      (maybe (error "Missing binding") fst $ viewr bs)
-      (maybe (error "Missing ex scope") fst $ viewr es)
+      (maybe (error "Internal error: Missing binding") fst $ viewr bs)
+      (maybe (error "Internal error: Missing ex scope") fst $ viewr es)
       rs
   pure res
 
@@ -132,14 +132,14 @@ withMarked orig act = do
   res ← act
   transformed ← state @Scopes \(Scopes bs exs rs) →
     let
-      (exsB, (scopeE, scope)) = fromMaybe (error "Missing ex scope") $ viewr exs
+      (exsB, (scopeE, scope)) = fromMaybe (error "Internal error: Missing ex scope") $ viewr exs
       (scope', transformed) =
         fix
           ( \rec →
               viewr >>> \case
                 Just (rest, EMarker) → (rest, [])
                 Just (rest, entry) → (|> entry) <$> rec rest
-                Nothing → error "Marker disappeared"
+                Nothing → error "Internal error: Marker disappeared"
           )
           scope
      in
@@ -366,6 +366,24 @@ tryRewrite (nest, Rewrite forallsCount lfromto0) t = do
       pure $ Just final
     else pure Nothing
 
+findEVarIndexScope :: Int → Vector EEntry → Maybe Int
+findEVarIndexScope subid scope = do
+  i ←
+    findIndexL
+      ( \case
+          EVar subid2 _ → subid == subid2
+          _ → False
+      )
+      scope
+  pure i
+
+findEVar :: (Int, Int) → Scopes → Maybe (Int, Either (Int, Term) Term)
+findEVar (scopeid, subid) (Scopes _ exs _) = do
+  (_, scope) ← exs !? scopeid
+  i ← findEVarIndexScope subid scope
+  EVar _ valty ← scope !? i
+  pure (i, valty)
+
 traverseNormTermF ∷ (Vector (Maybe Term) → Term → ScopesM Term) → Vector (Maybe Term) → TermF Term → ScopesM Term
 traverseNormTermF c locals t0 = rewr =<< trav
  where
@@ -446,20 +464,11 @@ traverseNormTermF c locals t0 = rewr =<< trav
       FRecord b' → concat <$> c locals a <*> c locals b'
       FRow b' → Term <$> (Concat <$> c locals a <*> (FRow . Lambda <$> c (locals |> Nothing) (unLambda b')))
     ExVar (i, subi) → do
-      Scopes globals exs _ ← get @Scopes
-      let valtyM = do
-            (_, scope) ← exs !? i
-            ind ←
-              findIndexL
-                ( \case
-                    EVar subi2 _ → subi == subi2
-                    _ → False
-                )
-                scope
-            EVar _ valty0 ← scope !? ind
-            pure valty0
+      valtyM ← findEVar (i, subi) <$> get
       case valtyM of
-        Just (Left val) → pure $ uncurry nestedByP' val $ length locals + (length globals - i) -- no -1 because of ridiculous scope counting
+        Just (_, Left val) → do
+          Scopes globals _ _ ← get
+          pure $ uncurry nestedByP' val $ length locals + (length globals - i) -- no -1 because of ridiculous scope counting
         _ → pure $ Term $ ExVar (i, subi)
     Import (fromMaybe (error "Unresolved import") → n) _ → do
       Imports imps ← ask

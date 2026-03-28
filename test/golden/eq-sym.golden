@@ -1,0 +1,1 @@
+Fun {a : fadeno.Any} {b : fadeno.Any} (fadeno.Eq a b) -> fadeno.Eq b a

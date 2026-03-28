@@ -1,7 +1,6 @@
 /.pre-commit-config.yaml
 /dist-newstyle
 /thinking
-/test
 
 *.prof
 *.fadobj

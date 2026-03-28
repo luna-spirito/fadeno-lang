@@ -1,3 +1,5 @@
+// Test for dependent row concatenation, dependent `if`
+
 unpack fadeno. Bool Int if Eq
 
 Opt = \T. {( .has = Bool )} \./ if ..has {( .val = T )} {()}

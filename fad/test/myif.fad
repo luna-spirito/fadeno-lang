@@ -1,3 +1,5 @@
+// Test for `if` function being first-class
+
 unpack fadeno. if Any Bool Eq
 
 /: Fun {A} (cond : Bool) (Fun {_ : Eq cond true} -> A) (Fun {_ : Eq cond false} -> A) -> A

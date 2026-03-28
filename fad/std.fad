@@ -1,19 +1,21 @@
+// WIP standard library
+
+// Import builtins
 unpack fadeno. Type^ Int Tag List Bool Eq refl Row^ list_length list_indexl list_viewl
-if W int_>=0 loop Never Any int_neg tag_== <=~trans list_viewl~dec W w_wrap w_unwrap
+  if W int_>=0 loop Never Any int_neg tag_== <=~trans list_viewl~dec W w_wrap w_unwrap
 
 /: Fun (Int) (Int) -> Int
 _+_ = fadeno.int_add
 _-_ = \a b. a + (int_neg b)
 
-// A function that returns its argument
-/: Fun (Int) -> Int
-id = \x. x
-
+// Comparison operators derived from int_>=0 function.
 /: Fun (Int) (Int) -> Bool
 _>=_ = \a b. int_>=0 (a - b)
 _>_ = \a b. a >= (b + 1)
 _<=_ = \a b. b >= a
 _<_ = \a b. b > a
+
+// Convenience aliases for universe levels
 
 Kind = Type^ 1
 /: Kind
@@ -21,59 +23,78 @@ Type = Type^ 0
 /: Kind
 Row = Row^ 0
 
+// Polymorphic identity function
 /: Fun {A} (A) -> A
 id = \x. x
 
+// Definition of an operator. Accepts `a` as left operand and `b` as right operand, returns a record `{ .k = a | .v = b }`
 /: Fun {K} {V} (K) (V) -> {( .k = K | .v = V )}
 _=>_ = \k v. { .k = k | .v = v }
 
+// "Unit" type is implemented as an empty record
 /: Row
 Unit = {()}
 /: Unit
 unit = {}
 
+// Logical negation: `Not A` is the type of functions that derive absurdity from `A`
 /: Fun {u} (Type^ u) -> Type^ u
 Not = \A. Fun (A) -> Never
 
+// Type-level constraint: `Where b` <=> `b = true`
 /: Fun (Bool) -> Type
 Where = \x. Eq x true
 
+// Type for non-negative integer numbers, defined via refinement
 /: Type
 Int+ = Int @|>=0 : Where (. >= 0)|
 
+// Verified addition operator for non-negative numbers that erases to `_+_`
 /: Fun (Int+) (Int+) -> Int+
 _++_ = \a b. (a + b) @|<=~trans @0 @b @(a + b) b.@>=0 a.@>=0|
 
+// Verified `Int` to `Int+` that clamps negative values to 0
 /: Fun (Int) -> Int+
 int-clamp>int+ = \x.
   if @Int+ (x >= 0)
     (\@yes. x @|yes|)
     (0 @|refl|)
 
+// Symmetry of equality: `a = b` <=> `b = a`
 /: Fun {a : Any} {b : Any} (Eq a b) -> Eq b a
 ~sym = \@_ @_ aToB. rewrite aToB in refl
 
+// Definition of "Maybe" type via dependent row concatenation
+// Defined as "opaque" (nominative) type.
+// Operations over internal structure in structural typing sense require `rewrite Opt.@un in ...` context.
 opaque Opt = \R. {( .has = Bool )} \./ (if ..has R Unit)
 
+// `Some`/`None` constructors for opaque `Opt`
 /: Fun {A} -> Opt A
 mk_none = rewrite Opt.@un in ({ .has = false } \/ {})
 /: Fun {A} (A) -> Opt A
 mk_some = \val. rewrite Opt.@un in ({ .has = true } \/ val)
 
+// Conditional constructor for `Opt`. Unconditionally fills `.has` tag field, conditionally concatenates body.
 /: Fun {A} (has : Bool) (Fun {_ : Where has} -> A) -> Opt A
 mk_some_if = \has body. rewrite Opt.@un in ({ .has = has } \/ if has
   (\@yes. rewrite yes in body @refl)
   (\@no. rewrite no in {}))
 
+// Object properties are passed explicitly (in ML-style) as objects, we call this "traits".
+
 /: Fun (j : Int+) -> Type^ (j + 1)
 Trait^ = \u. Fun (Type^ u) -> Type^ u
 Trait = Trait^ 0
 
-//// Any implementer of trait
+// `ImplOf^ trait` is a type of any implementer of the `trait`. Analogous to Rust's `impl Trait`
 opaque ImplOf^ = \u trait. @|T: Type^ u| {( .obj = T | .impl = trait T )}
 
+// Iterator trait. `Iter ElT T` is a type of a function that, given iterator `T`, attempts to produce
+// a new element `ElT` and an updated iterator `T`.
 opaque Iter = \ElT T. Fun (T) -> Opt {( .curr = ElT | .rest = T)}
 
+// Finite iterator trait. Erases to `Iterator`, but provides maximum amount of steps from any state.
 opaque FinIter = \ElT T.
   rewrite Opt.@un in
   rewrite Iter.@un in
@@ -83,8 +104,10 @@ opaque FinIter = \ElT T.
         Fun (curr : T) {r : Where (. curr).has} ->
         Where (rewrite r in (maxsize (. curr).rest < maxsize curr)) |
 
+// Bounded `Int+`, analogous to Idris2's `Fin`
 Int+< = \to. Int+ @|< : Where (. < to)|
 
+// Construct finitely iterable range from `0` until `n`
 /: Fun (to : Int+) -> ImplOf^ 0 (FinIter (Int+< to))
 iter_< = \to.
   rewrite ImplOf^.@un in
@@ -100,6 +123,7 @@ iter_< = \to.
       @|\curr @has. rewrite has rewrite <=~trans @curr @(curr + 1) @to refl refl in refl|
   }
 
+// Iterator implementation for list
 /: Fun {u} {A : Type^ u} (l : List A) -> ImplOf^ u (FinIter A)
 iter_list = \@_ @A start.
   rewrite ImplOf^.@un in
@@ -130,36 +154,8 @@ loop_iter = \@_ @A @O iter0 f final.
       final
   )
 
-/: Fun {u : Int+} (tag : Tag) (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
-find_case = \@u tag l. loop_iter @u (iter_list l) 4 5
-    // crashes, because it instantiates iter_list's {A : Type^ u} to the existential {A : Any}.
-    // ... which is actually kinds surprising since I expected `iter_list l` to type... UH OH...
-    // I have a bad feeling that we're hurrying too much with checking the types for existentials. This should probably be done as we unscope.
-    // EDIT: no. "Meta-variable refinement". in `infer`, if `(ExVar : A) : B`, we first check `A <: B`, and, if that fails,
-    // create a new existential ExVar B and try unify `ExVar A` to it. Shortcut: just restrict type in-place.
+// Church encoding of functor `F`
+/: Fun (u : Int+) (Fun (Type^ u) -> Type^ u) -> Type^ (u + 1)
+Church = \u F. Fun {X : Type^ u} (Fun (F X) -> X) -> X
 
-///: Fun {u} (tag : Tag) (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
-//find-case = \@u tag l. int+_unfold @(Row^ u)
-//    (list_length l)
-//    (\i @bounded rec.
-//    case = list_indexl i l @bounded
-//    in if (tag_== tag case.k)
-//        (case.v)
-//        rec
-//    )
-//    {( .never = Never )}
-
-///: Fun {u : Int+} (List {( .k = Tag | .v = Row^ u )}) -> Row^ u
-//U = \cases. {( .tag = Tag )} \meta/ find-case meta.tag cases
-
-///: Fun {u : Int+} (A : Type^ u) -> Row^ u
-//Opt = \A. U [ .none => Unit | .some => {( .val = A )} ]
-
-///: Fun (u : Int+) -> Type^ (u + 1)
-//Dyn^ = \u. {( .Ty = Type^ u )} \./ {( .val = ..Ty )}
-
-///: Fun (u : Int+) (Fun (Type^ u) -> Type^ u) -> Type^ (u + 1)
-//Church = \u F. Fun {X : Type^ u} (Fun (F X) -> X) -> X
-
-in Opt
-//in fin_iterable^.T //Iter //_>_ //{ ._>=_ = _>=_ | ._>_ = _>_ | .Where = Where | .Type = Type}
+in Church
