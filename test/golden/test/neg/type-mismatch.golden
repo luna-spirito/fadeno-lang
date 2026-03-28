@@ -1,0 +1,27 @@
+
+├ let Int
+  └ <fadeno.Int> : _
+    ├ <.Int> : fadeno.Tag
+      └ check via infer .Int : fadeno.Tag
+        ├ <.Int> : _
+          └ fadeno.Tag
+        └ fadeno.Tag <: fadeno.Tag
+    ├ <fadeno> : _
+    └ fadeno.Type^ 0
+├ let Bool
+  └ <fadeno.Bool> : _
+    ├ <.Bool> : fadeno.Tag
+      └ check via infer .Bool : fadeno.Tag
+        ├ <.Bool> : _
+          └ fadeno.Tag
+        └ fadeno.Tag <: fadeno.Tag
+    ├ <fadeno> : _
+    └ fadeno.Type^ 0
+└ let x
+  └ <true> : Int
+    └ check via infer true : Int
+      ├ <true> : _
+        └ Bool
+      └ Bool <: Int
+        └ <panic!!!11>
+error: Subtype check failed, no rule applies for: Bool <: Int

@@ -1,0 +1,7 @@
+// Should fail: applying int as a function
+unpack fadeno. Int
+
+/: Int
+x = 4
+
+in x 5

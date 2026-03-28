@@ -73,6 +73,8 @@ cond = \x.
   (\@x_is_false. rewrite x_is_false in [[3]])
 
 // Importing other files
-other_file = ./test/myif
+std = ./std
+
+four = std._+_ 2 2
 
 in {}

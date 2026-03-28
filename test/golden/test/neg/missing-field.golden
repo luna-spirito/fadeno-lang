@@ -1,0 +1,15 @@
+
+├ let Int
+  └ <fadeno.Int> : _
+    ├ <.Int> : fadeno.Tag
+      └ check via infer .Int : fadeno.Tag
+        ├ <.Int> : _
+          └ fadeno.Tag
+        └ fadeno.Tag <: fadeno.Tag
+    ├ <fadeno> : _
+    └ fadeno.Type^ 0
+└ let x
+  └ <{.a = 4}> : {(.a = Int | .b = Int)}
+    ├ <4> : Int
+    └ <panic!!!11>
+error: Can't find .b in {(.a = Int | .b = Int)}

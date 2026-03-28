@@ -1,0 +1,20 @@
+
+├ let Int
+  └ <fadeno.Int> : _
+    ├ <.Int> : fadeno.Tag
+      └ check via infer .Int : fadeno.Tag
+        ├ <.Int> : _
+          └ fadeno.Tag
+        └ fadeno.Tag <: fadeno.Tag
+    ├ <fadeno> : _
+    └ fadeno.Type^ 0
+├ let x
+  └ <4> : Int
+└ in
+  └ <x 5> : _
+    ├ <x> : _
+      ├ var 0 : Int
+      ├ Trying nesting
+      └ Int
+    └ <panic!!!11>
+error: inferApp QNorm Int

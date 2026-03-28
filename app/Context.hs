@@ -18,9 +18,8 @@ import Prettyprinter.Render.Terminal
 import RIO hiding (Vector, runReader)
 import RIO.HashMap qualified as HM
 
-{- | (Un)Surprisinlgly, Church State outperformed IORef and mopped floor with it.
-TODO: We should *probably* get rid of `IO` in `AppM`. It's dead weight for `infer` & `normalize`, although we probably don't
-have any _noticeable_ performance hits from it.
+{- | Church State outperformed IORef significantly.
+TODO: Consider removing `IO` from `AppM`. It's unused by `infer` & `normalize`.
 -}
 
 -- Fused effects & `Has Ctx sig m` is great, but

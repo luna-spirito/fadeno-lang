@@ -1,0 +1,21 @@
+
+├ let Type^
+  └ <fadeno.Type^> : _
+    ├ <.Type^> : fadeno.Tag
+      └ check via infer .Type^ : fadeno.Tag
+        ├ <.Type^> : _
+          └ fadeno.Tag
+        └ fadeno.Tag <: fadeno.Tag
+    ├ <fadeno> : _
+    └ Fun (u : fadeno.Int @|pos : fadeno.Eq (fadeno.int_>=0 .) true|) -> fadeno.Type^ (fadeno.int_add u 1)
+└ let x
+  └ <Type^ 0> : Type^ 0
+    ├ <Type^> : _
+      ├ var 0 : Fun (u : fadeno.Int @|pos : fadeno.Eq (fadeno.int_>=0 .) true|) -> Type^ (fadeno.int_add u 1)
+      ├ Trying nesting
+      └ Fun (u : fadeno.Int @|pos : fadeno.Eq (fadeno.int_>=0 .) true|) -> Type^ (fadeno.int_add u 1)
+    └ Type^ 1 <: Type^ 0
+      ├ false
+      └ <panic!!!11>
+error: Cannot subtype universes with levels: 1 ≤ 0
+Stuck at: false

@@ -1,4 +1,3 @@
--- This is absolutely horrfying and has strict limits which aren't even checked properly
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 {-# HLINT ignore "Use const" #-}

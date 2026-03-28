@@ -158,4 +158,38 @@ loop_iter = \@_ @A @O iter0 f final.
 /: Fun (u : Int+) (Fun (Type^ u) -> Type^ u) -> Type^ (u + 1)
 Church = \u F. Fun {X : Type^ u} (Fun (F X) -> X) -> X
 
-in Church
+in
+  { ._+_ = _+_
+  | ._-_ = _-_
+  | ._>=_ = _>=_
+  | ._>_ = _>_
+  | ._<=_ = _<=_
+  | ._<_ = _<_
+  | .Kind = Kind
+  | .Type = Type
+  | .Row = Row
+  | .id = id
+  | ._=>_ = _=>_
+  | .Unit = Unit
+  | .unit = unit
+  | .Not = Not
+  | .Where = Where
+  | .Int+ = Int+
+  | ._++_ = _++_
+  | .int-clamp>int+ = int-clamp>int+
+  | .~sym = ~sym
+  | .Opt = Opt
+  | .mk_none = mk_none
+  | .mk_some = mk_some
+  | .mk_some_if = mk_some_if
+  | .Trait^ = Trait^
+  | .Trait = Trait
+  | .ImplOf^ = ImplOf^
+  | .Iter = Iter
+  | .FinIter = FinIter
+  | .Int+< = Int+<
+  | .iter_< = iter_<
+  | .iter_list = iter_list
+  | .loop_iter = loop_iter
+  | .Church = Church
+  }

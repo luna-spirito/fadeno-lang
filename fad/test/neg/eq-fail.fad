@@ -1,0 +1,7 @@
+// Should fail: 3 is not equal to 4
+unpack fadeno. Int Eq refl
+
+/: Eq 3 4
+x = refl
+
+in {}

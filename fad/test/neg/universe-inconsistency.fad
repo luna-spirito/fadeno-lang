@@ -1,0 +1,7 @@
+// Should fail: Type^ 0 is not a member of Type^ 0
+unpack fadeno. Type^
+
+/: Type^ 0
+x = Type^ 0
+
+in x

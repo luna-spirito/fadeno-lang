@@ -1,0 +1,7 @@
+// Should fail: assigning bool where int is expected
+unpack fadeno. Int Bool
+
+/: Int
+x = true
+
+in x

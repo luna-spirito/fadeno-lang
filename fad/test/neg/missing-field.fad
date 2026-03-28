@@ -1,0 +1,7 @@
+// Should fail: record missing declared field
+unpack fadeno. Int
+
+/: {( .a = Int | .b = Int )}
+x = { .a = 4 }
+
+in x

@@ -1,0 +1,42 @@
+
+├ let Int
+  └ <fadeno.Int> : _
+    ├ <.Int> : fadeno.Tag
+      └ check via infer .Int : fadeno.Tag
+        ├ <.Int> : _
+          └ fadeno.Tag
+        └ fadeno.Tag <: fadeno.Tag
+    ├ <fadeno> : _
+    └ fadeno.Type^ 0
+├ let Eq
+  └ <fadeno.Eq> : _
+    ├ <.Eq> : fadeno.Tag
+      └ check via infer .Eq : fadeno.Tag
+        ├ <.Eq> : _
+          └ fadeno.Tag
+        └ fadeno.Tag <: fadeno.Tag
+    ├ <fadeno> : _
+    └ Fun (fadeno.Any) (fadeno.Any) -> fadeno.Type^ 0
+├ let refl
+  └ <fadeno.refl> : _
+    ├ <.refl> : fadeno.Tag
+      └ check via infer .refl : fadeno.Tag
+        ├ <.refl> : _
+          └ fadeno.Tag
+        └ fadeno.Tag <: fadeno.Tag
+    ├ <fadeno> : _
+    └ Fun {x : fadeno.Any} -> Eq x x
+└ let x
+  └ <refl> : Eq 3 4
+    └ check via infer refl : Eq 3 4
+      ├ <refl> : _
+        ├ var 0 : Fun {x : fadeno.Any} -> Eq x x
+        ├ Trying nesting
+        └ Fun {x : fadeno.Any} -> Eq x x
+      └ Fun {x : fadeno.Any} -> Eq x x <: Eq 3 4
+        └ Eq (exi#3/0) (exi#3/0) <: Eq 3 4
+          ├ instMeta
+            ├ exi# (3, 0) := 3
+            └ <3> : fadeno.Any
+          └ <panic!!!11>
+error: Subtype check failed, no rule applies for: Eq (exi#3/0) (exi#3/0) <: Eq 3 4
