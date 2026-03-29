@@ -1,5 +1,7 @@
 # Fadeno
 
+[![CI](https://github.com/luna-spirito/dentrado-poc/actions/workflows/ci.yml/badge.svg)](https://github.com/luna-spirito/dentrado-poc/actions/workflows/ci.yml)
+
 A declarative/functional dependently-typed programming language, inspired by [Cedille](https://github.com/cedille/cedille)/[Dhall](https://github.com/dhall-lang/dhall-lang).
 Designed to be a simple, minimalistic yet powerful language for [Dentrado Functional-Reactive DBMS](https://github.com/luna-spirito/dentrado-poc).
 
