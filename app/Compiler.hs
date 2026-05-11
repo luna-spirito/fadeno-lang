@@ -14,13 +14,43 @@ import Data.ByteString.Char8 (pack)
 import Data.Foldable (Foldable (foldr'))
 import Data.IntMap.Strict qualified as IM
 import Data.IntSet qualified as IS
-import Data.RRBVector (Vector, drop, ifoldl, imap, replicate, reverse, splitAt, take, viewl, viewr, zip, (<|), (|>))
+import Data.RRBVector (Vector, drop, ifoldl, imap, replicate, reverse, splitAt, take, viewl, viewr, zip, (<|), (|>), (!?))
 import GHC.Exts (IsList (..))
 import NameGen (UsedNames, emptyUsedNames)
 import NameGen qualified as N
-import Parser (BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), nestedByP, regIdent, splitAt3, traverseTermF)
+import Parser (BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), Lambda (..), Module (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, identOfBuiltin, nestedByP, regIdent, splitAt3, traverseTermF, pattern TBuiltin, pattern TApp)
 import RIO hiding (Vector, ask, drop, local, replicate, reverse, runReader, take, toList, zip)
 import RIO.HashMap qualified as HM
+
+builtinOfIdentMap ∷ HashMap Ident BuiltinT
+builtinOfIdentMap = HM.fromList $ (\b → (identOfBuiltin b, b)) <$> toList builtinsList
+
+-- | Accepts `Var i`, list of variables in scope and whether each element is real, returns `Var j` erased.
+varInErasedCtx :: Int → Vector var → (var → Bool) → Term
+varInErasedCtx i vars isReal =
+  Term $ Var $ i - foldl' (\erased var → if isReal var then erased else erased + 1) 0 (drop (length vars - i) vars)
+
+-- This ensures the compiler can pattern-match on `Builtin If` etc. to emit
+-- `IIfElse` rather than a runtime call to the `If` builtin.
+eraseBuiltinVars ∷ Vector (Maybe BuiltinT) → Term → Term
+eraseBuiltinVars bVars =
+  unTerm >>> \case
+    Var n → case bVars !? (length bVars - n - 1) of
+      Just (Just t) → Term $ Builtin t
+      _ → varInErasedCtx n bVars isNothing
+    Block (BlockLet _ QNorm _ (isBuiltin → Just b) body) →
+      eraseBuiltinVars (bVars |> Just b) $ unLambda body
+    x → Term $ run $ traverseTermF
+      (Identity . eraseBuiltinVars bVars)
+      (\n → Identity . Lambda . eraseBuiltinVars (bVars <> replicate n Nothing) . unLambda)
+      x
+  where
+  -- Check if a term is `record_get .tag fadeno` where `tag` maps to a builtin.
+  isBuiltin ∷ Term → Maybe BuiltinT
+  isBuiltin = \case
+    (TBuiltin RecordGet `TApp` Term (TagLit tag) `TApp` Term BuiltinsVar) → HM.lookup tag builtinOfIdentMap
+    (TBuiltin t) → Just t
+    _ → Nothing
 
 -- KEEPS Import's
 -- Unfortunately, not a rewrite', since this just erases & is not meant to simplify anything.
@@ -31,7 +61,7 @@ erase reals =
     Block (BlockLet _ QEra _ _ into) → erase (reals |> False) $ unLambda into
     Block (BlockRewrite _ into) → erase reals into
     AppErased f _ → erase reals f
-    Var x → Term $ Var $ x - foldl' (\erased isReal → if isReal then erased else erased + 1) 0 (drop (length reals - x) reals)
+    Var x → varInErasedCtx x reals id
     RefineGet i (_, Nothing) → erase reals $ Term $ Var i
     RefineGet _ (_, Just _) → Term $ FieldsLit (FRecord ()) []
     Refine (RefinePre _ann base) → erase reals base
@@ -264,7 +294,7 @@ type CompileResult = ((HashMap Ident Word64, HashMap TagSet Word64), Vector (Vec
 
 compileModule ∷ Module → CompileResult
 compileModule (Module m) =
-  let (tags, (tagSets, codes)) = run $ runState @(HashMap Ident Word64) (curry pure) mempty $ runState @(HashMap TagSet Word64) (curry pure) mempty $ for m (compile' . erase [])
+  let (tags, (tagSets, codes)) = run $ runState @(HashMap Ident Word64) (curry pure) mempty $ runState @(HashMap TagSet Word64) (curry pure) mempty $ for m (compile' . eraseBuiltinVars [] . erase [])
    in ((tags, tagSets), execCodeGen [] . toCodeGen <$> codes)
 
 decompileModule ∷ CompileResult → Maybe Module
