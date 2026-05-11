@@ -7,6 +7,9 @@ module Driver (main, testBuild, runChecker', watch) where
 import Compiler (compileModule)
 import Context (AppM, Dyn (..), EEntry (..), Epoch (..), Imports (..), Rewrite (..), Scopes (..), ScopesM, dyn, execAppStd, freshIdent, getEpoch, getScopeId, registerOpaque, runScopes, stackError, stackLog, stackScope, runApp, pStacks)
 import qualified Data.ByteString.Lazy as BSL
+import Data.ByteString.Base64 qualified as Base64
+import Data.Aeson (object, (.=), encode)
+import qualified Data.Text as T
 import Control.Algebra
 import Control.Carrier.Error.Church (ErrorC, runError)
 import Control.Carrier.Fresh.Church (FreshC, evalFresh)
@@ -599,7 +602,7 @@ infer ie = logAndRunInfer $ \case
       (e, Check ty) → withRewr rewr $ infer ie inner . Check =<< normalize =<< fetchT (Dyn e ty)
   (Import (fromMaybe (error "Internal error: unresolved import") → n) _, (_, Infer)) → do
     Imports imps ← ask
-    pure $ maybe (error "Incomplete context") snd $ imps !? n
+    pure $ maybe (error "Incomplete context") snd $ imps !? fromIntegral n
   -- main
   (NumLit x, CheckL (Builtin (Int' d))) →
     if x `numFitsInto` d
@@ -789,6 +792,19 @@ typOfBuiltin opaques = \case
   W → [termQQ| Fun {u} (Type^ u) -> Type^ u |]
   WUnwrap → [termQQ| Fun {A} (W A) -> A |]
   WWrap → [termQQ| Fun {A} (A) -> W A |]
+  -- Kolorinko builtins: stubbed types since we don't run type-check in this path
+  KolEventId → [termQQ| Any |]
+  KolUserId → [termQQ| Any |]
+  KolMkEventType → [termQQ| Any |]
+  KolUnEventType → [termQQ| Any |]
+  KolGear → [termQQ| Any |]
+  KolMkGear → [termQQ| Any |]
+  KolQuery → [termQQ| Any |]
+  KolMkQuery → [termQQ| Any |]
+  KolQueryNew → [termQQ| Any |]
+  KolListNew → [termQQ| Any |]
+  KolListPush → [termQQ| Any |]
+  KolId → [termQQ| Any |]
  where
   opd d = Term $ Pi QNorm Nothing (Term $ Builtin $ Int' d) $ Lambda $ Term $ Builtin $ Int' d
   op2d d = Term $ Pi QNorm Nothing (Term $ Builtin $ Int' d) $ Lambda $ opd d
@@ -1077,5 +1093,33 @@ testBuild path' = do
 main ∷ IO ()
 main = do
   getArgs >>= \case
+    ["--emit-stdout", arg] → emitStdout arg
     [arg] → void $ build arg
-    _ → render (annotate (color Red) "Usage: fadeno <file>")
+    _ → render (annotate (color Red) "Usage: fadeno [--emit-stdout] <file>")
+
+-- | Compile a module, output type-check result and bytecode to stdout as JSON.
+-- Always emits bytecode if parsing succeeds, even if type-checking fails.
+-- Format: { "status": "ok", "type": "<pretty-printed type>", "bytecode": "<base64-encoded CompileResult>" }
+--         { "status": "error", "message": "<error>", "type": "?", "bytecode": "<base64>" }
+emitStdout ∷ FilePath → IO ()
+emitStdout path = do
+  path' ← encodeUtf path
+  (_, m) ← loadModule' N.emptyUsedNames path'
+  case m of
+    Left parseErr → do
+      let msg = renderStrict $ layoutSmart defaultLayoutOptions $ "parser:" <> parseErr
+      BSL.putStr $ (<> "\n") $ encode $ object ["status" .= ("error" :: T.Text), "message" .= msg]
+    Right (_, m') → do
+      let bytecode = serializeCompileResult $ compileModule m'
+      let b64 = decodeUtf8Lenient $ Base64.encode bytecode
+      (logs, r) ← runApp do
+        put N.emptyUsedNames
+        term ← checkModule m'
+        pure $ pTerm [] term
+      case r of
+        Left e → do
+          let msg = renderStrict $ layoutSmart defaultLayoutOptions $ pStacks logs <> line <> annotate (color Red) "error: " <> e
+          BSL.putStr $ (<> "\n") $ encode $ object ["status" .= ("error" :: T.Text), "message" .= msg, "type" .= ("?" :: T.Text), "bytecode" .= b64]
+        Right typeDoc → do
+          let typeStr = renderStrict $ layoutSmart defaultLayoutOptions typeDoc
+          BSL.putStr $ (<> "\n") $ encode $ object ["status" .= ("ok" :: T.Text), "type" .= typeStr, "bytecode" .= b64]

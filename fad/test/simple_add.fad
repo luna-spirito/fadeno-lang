@@ -1,0 +1,8 @@
+// Simple test: 4 + 5
+// Expected result: Num(9)
+
+unpack fadeno. Int if
+
+result = fadeno.int_add 4 5
+
+in result

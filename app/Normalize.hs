@@ -36,7 +36,9 @@ import System.IO.Unsafe (unsafePerformIO)
 -- (returns `n ** (Vec n Term -> Term)`)
 appBuiltin ∷ Vector (Maybe Term) → BuiltinT → Vector Term → ScopesM (Maybe Term)
 appBuiltin locals = curry \case
-  ((Any'; Bool; Eq; Int' _; List; Never; OpaqueVal{}; PropLteTrans; PropListViewlDec; Refl; RowPlus; Tag; TypePlus; W), _) → pure Nothing
+  ((Any'; Bool; Eq; Int' _; List; Never; OpaqueVal{}; PropLteTrans; PropListViewlDec; Refl; RowPlus; Tag; TypePlus; W
+   ; KolEventId; KolUserId; KolMkEventType; KolUnEventType; KolGear; KolMkGear; KolQuery; KolMkQuery; KolQueryNew; KolListNew; KolListPush; KolId
+   ), _) → pure Nothing
   (Loop, [i0, f]) | not (isStuck i0) → fmap Just $ normalize' locals $ f `TApp` i0 `TApp` Term (Lam QNorm (Just $ regIdent "i") $ Lambda $ TBuiltin Loop `TApp` Term (Var 0) `TApp` f)
   (If, [Term (BoolLit cond), th, el]) → pure $ Just $ if cond then th else el
   (IntEq, [Term (NumLit a), Term (NumLit b)]) → pure $ Just $ Term $ BoolLit $ a == b
@@ -64,7 +66,9 @@ appBuiltin locals = curry \case
   (TagEq, [Term (TagLit a), Term (TagLit b)]) → pure $ Just $ Term $ BoolLit $ a == b
   (WUnwrap, [a]) → pure $ Just a
   (WWrap, [a]) → pure $ Just a
-  ((Loop; If; IntEq; IntGte0; ListIndexL; ListLength; ListViewL; RecordDropFields; RecordGet; RecordKeepFields; TagEq; WWrap; WUnwrap), _) → pure Nothing
+  ((Loop; If; IntEq; IntGte0; ListIndexL; ListLength; ListViewL; RecordDropFields; RecordGet; RecordKeepFields; TagEq; WWrap; WUnwrap
+   ; KolEventId; KolUserId; KolMkEventType; KolUnEventType; KolGear; KolMkGear; KolQuery; KolMkQuery; KolQueryNew; KolListNew; KolListPush; KolId
+   ), _) → pure Nothing
  where
   isStuck =
     unTerm >>> \case
@@ -472,7 +476,7 @@ traverseNormTermF c locals t0 = rewr =<< trav
         _ → pure $ Term $ ExVar (i, subi)
     Import (fromMaybe (error "Unresolved import") → n) _ → do
       Imports imps ← ask
-      pure $ maybe (error "Incomplete context") fst $ imps !? n
+      pure $ maybe (error "Incomplete context") fst $ imps !? fromIntegral n
     _ → Term <$> traverseTermF (c locals) (\n → fmap Lambda . c (locals <> replicate n Nothing) . unLambda) t0
   countErasedLocals = countErased locals
   countErased = foldl' (\acc e → if isJust e then acc + 1 else acc) 0

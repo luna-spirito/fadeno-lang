@@ -1,0 +1,12 @@
+// Test: identity function applied to 42
+// Expected result: Num(42)
+
+unpack fadeno. Int if
+
+/: Int
+x = 42
+
+/: Fun (Int) -> Int
+id = \a. a
+
+in id x

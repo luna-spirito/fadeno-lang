@@ -122,6 +122,19 @@ data BuiltinT
   | W
   | WUnwrap
   | WWrap
+  -- Kolorinko domain builtins (content-addressable type IDs, gears, queries)
+  | KolEventId
+  | KolUserId
+  | KolMkEventType
+  | KolUnEventType
+  | KolGear
+  | KolMkGear
+  | KolQuery
+  | KolMkQuery
+  | KolQueryNew
+  | KolListNew -- list_new
+  | KolListPush -- list_push
+  | KolId -- Id type
   deriving (Show, Eq, Ord, Lift)
 
 builtinsList ∷ Vector BuiltinT
@@ -151,6 +164,19 @@ builtinsList =
   , W
   , WUnwrap
   , WWrap
+  -- Kolorinko domain builtins
+  , KolEventId
+  , KolUserId
+  , KolMkEventType
+  , KolUnEventType
+  , KolGear
+  , KolMkGear
+  , KolQuery
+  , KolMkQuery
+  , KolQueryNew
+  , KolListNew
+  , KolListPush
+  , KolId
   ]
     <> (Int' <$> nd)
     <> (IntAdd <$> nd)
@@ -195,6 +221,18 @@ identOfBuiltin = \case
   W → r "W"
   WUnwrap → r "w_unwrap"
   WWrap → r "w_wrap"
+  KolEventId → r "EventId"
+  KolUserId → r "UserId"
+  KolMkEventType → r "mk_event_type"
+  KolUnEventType → r "un_event_type"
+  KolGear → r "Gear"
+  KolMkGear → r "mk_gear"
+  KolQuery → r "Query"
+  KolMkQuery → r "mk_query"
+  KolQueryNew → r "query_new"
+  KolListNew → r "list_new"
+  KolListPush → r "list_push"
+  KolId → r "Id"
  where
   numDesc upper desc =
     (if upper then "I" else "i")
@@ -304,7 +342,7 @@ data TermF a
     Block !(BlockF a)
   | AppErased !a !a -- TODO: Maybe
   | Refine !(RefineK a)
-  | Import !(Maybe Int {- resolved -}) !ByteString -- Erased from the perspective of `normalize`, kept by `compile`
+  | Import !(Maybe Word64 {- resolved -}) !ByteString -- Erased from the perspective of `normalize`, kept by `compile`
   | -- Type-level
     Pi !Quant !(Maybe Ident) !a !(Lambda a)
   | Concat !a !(FieldsK a (Lambda a)) -- TODO: Demote Concat to builtin?
@@ -1017,7 +1055,7 @@ parseFile fres = parseSource fres <=< readFile'
 render ∷ Doc AnsiStyle → IO ()
 render x = renderIO stdout $ layoutSmart defaultLayoutOptions $ x <> line
 
-type LoaderC = StateC (HashMap OsPath Int) (StateC N.UsedNames (StateC (Vector Term) (ErrorC (Doc AnsiStyle) (WriterC (Vector OsPath) (StateC Int IO)))))
+type LoaderC = StateC (HashMap OsPath Word64) (StateC N.UsedNames (StateC (Vector Term) (ErrorC (Doc AnsiStyle) (WriterC (Vector OsPath) (StateC Int IO)))))
 newtype Module = Module (Vector Term) -- non-empty
 
 -- TODO: disallow trailing `/` in Import syntax!
@@ -1026,15 +1064,21 @@ newtype Module = Module (Vector Term) -- non-empty
 loadModule' ∷ N.UsedNames → OsPath → IO (Vector OsPath, Either (Doc AnsiStyle) (N.UsedNames, Module))
 loadModule' names0 = evalState @Int 0 . runWriter (curry pure) . runError (pure . Left) (pure . Right) . runState (\t u → pure (u, Module t)) [] . execState names0 . evalState mempty . new
  where
-  new ∷ OsPath → LoaderC ()
+  new ∷ OsPath → LoaderC Word64
   new path = do
-    tell @(Vector OsPath) [path]
+    tell @(Vector OsPath) [path] -- Keep track of all loaded files for `watch`
+    -- Parse this file
     oldI ← get
     (t0, newI) ← either throwError pure . parse (ParserContext (IsErased False) []) oldI =<< sendIO (readFile' $ path <> unsafeEncodeUtf ".fad")
     put newI
+    -- Load submodules
     t ← runReader path $ subload t0
-    modify (|> t)
-    get @(Vector Term) >>= \ms → modify @(HashMap OsPath Int) $ HM.insert path $ length ms - 1
+    -- Add this file as a module
+    oldModules :: Vector Term <- get
+    let i = fromIntegral $ length oldModules
+    modify @(HashMap OsPath Word64) $ HM.insert path i
+    put (oldModules |> t)
+    pure i
   subload ∷ Term → ReaderC OsPath LoaderC Term
   subload =
     unTerm >>> \case
@@ -1042,12 +1086,10 @@ loadModule' names0 = evalState @Int 0 . runWriter (curry pure) . runError (pure 
         dir ← R.ask
         subpath' ← sendIO $ encodeUtf (BS.unpack subpath)
         let path = takeDirectory dir </> subpath'
-        loaded ← get
+        loaded :: HashMap OsPath Word64 ← get
         i ← case HM.lookup path loaded of
-          Just i → pure i
-          Nothing → do
-            RIO.lift $ new path
-            (\x → length x - 1) <$> get @(Vector Term)
+          Just i → pure $ fromIntegral i
+          Nothing → RIO.lift $ new path
         pure $ Term $ Import (Just i) subpath
       t → do
         let

@@ -119,7 +119,7 @@ putValue = \case
   VBuiltinsVar → S.putWord8 5
   VBuiltin b → S.putWord8 6 *> putBuiltin b
   VPanic → S.putWord8 7
-  VImport x → S.putWord8 8 *> S.putInt64le x
+  VImport x → S.putWord8 8 *> S.putWord64le x
 
 getValue ∷ S.Get Value
 getValue = do
@@ -165,6 +165,20 @@ putBuiltin = \case
   IntAdd d → S.putWord8 25 *> putNumDesc d
   IntMul d → S.putWord8 26 *> putNumDesc d
   IntNeg d → S.putWord8 27 *> putNumDesc d
+  PropListViewlDec → S.putWord8 28
+  PropLteTrans → S.putWord8 29
+  KolEventId → S.putWord8 30
+  KolUserId → S.putWord8 31
+  KolMkEventType → S.putWord8 32
+  KolUnEventType → S.putWord8 33
+  KolGear → S.putWord8 34
+  KolMkGear → S.putWord8 35
+  KolQuery → S.putWord8 36
+  KolMkQuery → S.putWord8 37
+  KolQueryNew → S.putWord8 38
+  KolListNew → S.putWord8 39
+  KolListPush → S.putWord8 40
+  KolId → S.putWord8 41
 
 getBuiltin ∷ S.Get BuiltinT
 getBuiltin = do
@@ -197,6 +211,20 @@ getBuiltin = do
     24 → IntAdd <$> getNumDesc
     25 → IntMul <$> getNumDesc
     26 → IntNeg <$> getNumDesc
+    28 → pure PropListViewlDec
+    29 → pure PropLteTrans
+    30 → pure KolEventId
+    31 → pure KolUserId
+    32 → pure KolMkEventType
+    33 → pure KolUnEventType
+    34 → pure KolGear
+    35 → pure KolMkGear
+    36 → pure KolQuery
+    37 → pure KolMkQuery
+    38 → pure KolQueryNew
+    39 → pure KolListNew
+    40 → pure KolListPush
+    41 → pure KolId
     _ → fail "Unknown builtin tag"
 
 -- TODO: More dense?

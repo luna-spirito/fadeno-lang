@@ -80,7 +80,7 @@ data Value
   | {- | Pi !Quant !Term !(Either (Ident, Lambda Term) Term)
     | Concat !Term !(Either (Ident, Lambda Term) Term)  deriving
     -}
-    VImport !Int64
+    VImport !Word64
   deriving (Show, Eq)
 
 {-
@@ -255,7 +255,7 @@ compile' =
       pure $ val' <> CGen (instr IPushVar) <> body' <> CGen (instr IPopVar)
     Refine (RefinePostTy{}) → pure $ CConst VPanic -- TODO
     Refine (RefinePreTy{}) → pure $ CConst VPanic -- TODO
-    Import (fromMaybe (error "Internal error: unresolved import") → n) _ → pure $ CConst $ VImport $ fromIntegral n
+    Import (fromMaybe (error "Internal error: unresolved import") → n) _ → pure $ CConst $ VImport n
     Sorry → pure $ CConst VPanic
     Pi{} → pure $ CConst VPanic -- TODO
     Concat{} → pure $ CConst VPanic -- TODO
