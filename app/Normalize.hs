@@ -37,7 +37,7 @@ import System.IO.Unsafe (unsafePerformIO)
 appBuiltin ∷ Vector (Maybe Term) → BuiltinT → Vector Term → ScopesM (Maybe Term)
 appBuiltin locals = curry \case
   ((Any'; Bool; Eq; Int' _; List; Never; OpaqueVal{}; PropLteTrans; PropListViewlDec; Refl; RowPlus; Tag; TypePlus; W
-   ; KolEventId; KolUserId; KolMkEventType; KolUnEventType; KolGear; KolMkGear; KolQuery; KolMkQuery; KolQueryNew; KolListNew; KolListPush; KolId
+   ; KolEventId; KolUserId; KolMkEventType; KolUnEventType; KolGear; KolMkGear; KolQuery; KolMkQuery; KolQueryNew; KolListNew; KolListPush; KolId; KolQueryDelta; KolSenderToUser; KolMkStateGraph; KolStateGraphApply; KolStateGraphOut; KolSgCtxQuery; KolSgCtxUpdate; KolSgCtxDepQuery; KolEventTypeId; KolLocalEventId; KolTimestamp; KolLocalUserId; KolStateGraphT; KolStateGraphOutT
    ), _) → pure Nothing
   (Loop, [i0, f]) | not (isStuck i0) → fmap Just $ normalize' locals $ f `TApp` i0 `TApp` Term (Lam QNorm (Just $ regIdent "i") $ Lambda $ TBuiltin Loop `TApp` Term (Var 0) `TApp` f)
   (If, [Term (BoolLit cond), th, el]) → pure $ Just $ if cond then th else el
@@ -67,7 +67,7 @@ appBuiltin locals = curry \case
   (WUnwrap, [a]) → pure $ Just a
   (WWrap, [a]) → pure $ Just a
   ((Loop; If; IntEq; IntGte0; ListIndexL; ListLength; ListViewL; RecordDropFields; RecordGet; RecordKeepFields; TagEq; WWrap; WUnwrap
-   ; KolEventId; KolUserId; KolMkEventType; KolUnEventType; KolGear; KolMkGear; KolQuery; KolMkQuery; KolQueryNew; KolListNew; KolListPush; KolId
+   ; KolEventId; KolUserId; KolMkEventType; KolUnEventType; KolGear; KolMkGear; KolQuery; KolMkQuery; KolQueryNew; KolListNew; KolListPush; KolId; KolQueryDelta; KolSenderToUser; KolMkStateGraph; KolStateGraphApply; KolStateGraphOut; KolSgCtxQuery; KolSgCtxUpdate; KolSgCtxDepQuery; KolEventTypeId; KolLocalEventId; KolTimestamp; KolLocalUserId; KolStateGraphT; KolStateGraphOutT
    ), _) → pure Nothing
  where
   isStuck =

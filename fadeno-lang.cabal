@@ -82,5 +82,8 @@ test-suite fadeno-tests
         hashable >= 1.5,
         rrb-vector >= 0.2,
         time >= 1,
-        file-io >= 0.1.5
+        file-io >= 0.1.5,
+        base64-bytestring >= 1.2,
+        text >= 2.0,
+        aeson >= 2.2
     default-language: GHC2021

@@ -805,6 +805,21 @@ typOfBuiltin opaques = \case
   KolListNew → [termQQ| Any |]
   KolListPush → [termQQ| Any |]
   KolId → [termQQ| Any |]
+  -- StateGraph builtins
+  KolQueryDelta → [termQQ| Any |]
+  KolSenderToUser → [termQQ| Any |]
+  KolMkStateGraph → [termQQ| Any |]
+  KolStateGraphApply → [termQQ| Any |]
+  KolStateGraphOut → [termQQ| Any |]
+  KolSgCtxQuery → [termQQ| Any |]
+  KolSgCtxUpdate → [termQQ| Any |]
+  KolSgCtxDepQuery → [termQQ| Any |]
+  KolEventTypeId → [termQQ| Any |]
+  KolLocalEventId → [termQQ| Any |]
+  KolTimestamp → [termQQ| Any |]
+  KolLocalUserId → [termQQ| Any |]
+  KolStateGraphT → [termQQ| Any |]
+  KolStateGraphOutT → [termQQ| Any |]
  where
   opd d = Term $ Pi QNorm Nothing (Term $ Builtin $ Int' d) $ Lambda $ Term $ Builtin $ Int' d
   op2d d = Term $ Pi QNorm Nothing (Term $ Builtin $ Int' d) $ Lambda $ opd d

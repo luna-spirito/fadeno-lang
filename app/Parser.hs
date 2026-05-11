@@ -135,6 +135,21 @@ data BuiltinT
   | KolListNew -- list_new
   | KolListPush -- list_push
   | KolId -- Id type
+  -- StateGraph builtins
+  | KolQueryDelta
+  | KolSenderToUser
+  | KolMkStateGraph
+  | KolStateGraphApply
+  | KolStateGraphOut
+  | KolSgCtxQuery
+  | KolSgCtxUpdate
+  | KolSgCtxDepQuery
+  | KolEventTypeId
+  | KolLocalEventId
+  | KolTimestamp
+  | KolLocalUserId
+  | KolStateGraphT
+  | KolStateGraphOutT
   deriving (Show, Eq, Ord, Lift)
 
 builtinsList ∷ Vector BuiltinT
@@ -177,6 +192,21 @@ builtinsList =
   , KolListNew
   , KolListPush
   , KolId
+  -- StateGraph builtins
+  , KolQueryDelta
+  , KolSenderToUser
+  , KolMkStateGraph
+  , KolStateGraphApply
+  , KolStateGraphOut
+  , KolSgCtxQuery
+  , KolSgCtxUpdate
+  , KolSgCtxDepQuery
+  , KolEventTypeId
+  , KolLocalEventId
+  , KolTimestamp
+  , KolLocalUserId
+  , KolStateGraphT
+  , KolStateGraphOutT
   ]
     <> (Int' <$> nd)
     <> (IntAdd <$> nd)
@@ -233,6 +263,20 @@ identOfBuiltin = \case
   KolListNew → r "list_new"
   KolListPush → r "list_push"
   KolId → r "Id"
+  KolQueryDelta → r "query_delta"
+  KolSenderToUser → r "sender-to>user"
+  KolMkStateGraph → r "mk_stategraph"
+  KolStateGraphApply → r "stategraph_apply"
+  KolStateGraphOut → r "stategraph_out"
+  KolSgCtxQuery → r "sgctx_query"
+  KolSgCtxUpdate → r "sgctx_update"
+  KolSgCtxDepQuery → r "sgctx_dep_query"
+  KolEventTypeId → r "EventTypeId"
+  KolLocalEventId → r "LocalEventId"
+  KolTimestamp → r "Timestamp"
+  KolLocalUserId → r "LocalUserId"
+  KolStateGraphT → r "StateGraph"
+  KolStateGraphOutT → r "StateGraphOut"
  where
   numDesc upper desc =
     (if upper then "I" else "i")
