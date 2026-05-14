@@ -4,53 +4,54 @@
 
 {-# HLINT ignore "Use const" #-}
 {-# HLINT ignore "Use join" #-}
-module Parser (
-  Bits (..),
-  BlockF (..),
-  BuiltinT (..),
-  FieldsK (..),
-  Ident (..),
-  IsErased (..),
-  Lambda (..),
-  Module (..),
-  NumDesc (..),
-  OpaqueId (..),
-  ParserContext (..),
-  Quant (..),
-  RefineK (..),
-  Term (..),
-  TermF (..),
-  Vector' (..),
-  builtinsList,
-  dotvar,
-  eqOf,
-  identOfBuiltin,
-  intercept,
-  loadModule',
-  maxOf,
-  nested,
-  nestedBy',
-  nestedByP',
-  nestedByP,
-  pIdent,
-  pOpaqueId,
-  pQuant,
-  pTerm,
-  parse,
-  parseFile,
-  parseQQ,
-  parseSource,
-  pattern TApp,
-  pattern TBuiltin,
-  recordGet,
-  regIdent,
-  render,
-  rowOf,
-  splitAt3,
-  traverseTermF,
-  typ,
-  typOf,
-) where
+module Parser
+  ( Bits (..),
+    BlockF (..),
+    BuiltinT (..),
+    FieldsK (..),
+    Ident (..),
+    IsErased (..),
+    Lambda (..),
+    Module (..),
+    NumDesc (..),
+    OpaqueId (..),
+    ParserContext (..),
+    Quant (..),
+    RefineK (..),
+    Term (..),
+    TermF (..),
+    Vector' (..),
+    builtinsList,
+    dotvar,
+    eqOf,
+    identOfBuiltin,
+    intercept,
+    loadModule',
+    maxOf,
+    nested,
+    nestedBy',
+    nestedByP',
+    nestedByP,
+    pIdent,
+    pOpaqueId,
+    pQuant,
+    pTerm,
+    parse,
+    parseFile,
+    parseQQ,
+    parseSource,
+    pattern TApp,
+    pattern TBuiltin,
+    recordGet,
+    regIdent,
+    render,
+    rowOf,
+    splitAt3,
+    traverseTermF,
+    typ,
+    typOf,
+  )
+where
 
 import Control.Algebra
 import Control.Carrier.Empty.Church (runEmpty)
@@ -85,10 +86,13 @@ import System.OsPath (OsPath, encodeUtf, takeDirectory, unsafeEncodeUtf, (</>))
 
 data Bits = Bits8 | Bits16 | Bits32 | Bits64
   deriving (Show, Eq, Ord, Lift)
+
 data NumDesc = NumFin !Bool {- ≥ 0 -} !Bits | NumInf
   deriving (Show, Eq, Ord, Lift)
+
 data OpaqueId = OpaqueId !Ident !Int
   deriving (Show, Eq, Ord, Generic, Lift)
+
 instance Hashable OpaqueId
 
 data BuiltinT
@@ -122,16 +126,15 @@ data BuiltinT
   | W
   | WUnwrap
   | WWrap
-  -- Kolorinko domain builtins (content-addressable type IDs, gears, queries)
-  | KolEventId
+  | -- Kolorinko domain builtins (content-addressable type IDs, gears, queries)
+    KolEventId
   | KolUserId
   | KolMkEventType
   | KolUnEventType
   | KolGear
   | KolMkGear
   | KolQuery
-  | KolMkQuery
-  | KolQueryNew
+  | KolMkQuery -- Compiles to VKolQuery 0 constant (not serialized as builtin)
   | KolListNew -- list_new
   | KolListPush -- list_push
   | KolId -- Id type
@@ -152,171 +155,168 @@ data BuiltinT
   | KolStateGraphOutT
   deriving (Show, Eq, Ord, Lift)
 
-builtinsList ∷ Vector BuiltinT
+builtinsList :: Vector BuiltinT
 builtinsList =
-  [ Any'
-  , Bool
-  , Eq
-  , Loop
-  , If
-  , IntEq
-  , IntGte0
-  , List
-  , ListIndexL
-  , ListLength
-  , ListViewL
-  , Never
-  , PropListViewlDec
-  , PropLteTrans
-  , RecordDropFields
-  , RecordGet
-  , RecordKeepFields
-  , Refl
-  , RowPlus
-  , Tag
-  , TagEq
-  , TypePlus
-  , W
-  , WUnwrap
-  , WWrap
-  -- Kolorinko domain builtins
-  , KolEventId
-  , KolUserId
-  , KolMkEventType
-  , KolUnEventType
-  , KolGear
-  , KolMkGear
-  , KolQuery
-  , KolMkQuery
-  , KolQueryNew
-  , KolListNew
-  , KolListPush
-  , KolId
-  -- StateGraph builtins
-  , KolQueryDelta
-  , KolSenderToUser
-  , KolMkStateGraph
-  , KolStateGraphApply
-  , KolStateGraphOut
-  , KolSgCtxQuery
-  , KolSgCtxUpdate
-  , KolSgCtxDepQuery
-  , KolEventTypeId
-  , KolLocalEventId
-  , KolTimestamp
-  , KolLocalUserId
-  , KolStateGraphT
-  , KolStateGraphOutT
+  [ Any',
+    Bool,
+    Eq,
+    Loop,
+    If,
+    IntEq,
+    IntGte0,
+    List,
+    ListIndexL,
+    ListLength,
+    ListViewL,
+    Never,
+    PropListViewlDec,
+    PropLteTrans,
+    RecordDropFields,
+    RecordGet,
+    RecordKeepFields,
+    Refl,
+    RowPlus,
+    Tag,
+    TagEq,
+    TypePlus,
+    W,
+    WUnwrap,
+    WWrap,
+    -- Kolorinko domain builtins
+    KolEventId,
+    KolUserId,
+    KolMkEventType,
+    KolUnEventType,
+    KolGear,
+    KolMkGear,
+    KolQuery,
+    KolMkQuery,
+    KolListNew,
+    KolListPush,
+    KolId,
+    -- StateGraph builtins
+    KolQueryDelta,
+    KolSenderToUser,
+    KolMkStateGraph,
+    KolStateGraphApply,
+    KolStateGraphOut,
+    KolSgCtxQuery,
+    KolSgCtxUpdate,
+    KolSgCtxDepQuery,
+    KolEventTypeId,
+    KolLocalEventId,
+    KolTimestamp,
+    KolLocalUserId,
+    KolStateGraphT,
+    KolStateGraphOutT
   ]
     <> (Int' <$> nd)
     <> (IntAdd <$> nd)
     <> (IntMul <$> nd)
     <> (IntNeg <$> nd)
- where
-  nd = (NumFin <$> [False, True] <*> [Bits8, Bits16, Bits32, Bits64]) <> [NumInf]
+  where
+    nd = (NumFin <$> [False, True] <*> [Bits8, Bits16, Bits32, Bits64]) <> [NumInf]
 
 -- | A regular, non-operator ident
-regIdent ∷ ByteString → Ident
+regIdent :: ByteString -> Ident
 regIdent = (`Ident` False)
 
-identOfBuiltin ∷ BuiltinT → Ident
+identOfBuiltin :: BuiltinT -> Ident
 identOfBuiltin = \case
-  Any' → r "Any"
-  Bool → r "Bool"
-  Eq → r "Eq"
-  Loop → r "loop"
-  If → r "if"
-  Int' d → r $ numDesc True d
-  IntAdd d → r $ numDesc False d <> "_add"
-  IntEq → r "int_=="
-  IntGte0 → r "int_>=0" -- TODO: int>=0?
-  IntMul d → r $ numDesc False d <> "_mul"
-  IntNeg d → r $ numDesc False d <> "_neg"
-  List → r "List"
-  ListIndexL → r "list_indexl"
-  ListLength → r "list_length"
-  ListViewL → r "list_viewl"
-  Never → r "Never"
-  PropListViewlDec → r "list_viewl~dec"
-  PropLteTrans → r "<=~trans"
-  RecordDropFields → r "record_drop_fields"
-  RecordGet → r "record_get"
-  RecordKeepFields → r "record_keep_fields"
-  Refl → r "refl"
-  RowPlus → r "Row^"
-  Tag → r "Tag"
-  TagEq → r "tag_=="
-  TypePlus → r "Type^"
-  OpaqueVal (OpaqueId x i) → r ("OpaqueVal[" <> BS.pack (show $ pIdent x) <> "]#" <> BS.pack (show i))
-  W → r "W"
-  WUnwrap → r "w_unwrap"
-  WWrap → r "w_wrap"
-  KolEventId → r "EventId"
-  KolUserId → r "UserId"
-  KolMkEventType → r "mk_event_type"
-  KolUnEventType → r "un_event_type"
-  KolGear → r "Gear"
-  KolMkGear → r "mk_gear"
-  KolQuery → r "Query"
-  KolMkQuery → r "mk_query"
-  KolQueryNew → r "query_new"
-  KolListNew → r "list_new"
-  KolListPush → r "list_push"
-  KolId → r "Id"
-  KolQueryDelta → r "query_delta"
-  KolSenderToUser → r "sender-to>user"
-  KolMkStateGraph → r "mk_stategraph"
-  KolStateGraphApply → r "stategraph_apply"
-  KolStateGraphOut → r "stategraph_out"
-  KolSgCtxQuery → r "sgctx_query"
-  KolSgCtxUpdate → r "sgctx_update"
-  KolSgCtxDepQuery → r "sgctx_dep_query"
-  KolEventTypeId → r "EventTypeId"
-  KolLocalEventId → r "LocalEventId"
-  KolTimestamp → r "Timestamp"
-  KolLocalUserId → r "LocalUserId"
-  KolStateGraphT → r "StateGraph"
-  KolStateGraphOutT → r "StateGraphOut"
- where
-  numDesc upper desc =
-    (if upper then "I" else "i")
-      <> case desc of
-        NumFin nonneg bits →
-          case bits of
-            Bits8 → "8"
-            Bits16 → "16"
-            Bits32 → "32"
-            Bits64 → "64"
-            <> (if nonneg then "+" else mempty)
-        NumInf → "nt"
-  -- regular
-  r = regIdent
+  Any' -> r "Any"
+  Bool -> r "Bool"
+  Eq -> r "Eq"
+  Loop -> r "loop"
+  If -> r "if"
+  Int' d -> r $ numDesc True d
+  IntAdd d -> r $ numDesc False d <> "_add"
+  IntEq -> r "int_=="
+  IntGte0 -> r "int_>=0" -- TODO: int>=0?
+  IntMul d -> r $ numDesc False d <> "_mul"
+  IntNeg d -> r $ numDesc False d <> "_neg"
+  List -> r "List"
+  ListIndexL -> r "list_indexl"
+  ListLength -> r "list_length"
+  ListViewL -> r "list_viewl"
+  Never -> r "Never"
+  PropListViewlDec -> r "list_viewl~dec"
+  PropLteTrans -> r "<=~trans"
+  RecordDropFields -> r "record_drop_fields"
+  RecordGet -> r "record_get"
+  RecordKeepFields -> r "record_keep_fields"
+  Refl -> r "refl"
+  RowPlus -> r "Row^"
+  Tag -> r "Tag"
+  TagEq -> r "tag_=="
+  TypePlus -> r "Type^"
+  OpaqueVal (OpaqueId x i) -> r ("OpaqueVal[" <> BS.pack (show $ pIdent x) <> "]#" <> BS.pack (show i))
+  W -> r "W"
+  WUnwrap -> r "w_unwrap"
+  WWrap -> r "w_wrap"
+  KolEventId -> r "EventId"
+  KolUserId -> r "UserId"
+  KolMkEventType -> r "mk_event_type"
+  KolUnEventType -> r "un_event_type"
+  KolGear -> r "Gear"
+  KolMkGear -> r "mk_gear"
+  KolQuery -> r "Query"
+  KolMkQuery -> r "mk_query"
+  KolListNew -> r "list_new"
+  KolListPush -> r "list_push"
+  KolId -> r "Id"
+  KolQueryDelta -> r "query_delta"
+  KolSenderToUser -> r "sender-to>user"
+  KolMkStateGraph -> r "mk_stategraph"
+  KolStateGraphApply -> r "stategraph_apply"
+  KolStateGraphOut -> r "stategraph_out"
+  KolSgCtxQuery -> r "sgctx_query"
+  KolSgCtxUpdate -> r "sgctx_update"
+  KolSgCtxDepQuery -> r "sgctx_dep_query"
+  KolEventTypeId -> r "EventTypeId"
+  KolLocalEventId -> r "LocalEventId"
+  KolTimestamp -> r "Timestamp"
+  KolLocalUserId -> r "LocalUserId"
+  KolStateGraphT -> r "StateGraph"
+  KolStateGraphOutT -> r "StateGraphOut"
+  where
+    numDesc upper desc =
+      (if upper then "I" else "i")
+        <> case desc of
+          NumFin nonneg bits ->
+            case bits of
+              Bits8 -> "8"
+              Bits16 -> "16"
+              Bits32 -> "32"
+              Bits64 -> "64"
+              <> (if nonneg then "+" else mempty)
+          NumInf -> "nt"
+    -- regular
+    r = regIdent
 
-splitAt3 ∷ Int → Vector a → (Vector a, Maybe a, Vector a)
+splitAt3 :: Int -> Vector a -> (Vector a, Maybe a, Vector a)
 splitAt3 i v =
-  let
-    (bef, viewl → aft) = splitAt i v
-   in
-    (bef, fst <$> aft, maybe [] snd aft)
+  let (bef, viewl -> aft) = splitAt i v
+   in (bef, fst <$> aft, maybe [] snd aft)
 
 -- censor + listen
-intercept ∷ ∀ w m sig a. (Has (Writer w) sig m, Monoid w) ⇒ m a → m (w, a)
+intercept :: forall w m sig a. (Has (Writer w) sig m, Monoid w) => m a -> m (w, a)
 intercept = censor @w (const mempty) . listen @w
 
 data Ident = Ident !ByteString !Bool -- raw name, is operator
   deriving (Show, Eq, Ord, Generic, Lift)
+
 instance Hashable Ident
 
 data Quant = QEra | QNorm
   deriving (Show, Eq, Ord, Lift)
 
-pattern TApp ∷ Term → Term → Term
+pattern TApp :: Term -> Term -> Term
 pattern TApp a b = Term (App a b)
 
-pattern TBuiltin ∷ BuiltinT → Term
+pattern TBuiltin :: BuiltinT -> Term
 pattern TBuiltin a = Term (Builtin a)
 
-newtype Lambda a = Lambda {unLambda ∷ a}
+newtype Lambda a = Lambda {unLambda :: a}
   deriving (Show, Eq, Lift)
 
 -- Vector + Lift
@@ -329,8 +329,8 @@ instance IsList (Vector' a) where
   toList (Vector' v) = toList v
 
 -- Need Lift a constraint for liftTyped [a]
-instance (Lift a) ⇒ Lift (Vector' a) where
-  liftTyped ∷ ∀ (m ∷ Type → Type). (TH.Quote m) ⇒ Vector' a → TH.Code m (Vector' a)
+instance (Lift a) => Lift (Vector' a) where
+  liftTyped :: forall (m :: Type -> Type). (TH.Quote m) => Vector' a -> TH.Code m (Vector' a)
   liftTyped (Vector' v) =
     [||Vector' (fromList $$(liftTyped (toList v)))||]
 
@@ -394,89 +394,91 @@ data TermF a
   | UniVar !(Int, Int) !a
   deriving
     ( -- | ErasedAnn !Ident !Bool {\- postfix? -\} !a !(Lambda a) -- ^ Prefix erased overlay @|k : A| B
-      Show
-    , Eq
-    , Lift
+      Show,
+      Eq,
+      Lift
     )
 
-newtype Term = Term {unTerm ∷ TermF Term}
+newtype Term = Term {unTerm :: TermF Term}
   deriving (Show, Eq, Lift)
 
-typOf ∷ Term → Term
+typOf :: Term -> Term
 typOf = TApp (TBuiltin TypePlus)
 
-rowOf ∷ Term → Term
+rowOf :: Term -> Term
 rowOf = TApp (TBuiltin RowPlus)
 
-recordGet ∷ Term → Term → Term
+recordGet :: Term -> Term -> Term
 recordGet tag record = (TBuiltin RecordGet `TApp` tag) `TApp` record
 
-typ ∷ Term
+typ :: Term
 typ = typOf $ Term $ NumLit 0
 
-eqOf ∷ Term → Term → Term
+eqOf :: Term -> Term -> Term
 eqOf a b = (TBuiltin Eq `TApp` a) `TApp` b
 
-maxOf ∷ Term → Term → Term
+maxOf :: Term -> Term -> Term
 maxOf a b = Term (App (Term (App (Term (App (Term (Builtin If)) (Term (App (Term (Builtin IntGte0)) (Term (App (Term (App (Term (Builtin (IntAdd NumInf))) (Term (App (Term (App (Term (Builtin (IntMul NumInf))) (Term (NumLit (-1))))) b)))) a)))))) a)) b)
 
 -- parsing
 
 newtype IsErased = IsErased Bool
-data ParserContext = ParserContext {pcErased ∷ !IsErased, pcBinds ∷ !(Vector (Quant, Maybe Ident))}
+
+data ParserContext = ParserContext {pcErased :: !IsErased, pcBinds :: !(Vector (Quant, Maybe Ident))}
+
 type Parser' = Parser ParserContext Pos
 
-space ∷ Parser' ()
+space :: Parser' ()
 space =
   skipMany
-    $ skipSatisfyAscii (\x → x == ' ' || x == '\n')
+    $ skipSatisfyAscii (\x -> x == ' ' || x == '\n')
     <|> ($(string "//") *> skipMany (satisfyAscii (/= '\n')))
 
-token ∷ Parser' a → Parser' a
+token :: Parser' a -> Parser' a
 token x = space *> x <* space
 
-digit ∷ Parser' Integer
+digit :: Parser' Integer
 digit =
   anyAsciiChar >>= \case
-    '0' → pure 0
-    '1' → pure 1
-    '2' → pure 2
-    '3' → pure 3
-    '4' → pure 4
-    '5' → pure 5
-    '6' → pure 6
-    '7' → pure 7
-    '8' → pure 8
-    '9' → pure 9
-    _ → failed
+    '0' -> pure 0
+    '1' -> pure 1
+    '2' -> pure 2
+    '3' -> pure 3
+    '4' -> pure 4
+    '5' -> pure 5
+    '6' -> pure 6
+    '7' -> pure 7
+    '8' -> pure 8
+    '9' -> pure 9
+    _ -> failed
 
-number ∷ Parser' Integer
+number :: Parser' Integer
 number = token do
-  sign ← optional $ $(char '-')
-  val ← foldl' (\acc x → acc * 10 + x) 0 <$> some digit
+  sign <- optional $ $(char '-')
+  val <- foldl' (\acc x -> acc * 10 + x) 0 <$> some digit
   pure $ if isJust sign then (-val) else val
 
 -- TODO: block words from ident' as well?.. probably not.
 -- TODO: Convert blocklists to functions
-identSym ∷ Parser' ()
-identSym = skipSatisfy \x → x `notElem` (" \\/\n(){}[].:|" ∷ Vector Char)
+identSym :: Parser' ()
+identSym = skipSatisfy \x -> x `notElem` (" \\/\n(){}[].:|" :: Vector Char)
 
 -- Returns the identifier and whether it's an operator
 -- Expect the ident to start RIGHT NOW.
-identRightNow ∷ Parser' (Maybe Ident)
+identRightNow :: Parser' (Maybe Ident)
 identRightNow = do
-  rawResult ← byteStringOf (skipSome identSym)
+  rawResult <- byteStringOf (skipSome identSym)
   let (result, isOp) = case BS.uncons rawResult of
         Just ('_', rest)
-          | Just (rest', '_') ← BS.unsnoc rest → (rest', True)
-        _ → (rawResult, False)
+          | Just (rest', '_') <- BS.unsnoc rest -> (rest', True)
+        _ -> (rawResult, False)
   guard $ not $ BS.null result
   guard $ not $ "@" `BS.isPrefixOf` result
   -- TODO: Doesn't start with a number?
-  guard $ result `notElem` (["Fun", "=", "in", "->", "unpack", "fadeno", "rewrite", "true", "false", "opaque"] ∷ [ByteString])
+  guard $ result `notElem` (["Fun", "=", "in", "->", "unpack", "fadeno", "rewrite", "true", "false", "opaque"] :: [ByteString])
   pure if result == "_" then Nothing else Just (Ident result isOp)
 
-ident ∷ Parser' (Maybe Ident)
+ident :: Parser' (Maybe Ident)
 ident = token identRightNow
 
 -- infxr ∷ Parser' a → Parser' (a → a → a) → Parser' a
@@ -488,53 +490,53 @@ ident = token identRightNow
 --     )
 --     <|> pure a'
 
-infxl ∷ Parser' a → Parser' (a → a → a) → Parser' a
+infxl :: Parser' a -> Parser' (a -> a -> a) -> Parser' a
 infxl a oper = a >>= infxl'
- where
-  infxl' prev =
-    ( do
-        oper' ← oper
-        next ← a
-        infxl' $ oper' prev next
-    )
-      <|> pure prev
+  where
+    infxl' prev =
+      ( do
+          oper' <- oper
+          next <- a
+          infxl' $ oper' prev next
+      )
+        <|> pure prev
 
-sepBy ∷ Parser' () → Parser' a → Parser' [a]
+sepBy :: Parser' () -> Parser' a -> Parser' [a]
 sepBy with x = ((:) <$> x <*> many (with *> x)) <|> pure []
 
 -- -- Syntax is *a little* ambigious. I'm very sorry.
 
 -- Standalone '='
-parseEq ∷ Parser' Quant
+parseEq :: Parser' Quant
 parseEq = token $ notFollowedBy (q <* $(char '=')) identSym
- where
-  q = ($(char '@') $> QEra) <|> pure QNorm
+  where
+    q = ($(char '@') $> QEra) <|> pure QNorm
 
-findVar ∷ ByteString → Parser' (Maybe (Int, Quant, Bool))
+findVar :: ByteString -> Parser' (Maybe (Int, Quant, Bool))
 findVar name = do
-  vars ← pcBinds <$> ask
+  vars <- pcBinds <$> ask
   case findIndexR
-    ( \(_, x) → case x of
-        Just (Ident eName _) → eName == name
-        _ → False
+    ( \(_, x) -> case x of
+        Just (Ident eName _) -> eName == name
+        _ -> False
     )
     vars of
-    Just ind →
+    Just ind ->
       let (q, Ident _ eOp) = fmap (fromMaybe (error "impossible")) $ fromMaybe (error "impossible") $ vars !? ind
        in pure $ Just (length vars - ind - 1, q, eOp)
-    Nothing → pure Nothing
+    Nothing -> pure Nothing
 
-localPathSym ∷ Parser' ()
-localPathSym = skipSatisfyAscii \x → x `elem` ("abcdefghijklmnopqrstuvwxyz/" ∷ Vector Char)
+localPathSym :: Parser' ()
+localPathSym = skipSatisfyAscii \x -> x `elem` ("abcdefghijklmnopqrstuvwxyz/" :: Vector Char)
 
 -- Standalone `.` can be a variable introduced by the compiler.
-dotvar ∷ Ident
+dotvar :: Ident
 dotvar = regIdent "."
 
 -- 7
-parsePrim ∷ Parser' Term
+parsePrim :: Parser' Term
 parsePrim = token do
-  prim ←
+  prim <-
     (Term . NumLit <$> number)
       <|> ( $(char '.')
               *> ( ($(char '/') *> (Term . Import Nothing <$> byteStringOf (skipSome localPathSym)))
@@ -544,19 +546,19 @@ parsePrim = token do
       <|> (Term . BoolLit <$> notFollowedBy ((True <$ $(string "true")) <|> (False <$ $(string "false"))) identSym)
       <|> ( do
               -- Record parsing
-              isRow ← token ($(char '{') *> (isJust <$> optional $(char '(')))
+              isRow <- token ($(char '{') *> (isJust <$> optional $(char '(')))
               let parseField = do
-                    n ← parsePrim
-                    _todo ← parseEq
-                    v ← parseTop
+                    n <- parsePrim
+                    _todo <- parseEq
+                    v <- parseTop
                     pure (n, v)
-              knownFields ← fromList <$> sepBy (token $(char '|')) parseField
+              knownFields <- fromList <$> sepBy (token $(char '|')) parseField
               token $ when isRow $(char ')') *> $(char '}')
               pure $ Term $ FieldsLit (if isRow then FRow () else FRecord ()) knownFields
           )
       <|> ( do
               token $(char '[')
-              elems ← fromList <$> sepBy (token $(char '|')) (try parseTop)
+              elems <- fromList <$> sepBy (token $(char '|')) (try parseTop)
               token $(char ']')
               pure $ Term $ ListLit elems
           )
@@ -566,23 +568,22 @@ parsePrim = token do
               -- Variable <|> RefineGet
               -- TODO: { x = 4 }
               let asDotvar = dotvar <$ notFollowedBy $(char '.') identSym
-              Ident iName iOp ← asDotvar <|> (maybe failed pure =<< notFollowedBy identRightNow parseEq)
-              IsErased isEra ← pcErased <$> ask
-              i ←
+              Ident iName iOp <- asDotvar <|> (maybe failed pure =<< notFollowedBy identRightNow parseEq)
+              IsErased isEra <- pcErased <$> ask
+              i <-
                 findVar iName >>= \case
-                  Just (_, QEra, _) | not isEra → empty -- TODO: Still a crutch.
-                  Just (n, _, eOp) → case (eOp, iOp) of
-                    (True, False) → empty -- TODO: this is a crutch to stop user-defined operators from crashing the parser.
-                    (False, True) → err =<< getPos
-                    _ → pure n
-                  Nothing → err =<< getPos -- TODO: better errors, overall
-              let
-                refineGets = do
-                  skips ← many $ $(string ".@_")
-                  final ← optional $ $(string ".@") *> (maybe failed pure =<< identRightNow)
-                  when (isJust final && not isEra) failed -- TODO: Better error
-                  when (null skips && isNothing final) failed
-                  pure (length skips, final)
+                  Just (_, QEra, _) | not isEra -> empty -- TODO: Still a crutch.
+                  Just (n, _, eOp) -> case (eOp, iOp) of
+                    (True, False) -> empty -- TODO: this is a crutch to stop user-defined operators from crashing the parser.
+                    (False, True) -> err =<< getPos
+                    _ -> pure n
+                  Nothing -> err =<< getPos -- TODO: better errors, overall
+              let refineGets = do
+                    skips <- many $ $(string ".@_")
+                    final <- optional $ $(string ".@") *> (maybe failed pure =<< identRightNow)
+                    when (isJust final && not isEra) failed -- TODO: Better error
+                    when (null skips && isNothing final) failed
+                    pure (length skips, final)
               (RefineGet i <$> refineGets) <|> pure (Var i)
           )
       <|> ( $(char '(') -- Parentheses parsing
@@ -590,204 +591,198 @@ parsePrim = token do
               <* $(char ')')
           )
   -- any number of accesses after the prim
-  accesses ← many $ $(char '.') *> (Term . TagLit <$> (maybe failed pure =<< identRightNow))
+  accesses <- many $ $(char '.') *> (Term . TagLit <$> (maybe failed pure =<< identRightNow))
   pure
     $ foldl'
       (flip recordGet)
       prim
       accesses
 
-insideEra ∷ ParserContext → ParserContext
-insideEra x = x{pcErased = IsErased True}
+insideEra :: ParserContext -> ParserContext
+insideEra x = x {pcErased = IsErased True}
 
-withBinds ∷ Vector (Quant, Maybe Ident) → ParserContext → ParserContext
-withBinds b x = x{pcBinds = pcBinds x <> b}
+withBinds :: Vector (Quant, Maybe Ident) -> ParserContext -> ParserContext
+withBinds b x = x {pcBinds = pcBinds x <> b}
 
 -- 6
-parseApp ∷ Parser' Term
+parseApp :: Parser' Term
 parseApp = parsePrim >>= infxl'
- where
-  infxl' prev =
-    ( do
-        space *> $(char '@')
-        -- p ← ($(char '_') $> Nothing) <|> (Just <$> local insideEra parsePrim)
-        p ← local insideEra parsePrim
-        infxl' $ Term $ prev `AppErased` p
-    )
-      <|> ( do
-              p ← parsePrim
-              infxl' $ prev `TApp` p
-          )
-      <|> pure prev
-
--- 5
-parseTy ∷ Parser' Term
-parseTy =
-  let
-    parseAnn onTy onTerm = do
-      token $(string "@|")
-      let
-        asTy = do
-          etag ← maybe failed pure =<< ident
-          token $(char ':')
-          onTy etag
-      res ← asTy <|> local insideEra onTerm
-      token $(char '|')
-      pure res
-   in
-    ( do
-        token $(string "Fun")
-        let
-          getArg = do
-            q ← token $ ($(char '(') $> QNorm) <|> ($(char '{') $> QEra)
-            (n, t) ←
-              ((,) <$> (ident <* token $(char ':')) <*> parseTop)
-                <|> case q of
-                  QNorm → (Nothing,) <$> parseTop
-                  QEra → (,Term $ Builtin Any') . Just <$> (maybe failed pure =<< ident)
-            token $ case q of
-              QNorm → $(char ')')
-              QEra → $(char '}')
-            pure (q, n, t)
-          getArgs1 = do
-            (q, n, t) ← getArg
-            Term . Pi q n t . Lambda <$> local (withBinds [(QNorm, n)]) getArgs
-          getArgs =
-            ($(string "->") *> parseApp)
-              <|> getArgs1
-        getArgs1
-    )
-      <|> Term
-      . Refine
-      <$> do
-        act ←
-          parseAnn
-            ( \etag → do
-                annTy ← parseTop
-                pure do
-                  base ← Lambda <$> local (withBinds [(QNorm, Just etag)]) parseTy
-                  pure $ RefinePreTy etag annTy base
-            )
-            ( do
-                ann ← parseTop
-                pure $ RefinePre ann <$> parseTy
-            )
-        act
-      <|> ( do
-              -- Fused: parseApp <|> (\/) <|> (\./) <|> `parseApp @|...|`
-              left ← parseApp
-              space
-              let
-                asConcat = do
-                  $(char '\\')
-                  Term
-                    . Concat left
-                    <$> ( $(char '/')
-                            *> (FRecord <$> parseTy)
-                            <|> $(string "./")
-                            *> (FRow . Lambda <$> local (withBinds [(QNorm, Just dotvar)]) parseTy)
-                        )
-                asPostAnn =
-                  Term
-                    . Refine
-                    <$> parseAnn
-                      ( \etag → do
-                          annTy ← Lambda <$> local (withBinds [(QNorm, Just dotvar)]) parseTop
-                          pure $ RefinePostTy left etag annTy
-                      )
-                      (RefinePost left <$> parseTop)
-              asConcat <|> asPostAnn <|> pure left
-          )
-
--- -- 4
-parseInfixOps ∷ Parser' Term
-parseInfixOps = infxl parseTy parseOperator'
- where
-  parseOperator' ∷ Parser' (Term → Term → Term)
-  parseOperator' = do
-    i ← ident
-    case i of
-      Just (Ident opName False) →
-        findVar opName >>= \case
-          Just (idx, QNorm, True) → pure \a b → (Term (Var idx) `TApp` a) `TApp` b
-          _ → empty -- Not a known operator in this scope
-      _ → empty
-
-insideQuant ∷ Quant → ParserContext → ParserContext
-insideQuant = \case
-  QEra → insideEra
-  QNorm → id
-
--- -- 1
-parseBlock ∷ Parser' Term
-parseBlock = do
-  let
-    binding = do
-      ty ← optional do
-        token $(string "/:")
-        local insideEra parseInfixOps
-      -- opaque ← optional do
-      --   token $(string "opaque")
-      --   i ← FP.get
-      --   FP.put $ i + 1
-      --   pure i
-      -- name ← ident
-      name ←
-        ( do
-            token $(string "opaque")
-            i ← FP.get
-            FP.put $ i + 1
-            Left . (`OpaqueId` i) <$> (maybe empty pure =<< ident)
-        )
-          <|> (Right <$> ident)
-      q ← parseEq
-      IsErased isEra ← pcErased <$> ask
-      when (isEra && q == QEra) failed -- TODO: Better error
-      -- we could make immediate parser-level filtering for opaques, but it requires quite some work to check that all definitions used are
-      -- opaque-safe, and such check could even reject dubious yet technically correct terms
-      expr ← local (insideQuant q) parseTop
-      pure (name, q, ty, expr)
-    someEntries =
+  where
+    infxl' prev =
       ( do
-          (name, q, ty, expr) ← binding
-          rest ← Lambda <$> local (withBinds [(q, either (\(OpaqueId n _) → Just n) id name)]) manyEntries
-          pure $ Term $ Block $ BlockLet name q ty expr rest
+          space *> $(char '@')
+          -- p ← ($(char '_') $> Nothing) <|> (Just <$> local insideEra parsePrim)
+          p <- local insideEra parsePrim
+          infxl' $ Term $ prev `AppErased` p
       )
         <|> ( do
-                -- TODO: prettyprinting
-                token $ $(string "unpack")
-                record ← parsePrim
-                token $ $(char '.')
-                fieldNames ← some $ notFollowedBy (maybe failed pure =<< ident) parseEq
-                foldr
-                  (\name cont → Term . Block . BlockLet (Right $ Just name) QNorm Nothing (recordGet (Term $ TagLit name) record) . Lambda <$> local (withBinds [(QNorm, Just name)]) cont)
-                  manyEntries
-                  fieldNames
+                p <- parsePrim
+                infxl' $ prev `TApp` p
             )
+        <|> pure prev
+
+-- 5
+parseTy :: Parser' Term
+parseTy =
+  let parseAnn onTy onTerm = do
+        token $(string "@|")
+        let asTy = do
+              etag <- maybe failed pure =<< ident
+              token $(char ':')
+              onTy etag
+        res <- asTy <|> local insideEra onTerm
+        token $(char '|')
+        pure res
+   in ( do
+          token $(string "Fun")
+          let getArg = do
+                q <- token $ ($(char '(') $> QNorm) <|> ($(char '{') $> QEra)
+                (n, t) <-
+                  ((,) <$> (ident <* token $(char ':')) <*> parseTop)
+                    <|> case q of
+                      QNorm -> (Nothing,) <$> parseTop
+                      QEra -> (,Term $ Builtin Any') . Just <$> (maybe failed pure =<< ident)
+                token $ case q of
+                  QNorm -> $(char ')')
+                  QEra -> $(char '}')
+                pure (q, n, t)
+              getArgs1 = do
+                (q, n, t) <- getArg
+                Term . Pi q n t . Lambda <$> local (withBinds [(QNorm, n)]) getArgs
+              getArgs =
+                ($(string "->") *> parseApp)
+                  <|> getArgs1
+          getArgs1
+      )
+        <|> Term
+        . Refine
+        <$> do
+          act <-
+            parseAnn
+              ( \etag -> do
+                  annTy <- parseTop
+                  pure do
+                    base <- Lambda <$> local (withBinds [(QNorm, Just etag)]) parseTy
+                    pure $ RefinePreTy etag annTy base
+              )
+              ( do
+                  ann <- parseTop
+                  pure $ RefinePre ann <$> parseTy
+              )
+          act
         <|> ( do
-                token $ $(string "rewrite")
-                rewrite ← local insideEra parseTop
-                Term . Block . BlockRewrite rewrite <$> manyEntries
+                -- Fused: parseApp <|> (\/) <|> (\./) <|> `parseApp @|...|`
+                left <- parseApp
+                space
+                let asConcat = do
+                      $(char '\\')
+                      Term
+                        . Concat left
+                        <$> ( $(char '/')
+                                *> (FRecord <$> parseTy)
+                                <|> $(string "./")
+                                *> (FRow . Lambda <$> local (withBinds [(QNorm, Just dotvar)]) parseTy)
+                            )
+                    asPostAnn =
+                      Term
+                        . Refine
+                        <$> parseAnn
+                          ( \etag -> do
+                              annTy <- Lambda <$> local (withBinds [(QNorm, Just dotvar)]) parseTop
+                              pure $ RefinePostTy left etag annTy
+                          )
+                          (RefinePost left <$> parseTop)
+                asConcat <|> asPostAnn <|> pure left
             )
-    manyEntries =
-      someEntries
-        <|> ( do
-                token $ $(string "in")
-                parseTop
-            )
+
+-- -- 4
+parseInfixOps :: Parser' Term
+parseInfixOps = infxl parseTy parseOperator'
+  where
+    parseOperator' :: Parser' (Term -> Term -> Term)
+    parseOperator' = do
+      i <- ident
+      case i of
+        Just (Ident opName False) ->
+          findVar opName >>= \case
+            Just (idx, QNorm, True) -> pure \a b -> (Term (Var idx) `TApp` a) `TApp` b
+            _ -> empty -- Not a known operator in this scope
+        _ -> empty
+
+insideQuant :: Quant -> ParserContext -> ParserContext
+insideQuant = \case
+  QEra -> insideEra
+  QNorm -> id
+
+-- -- 1
+parseBlock :: Parser' Term
+parseBlock = do
+  let binding = do
+        ty <- optional do
+          token $(string "/:")
+          local insideEra parseInfixOps
+        -- opaque ← optional do
+        --   token $(string "opaque")
+        --   i ← FP.get
+        --   FP.put $ i + 1
+        --   pure i
+        -- name ← ident
+        name <-
+          ( do
+              token $(string "opaque")
+              i <- FP.get
+              FP.put $ i + 1
+              Left . (`OpaqueId` i) <$> (maybe empty pure =<< ident)
+          )
+            <|> (Right <$> ident)
+        q <- parseEq
+        IsErased isEra <- pcErased <$> ask
+        when (isEra && q == QEra) failed -- TODO: Better error
+        -- we could make immediate parser-level filtering for opaques, but it requires quite some work to check that all definitions used are
+        -- opaque-safe, and such check could even reject dubious yet technically correct terms
+        expr <- local (insideQuant q) parseTop
+        pure (name, q, ty, expr)
+      someEntries =
+        ( do
+            (name, q, ty, expr) <- binding
+            rest <- Lambda <$> local (withBinds [(q, either (\(OpaqueId n _) -> Just n) id name)]) manyEntries
+            pure $ Term $ Block $ BlockLet name q ty expr rest
+        )
+          <|> ( do
+                  -- TODO: prettyprinting
+                  token $ $(string "unpack")
+                  record <- parsePrim
+                  token $ $(char '.')
+                  fieldNames <- some $ notFollowedBy (maybe failed pure =<< ident) parseEq
+                  foldr
+                    (\name cont -> Term . Block . BlockLet (Right $ Just name) QNorm Nothing (recordGet (Term $ TagLit name) record) . Lambda <$> local (withBinds [(QNorm, Just name)]) cont)
+                    manyEntries
+                    fieldNames
+              )
+          <|> ( do
+                  token $ $(string "rewrite")
+                  rewrite <- local insideEra parseTop
+                  Term . Block . BlockRewrite rewrite <$> manyEntries
+              )
+      manyEntries =
+        someEntries
+          <|> ( do
+                  token $ $(string "in")
+                  parseTop
+              )
   someEntries
 
 -- 0
-parseLam ∷ Parser' Term
+parseLam :: Parser' Term
 parseLam = token do
   $(char '\\')
-  idents ← fromList <$> some (token $ (,) <$> (($(char '@') $> QEra) <|> pure QNorm) <*> identRightNow)
+  idents <- fromList <$> some (token $ (,) <$> (($(char '@') $> QEra) <|> pure QNorm) <*> identRightNow)
   $(char '.')
-  bod ← local (withBinds idents) parseTop
-  pure $ foldr (\(q, n) → Term . Lam q n . Lambda) bod idents
+  bod <- local (withBinds idents) parseTop
+  pure $ foldr (\(q, n) -> Term . Lam q n . Lambda) bod idents
 
 -- 0
-parseTop ∷ Parser' Term
+parseTop :: Parser' Term
 parseTop =
   token
     $ parseBlock
@@ -799,362 +794,354 @@ parseTop =
 
 -- TODO: Do we need Int? I have a feeling that it's generally not a bad idea to actually, really fuse `App`/`Lam` levels on the compiler level.
 -- That doesn't give a better memory representation, but speeds up certain operations.
-traverseTermF ∷ (Applicative m) ⇒ (a → m b) → (Int → Lambda a → m (Lambda b)) → TermF a → m (TermF b)
+traverseTermF :: (Applicative m) => (a -> m b) -> (Int -> Lambda a -> m (Lambda b)) -> TermF a -> m (TermF b)
 traverseTermF c cNest = \case
-  NumLit x → pure $ NumLit x
-  TagLit x → pure $ TagLit x
-  BoolLit x → pure $ BoolLit x
-  ListLit (Vector' vec) → ListLit . Vector' <$> traverse c vec
-  FieldsLit fi (Vector' vec) → FieldsLit fi . Vector' <$> traverse (bitraverse c c) vec
-  Builtin x → pure $ Builtin x
-  BuiltinsVar → pure BuiltinsVar
-  Lam q arg bod → Lam q arg <$> cNest 1 bod
-  App f a → App <$> c f <*> c a
-  Var i → pure $ Var i
-  Sorry → pure Sorry
-  Block (BlockLet name q ty val into) → Block <$> (BlockLet name q <$> traverse c ty <*> c val <*> cNest 1 into)
-  AppErased f a → AppErased <$> c f <*> c a
-  Refine r →
+  NumLit x -> pure $ NumLit x
+  TagLit x -> pure $ TagLit x
+  BoolLit x -> pure $ BoolLit x
+  ListLit (Vector' vec) -> ListLit . Vector' <$> traverse c vec
+  FieldsLit fi (Vector' vec) -> FieldsLit fi . Vector' <$> traverse (bitraverse c c) vec
+  Builtin x -> pure $ Builtin x
+  BuiltinsVar -> pure BuiltinsVar
+  Lam q arg bod -> Lam q arg <$> cNest 1 bod
+  App f a -> App <$> c f <*> c a
+  Var i -> pure $ Var i
+  Sorry -> pure Sorry
+  Block (BlockLet name q ty val into) -> Block <$> (BlockLet name q <$> traverse c ty <*> c val <*> cNest 1 into)
+  AppErased f a -> AppErased <$> c f <*> c a
+  Refine r ->
     Refine <$> case r of
-      RefinePre a b → RefinePre <$> c a <*> c b
-      RefinePreTy n a b → RefinePreTy n <$> c a <*> cNest 1 b
-      RefinePost a b → RefinePost <$> c a <*> c b
-      RefinePostTy a n b → RefinePostTy <$> c a <*> pure n <*> cNest 1 b
-  RefineGet b a → pure $ RefineGet b a
-  Block (BlockRewrite prf into) → Block <$> (BlockRewrite <$> c prf <*> c into)
-  Import resI x → pure $ Import resI x
-  Pi q n inT outT → Pi q n <$> c inT <*> cNest 1 outT
-  Concat a b →
+      RefinePre a b -> RefinePre <$> c a <*> c b
+      RefinePreTy n a b -> RefinePreTy n <$> c a <*> cNest 1 b
+      RefinePost a b -> RefinePost <$> c a <*> c b
+      RefinePostTy a n b -> RefinePostTy <$> c a <*> pure n <*> cNest 1 b
+  RefineGet b a -> pure $ RefineGet b a
+  Block (BlockRewrite prf into) -> Block <$> (BlockRewrite <$> c prf <*> c into)
+  Import resI x -> pure $ Import resI x
+  Pi q n inT outT -> Pi q n <$> c inT <*> cNest 1 outT
+  Concat a b ->
     Concat <$> c a <*> case b of
-      FRecord b' → FRecord <$> c b'
-      FRow b' → FRow <$> cNest 1 b'
-  ExVar i → pure $ ExVar i
-  UniVar i t → UniVar i <$> c t
+      FRecord b' -> FRecord <$> c b'
+      FRow b' -> FRow <$> cNest 1 b'
+  ExVar i -> pure $ ExVar i
+  UniVar i t -> UniVar i <$> c t
 
-nestedBy' ∷ Int → Term → Int → Maybe Term
+nestedBy' :: Int -> Term -> Int -> Maybe Term
 nestedBy' _ t00 0 = Just t00 -- optimization
 nestedBy' locs0 t00 by =
   runIdentity
     $ runReader @Int locs0
     $ runEmpty (pure Nothing) (pure . Just)
     $ fix
-      ( \rec t0 →
-          let
-            upd n = do
-              locs ← R.ask
-              if n >= locs
-                then
-                  if n + by >= locs
-                    then pure $ n + by
-                    else E.empty
-                else pure n
-           in
-            Term <$> case unTerm t0 of
-              Var n → Var <$> upd n
-              RefineGet i s → (`RefineGet` s) <$> upd i
-              t → traverseTermF rec (\times t1 → Lambda <$> R.local @Int (+ times) (rec $ unLambda t1)) t
+      ( \rec t0 ->
+          let upd n = do
+                locs <- R.ask
+                if n >= locs
+                  then
+                    if n + by >= locs
+                      then pure $ n + by
+                      else E.empty
+                  else pure n
+           in Term <$> case unTerm t0 of
+                Var n -> Var <$> upd n
+                RefineGet i s -> (`RefineGet` s) <$> upd i
+                t -> traverseTermF rec (\times t1 -> Lambda <$> R.local @Int (+ times) (rec $ unLambda t1)) t
       )
       t00
 
-nestedByP' ∷ Int → Term → Int → Term
+nestedByP' :: Int -> Term -> Int -> Term
 nestedByP' locs t by = fromMaybe (error "Internal error: Expected positive nesting") $ nestedBy' locs t by
 
-nestedByP ∷ Term → Int → Term
+nestedByP :: Term -> Int -> Term
 nestedByP = nestedByP' 0
 
-nested ∷ Term → Term
+nested :: Term -> Term
 nested = (`nestedByP` 1)
 
 -- printing
 
-pBS ∷ ByteString → Doc AnsiStyle
+pBS :: ByteString -> Doc AnsiStyle
 pBS = pretty . decodeUtf8Lenient
 
-pIdent ∷ Ident → Doc AnsiStyle
+pIdent :: Ident -> Doc AnsiStyle
 pIdent (Ident x isOp) =
   let res = pBS x
    in if isOp then "_" <> res <> "_" else res
 
-pOpaqueId ∷ OpaqueId → Doc AnsiStyle
+pOpaqueId :: OpaqueId -> Doc AnsiStyle
 pOpaqueId (OpaqueId n i) = pIdent n <> "#" <> pretty i
 
 -- Left/right?
-withPrec ∷ Int → (Int, Doc ann) → Doc ann
+withPrec :: Int -> (Int, Doc ann) -> Doc ann
 withPrec oldPrec (newPrec, bod) =
   if oldPrec > newPrec
     then "(" <> bod <> ")"
     else bod
 
-complexThreshold ∷ Int → Bool
+complexThreshold :: Int -> Bool
 complexThreshold = (>= 5)
 
 -- TODO: Stop it. Just count real symbols.
-isSimple ∷ Term → Bool
+isSimple :: Term -> Bool
 isSimple =
   let ping = do
         modify @Int (+ 1)
-        curr ← get
+        curr <- get
         when (complexThreshold curr) E.empty
       tlComplexity =
         complexity . \case
-          FRecord b' → b'
-          FRow b' → unLambda b'
+          FRecord b' -> b'
+          FRow b' -> unLambda b'
       complexity =
         unTerm >>> \case
-          Lam _ _ (Lambda x) → ping *> complexity x
-          Block defs →
+          Lam _ _ (Lambda x) -> ping *> complexity x
+          Block defs ->
             ping
               *> ( case defs of
-                     BlockLet _ _ b c x → for_ b complexity *> complexity c *> complexity (unLambda x)
-                     BlockRewrite r x → ping *> complexity r *> complexity x
+                     BlockLet _ _ b c x -> for_ b complexity *> complexity c *> complexity (unLambda x)
+                     BlockRewrite r x -> ping *> complexity r *> complexity x
                  )
-          App f a → complexity f *> complexity a
-          AppErased f a → complexity f *> complexity a
-          Refine r → case r of
-            RefinePre a b → complexity a *> complexity b
-            RefinePreTy _ a b → ping *> complexity a *> complexity (unLambda b)
-            RefinePost a b → complexity a *> complexity b
-            RefinePostTy a _ b → ping *> complexity a *> complexity (unLambda b)
-          RefineGet _ _ → ping
-          Import _ _ → ping
-          NumLit _ → ping
-          TagLit _ → ping
-          BoolLit _ → ping
-          Sorry → ping
-          Var _ → ping
-          ListLit vs → ping *> traverse_ complexity vs
-          FieldsLit _ fields → ping *> traverse_ (\(k, v) → complexity k *> complexity v) fields
-          Pi _ _ b c → ping *> complexity b *> complexity (unLambda c)
-          Concat a b → complexity a *> tlComplexity b
-          Builtin _ → ping
-          BuiltinsVar → ping
-          ExVar _ → ping
-          UniVar _ t → ping *> complexity t
-   in runIdentity . runEmpty (pure False) (\() → pure True) . evalState @Int 0 . complexity
+          App f a -> complexity f *> complexity a
+          AppErased f a -> complexity f *> complexity a
+          Refine r -> case r of
+            RefinePre a b -> complexity a *> complexity b
+            RefinePreTy _ a b -> ping *> complexity a *> complexity (unLambda b)
+            RefinePost a b -> complexity a *> complexity b
+            RefinePostTy a _ b -> ping *> complexity a *> complexity (unLambda b)
+          RefineGet _ _ -> ping
+          Import _ _ -> ping
+          NumLit _ -> ping
+          TagLit _ -> ping
+          BoolLit _ -> ping
+          Sorry -> ping
+          Var _ -> ping
+          ListLit vs -> ping *> traverse_ complexity vs
+          FieldsLit _ fields -> ping *> traverse_ (\(k, v) -> complexity k *> complexity v) fields
+          Pi _ _ b c -> ping *> complexity b *> complexity (unLambda c)
+          Concat a b -> complexity a *> tlComplexity b
+          Builtin _ -> ping
+          BuiltinsVar -> ping
+          ExVar _ -> ping
+          UniVar _ t -> ping *> complexity t
+   in runIdentity . runEmpty (pure False) (\() -> pure True) . evalState @Int 0 . complexity
 
-pQuant ∷ Quant → Doc AnsiStyle
+pQuant :: Quant -> Doc AnsiStyle
 pQuant = \case
-  QEra → "@"
-  QNorm → mempty
+  QEra -> "@"
+  QNorm -> mempty
 
 data Fuse = FNo | FLam | FPi | FBlock !(Maybe Term) deriving (Eq)
 
 -- TODO: Refactor isSimple, it's frankly stupid.
 -- Refactor the whole system, it's all stupid.
-pTerm' ∷ (Fuse, Int, Vector (Maybe Ident, Maybe BuiltinT)) → Term → Doc AnsiStyle
+pTerm' :: (Fuse, Int, Vector (Maybe Ident, Maybe BuiltinT)) -> Term -> Doc AnsiStyle
 pTerm' (fuse, oldPrec, vars) t0 =
-  let
-    asvar = \case
-      Var y → Just y
-      Builtin y → (\ind → length vars - ind - 1) <$> findIndexR ((== Just y) . snd) vars
-      _ → Nothing
-    pvar x =
-      let (_, nameM, after) = splitAt3 (length vars - x - 1) vars
-       in case nameM of
-            Just (Just name, _) →
-              if any ((Just name ==) . fst) after
-                then pIdent name <> "#" <> pretty x
-                else pIdent name
-            Just (Nothing, _) → "_"
-            _ → "#" <> pretty x
-    -- pvar x = "$" <> pretty x
-    prefixf = case (fuse, unTerm t0) of
-      (FNo, _) → id
-      (FLam, Lam{}) → id
-      (FLam, _) → (<>) $ annotate (color Cyan) "." <> if isSimple t0 then " " else line
-      (FPi, Pi{}) → id
-      (FPi, _) → (<>) $ annotate (color Cyan) "->" <> " "
-      (FBlock _, Block{}) → id
-      (FBlock _, _) → \x → line <> annotate (color Cyan) "in" <+> nest 2 x
-   in
-    prefixf $ withPrec oldPrec case unTerm t0 of
-      Lam q arg x →
-        ( 0
-        , (if fuse == FLam then " " else annotate (color Cyan) "\\")
-            <> pQuant q
-            <> maybe "_" pIdent arg
-            <> pTerm' (FLam, 0, vars |> (arg, Nothing)) (unLambda x)
-        )
-      Block block → (1,) $ case block of
-        BlockLet nameM q tyM val in_ →
-          let
-            b = case val of
-              Term (Builtin b') → Just b'
-              _ → Nothing
-           in
-            case (nameM, q, tyM, val) of
-              (Right (Just name1), QNorm, Nothing, (TBuiltin RecordGet `TApp` (unTerm → TagLit name2)) `TApp` record)
-                | name1 == name2 →
-                    (if fuse == FBlock (Just record) then mempty else annotate (color Yellow) "unpack" <+> pTerm' (FNo, 5, vars) record <> annotate (color Cyan) ".")
-                      <+> pIdent name1
-                        <> pTerm' (FBlock $ Just record, 0, vars |> (Just name1, b)) (unLambda in_)
-              _ →
-                ( case fuse of
-                    FBlock{} → line
-                    _ → mempty
-                )
-                  <> maybe
-                    mempty
-                    ( \ty →
-                        ( case fuse of
-                            FBlock{} → line
-                            _ → mempty
-                        )
-                          <> "/:"
-                          <+> nest 2 (pTerm' (FNo, 2, vars) ty) <> line
-                    )
-                    tyM -- TODO: split if complicated type
-                  <> either ((annotate (color Yellow) "opaque" <+>) . pOpaqueId) (maybe "_" pIdent) nameM
-                  -- maybe "_" pIdent (either _ _ nameM
-                  <+> annotate (color Yellow) (pQuant q <> "=")
-                    <> softline
-                    <> nest 2 (pTerm' (FNo, 0, vars) val)
-                    <> pTerm' (FBlock Nothing, 0, vars |> (either (\(OpaqueId n _) → Just n) id nameM, b)) (unLambda in_)
-        BlockRewrite x in_ → line <> "rewrite" <+> pTerm' (FNo, 0, vars) x <> line <> pTerm' (FBlock Nothing, 0, vars) in_
-      Pi q name inTy outTy →
-        ( 3
-        , let (bL, bR) = case q of
-                QNorm → ("(", ")")
-                QEra → ("{", "}")
-           in (if fuse == FPi then mempty else annotate (color Cyan) "Fun" <> " ")
-                <> bL
-                <> maybe mempty (\i → pIdent i <+> ": ") name
-                <> pTerm' (FNo, 0, vars) inTy
-                <> bR
-                <+> pTerm' (FPi, 3, vars |> (name, Nothing)) (unLambda outTy)
-        )
-      Concat a b →
-        ( 3
-        , pTerm' (FNo, 4, vars) a
-            <+> annotate (color Cyan) "\\" <> case b of
-              FRecord b' → annotate (color Cyan) "/" <+> pTerm' (FNo, 3, vars) b'
-              FRow b' → "." <> annotate (color Cyan) "/" <+> pTerm' (FNo, 3, vars |> (Just dotvar, Nothing)) (unLambda b')
-        )
-      Refine r →
-        let
-          pBase fvars = pTerm' (FNo, 3, fvars vars)
-          pATy n fvars t = pIdent n <+> annotate (color Cyan) ":" <+> pTerm' (FNo, 0, fvars vars) t
-          pATerm fvars = pTerm' (FNo, 0, fvars vars)
-          pAnn x = annotate (color Cyan) "@|" <> x <> annotate (color Cyan) "|"
-         in
-          ( 3
-          , case r of
-              RefinePre ann base → pAnn (pATerm id ann) <+> pBase id base
-              RefinePreTy n annTy base → pAnn (pATy n id annTy) <+> pBase (|> (Just n, Nothing)) (unLambda base)
-              RefinePost base ann → pBase id base <+> pAnn (pATerm id ann)
-              RefinePostTy base n annTy → pBase id base <+> pAnn (pATy n (|> (Just dotvar, Nothing)) $ unLambda annTy)
+  let asvar = \case
+        Var y -> Just y
+        Builtin y -> (\ind -> length vars - ind - 1) <$> findIndexR ((== Just y) . snd) vars
+        _ -> Nothing
+      pvar x =
+        let (_, nameM, after) = splitAt3 (length vars - x - 1) vars
+         in case nameM of
+              Just (Just name, _) ->
+                if any ((Just name ==) . fst) after
+                  then pIdent name <> "#" <> pretty x
+                  else pIdent name
+              Just (Nothing, _) -> "_"
+              _ -> "#" <> pretty x
+      -- pvar x = "$" <> pretty x
+      prefixf = case (fuse, unTerm t0) of
+        (FNo, _) -> id
+        (FLam, Lam {}) -> id
+        (FLam, _) -> (<>) $ annotate (color Cyan) "." <> if isSimple t0 then " " else line
+        (FPi, Pi {}) -> id
+        (FPi, _) -> (<>) $ annotate (color Cyan) "->" <> " "
+        (FBlock _, Block {}) -> id
+        (FBlock _, _) -> \x -> line <> annotate (color Cyan) "in" <+> nest 2 x
+   in prefixf $ withPrec oldPrec case unTerm t0 of
+        Lam q arg x ->
+          ( 0,
+            (if fuse == FLam then " " else annotate (color Cyan) "\\")
+              <> pQuant q
+              <> maybe "_" pIdent arg
+              <> pTerm' (FLam, 0, vars |> (arg, Nothing)) (unLambda x)
           )
-      Sorry → (5, "SORRY!")
-      RefineGet x (skips, final) →
-        let skips' = hcat $ replicate skips ".@_"
-         in (5, pvar x <> annotate (color Blue) (skips' <> maybe mempty (\final' → ".@" <> pIdent final') final))
-      App (TApp (TBuiltin RecordGet) (unTerm → TagLit tag)) rec →
-        (5, pTerm' (FNo, 5, vars) rec <> annotate (color Blue) ("." <> pIdent tag))
-      App lam arg2 → case lam of
-        (TApp (Term (asvar → Just opIdx)) arg1)
-          | Just (Just (Ident opName True), _) ← vars !? (length vars - opIdx - 1) →
-              (2, pTerm' (FNo, 3, vars) arg1 <+> pBS opName <+> pTerm' (FNo, 2, vars) arg2)
-        _ →
-          (4, pTerm' (FNo, 4, vars) lam <+> pTerm' (FNo, 5, vars) arg2)
-      AppErased lam arg → (4, pTerm' (FNo, 4, vars) lam <+> "@" <> pTerm' (FNo, 5, vars) arg)
-      (asvar → Just x) → (5, pvar x)
-      Var _ → error "^ just handled that ^"
-      Builtin (OpaqueVal (OpaqueId n i)) → (5, annotate (color Green) (pIdent n) <> "#" <> pretty i)
-      Builtin x → (5, "fadeno." <> annotate (color Green) (pIdent (identOfBuiltin x)))
-      BuiltinsVar → (5, "fadeno")
-      NumLit x → (5, pretty x)
-      BoolLit x → (5, annotate (color Green) if x then "true" else "false")
-      TagLit x → (5, annotate (color Blue) $ "." <> pIdent x)
-      FieldsLit fi fields →
-        let (brL, brR) = case fi of
-              FRecord () → ("{", "}")
-              FRow () → ("{(", ")}")
-         in ( 5
-            , encloseSep
-                (annotate (color White) brL)
-                (annotate (color White) brR)
-                (annotate (color White) " | ")
-                (fmap (\(n, v) → pTerm' (FNo, 5, vars) n <+> annotate (color Cyan) "=" <+> pTerm' (FNo, 0, vars) v) (toList fields))
-            )
-      ListLit vec → (5, encloseSep "[" "]" " | " $ pTerm' (FNo, 0, vars) <$> toList vec)
-      Import _ x → (5, "./" <> pBS x)
-      ExVar (s, i) → (5, "(exi#" <> pretty s <> "/" <> pretty i <> ")")
-      UniVar (s, i) t → (5, "(uni#" <> pretty s <> "/" <> pretty i <+> ":" <+> pTerm' (FNo, 0, vars) t <> ")")
+        Block block -> (1,) $ case block of
+          BlockLet nameM q tyM val in_ ->
+            let b = case val of
+                  Term (Builtin b') -> Just b'
+                  _ -> Nothing
+             in case (nameM, q, tyM, val) of
+                  (Right (Just name1), QNorm, Nothing, (TBuiltin RecordGet `TApp` (unTerm -> TagLit name2)) `TApp` record)
+                    | name1 == name2 ->
+                        (if fuse == FBlock (Just record) then mempty else annotate (color Yellow) "unpack" <+> pTerm' (FNo, 5, vars) record <> annotate (color Cyan) ".")
+                          <+> pIdent name1
+                            <> pTerm' (FBlock $ Just record, 0, vars |> (Just name1, b)) (unLambda in_)
+                  _ ->
+                    ( case fuse of
+                        FBlock {} -> line
+                        _ -> mempty
+                    )
+                      <> maybe
+                        mempty
+                        ( \ty ->
+                            ( case fuse of
+                                FBlock {} -> line
+                                _ -> mempty
+                            )
+                              <> "/:"
+                              <+> nest 2 (pTerm' (FNo, 2, vars) ty) <> line
+                        )
+                        tyM -- TODO: split if complicated type
+                      <> either ((annotate (color Yellow) "opaque" <+>) . pOpaqueId) (maybe "_" pIdent) nameM
+                      -- maybe "_" pIdent (either _ _ nameM
+                      <+> annotate (color Yellow) (pQuant q <> "=")
+                        <> softline
+                        <> nest 2 (pTerm' (FNo, 0, vars) val)
+                        <> pTerm' (FBlock Nothing, 0, vars |> (either (\(OpaqueId n _) -> Just n) id nameM, b)) (unLambda in_)
+          BlockRewrite x in_ -> line <> "rewrite" <+> pTerm' (FNo, 0, vars) x <> line <> pTerm' (FBlock Nothing, 0, vars) in_
+        Pi q name inTy outTy ->
+          ( 3,
+            let (bL, bR) = case q of
+                  QNorm -> ("(", ")")
+                  QEra -> ("{", "}")
+             in (if fuse == FPi then mempty else annotate (color Cyan) "Fun" <> " ")
+                  <> bL
+                  <> maybe mempty (\i -> pIdent i <+> ": ") name
+                  <> pTerm' (FNo, 0, vars) inTy
+                  <> bR
+                  <+> pTerm' (FPi, 3, vars |> (name, Nothing)) (unLambda outTy)
+          )
+        Concat a b ->
+          ( 3,
+            pTerm' (FNo, 4, vars) a
+              <+> annotate (color Cyan) "\\" <> case b of
+                FRecord b' -> annotate (color Cyan) "/" <+> pTerm' (FNo, 3, vars) b'
+                FRow b' -> "." <> annotate (color Cyan) "/" <+> pTerm' (FNo, 3, vars |> (Just dotvar, Nothing)) (unLambda b')
+          )
+        Refine r ->
+          let pBase fvars = pTerm' (FNo, 3, fvars vars)
+              pATy n fvars t = pIdent n <+> annotate (color Cyan) ":" <+> pTerm' (FNo, 0, fvars vars) t
+              pATerm fvars = pTerm' (FNo, 0, fvars vars)
+              pAnn x = annotate (color Cyan) "@|" <> x <> annotate (color Cyan) "|"
+           in ( 3,
+                case r of
+                  RefinePre ann base -> pAnn (pATerm id ann) <+> pBase id base
+                  RefinePreTy n annTy base -> pAnn (pATy n id annTy) <+> pBase (|> (Just n, Nothing)) (unLambda base)
+                  RefinePost base ann -> pBase id base <+> pAnn (pATerm id ann)
+                  RefinePostTy base n annTy -> pBase id base <+> pAnn (pATy n (|> (Just dotvar, Nothing)) $ unLambda annTy)
+              )
+        Sorry -> (5, "SORRY!")
+        RefineGet x (skips, final) ->
+          let skips' = hcat $ replicate skips ".@_"
+           in (5, pvar x <> annotate (color Blue) (skips' <> maybe mempty (\final' -> ".@" <> pIdent final') final))
+        App (TApp (TBuiltin RecordGet) (unTerm -> TagLit tag)) rec ->
+          (5, pTerm' (FNo, 5, vars) rec <> annotate (color Blue) ("." <> pIdent tag))
+        App lam arg2 -> case lam of
+          (TApp (Term (asvar -> Just opIdx)) arg1)
+            | Just (Just (Ident opName True), _) <- vars !? (length vars - opIdx - 1) ->
+                (2, pTerm' (FNo, 3, vars) arg1 <+> pBS opName <+> pTerm' (FNo, 2, vars) arg2)
+          _ ->
+            (4, pTerm' (FNo, 4, vars) lam <+> pTerm' (FNo, 5, vars) arg2)
+        AppErased lam arg -> (4, pTerm' (FNo, 4, vars) lam <+> "@" <> pTerm' (FNo, 5, vars) arg)
+        (asvar -> Just x) -> (5, pvar x)
+        Var _ -> error "^ just handled that ^"
+        Builtin (OpaqueVal (OpaqueId n i)) -> (5, annotate (color Green) (pIdent n) <> "#" <> pretty i)
+        Builtin x -> (5, "fadeno." <> annotate (color Green) (pIdent (identOfBuiltin x)))
+        BuiltinsVar -> (5, "fadeno")
+        NumLit x -> (5, pretty x)
+        BoolLit x -> (5, annotate (color Green) if x then "true" else "false")
+        TagLit x -> (5, annotate (color Blue) $ "." <> pIdent x)
+        FieldsLit fi fields ->
+          let (brL, brR) = case fi of
+                FRecord () -> ("{", "}")
+                FRow () -> ("{(", ")}")
+           in ( 5,
+                encloseSep
+                  (annotate (color White) brL)
+                  (annotate (color White) brR)
+                  (annotate (color White) " | ")
+                  (fmap (\(n, v) -> pTerm' (FNo, 5, vars) n <+> annotate (color Cyan) "=" <+> pTerm' (FNo, 0, vars) v) (toList fields))
+              )
+        ListLit vec -> (5, encloseSep "[" "]" " | " $ pTerm' (FNo, 0, vars) <$> toList vec)
+        Import _ x -> (5, "./" <> pBS x)
+        ExVar (s, i) -> (5, "(exi#" <> pretty s <> "/" <> pretty i <> ")")
+        UniVar (s, i) t -> (5, "(uni#" <> pretty s <> "/" <> pretty i <+> ":" <+> pTerm' (FNo, 0, vars) t <> ")")
 
-pTerm ∷ Vector (Maybe Ident, Maybe BuiltinT) → Term → Doc AnsiStyle
+pTerm :: Vector (Maybe Ident, Maybe BuiltinT) -> Term -> Doc AnsiStyle
 pTerm = pTerm' . (FNo,0,)
 
-parse ∷ ParserContext → Int → ByteString → Either (Doc AnsiStyle) (Term, Int)
+parse :: ParserContext -> Int -> ByteString -> Either (Doc AnsiStyle) (Term, Int)
 parse vars fres inp = case runParser (parseTop <* eof) vars fres inp of
-  OK x i "" → Right (x, i)
-  Err e → Left $ "Unable to parse at " <> pretty (posLineCols inp [e])
-  _ → Left "Internal error: parser failure"
+  OK x i "" -> Right (x, i)
+  Err e -> Left $ "Unable to parse at " <> pretty (posLineCols inp [e])
+  _ -> Left "Internal error: parser failure"
 
-parseSource ∷ Int → ByteString → IO (Term, Int)
+parseSource :: Int -> ByteString -> IO (Term, Int)
 parseSource fres x = pure $ either (error . show) id $ parse (ParserContext (IsErased False) []) fres x
 
-parseFile ∷ Int → OsPath → IO (Term, Int)
+parseFile :: Int -> OsPath -> IO (Term, Int)
 parseFile fres = parseSource fres <=< readFile'
 
-render ∷ Doc AnsiStyle → IO ()
+render :: Doc AnsiStyle -> IO ()
 render x = renderIO stdout $ layoutSmart defaultLayoutOptions $ x <> line
 
 type LoaderC = StateC (HashMap OsPath Word64) (StateC N.UsedNames (StateC (Vector Term) (ErrorC (Doc AnsiStyle) (WriterC (Vector OsPath) (StateC Int IO)))))
+
 newtype Module = Module (Vector Term) -- non-empty
 
 -- TODO: disallow trailing `/` in Import syntax!
 
 -- | Achtung: Uses internal Fresh, so no mix & matching! Better rewrite the signature to be StateC Int IO _.
-loadModule' ∷ N.UsedNames → OsPath → IO (Vector OsPath, Either (Doc AnsiStyle) (N.UsedNames, Module))
-loadModule' names0 = evalState @Int 0 . runWriter (curry pure) . runError (pure . Left) (pure . Right) . runState (\t u → pure (u, Module t)) [] . execState names0 . evalState mempty . new
- where
-  new ∷ OsPath → LoaderC Word64
-  new path = do
-    tell @(Vector OsPath) [path] -- Keep track of all loaded files for `watch`
-    -- Parse this file
-    oldI ← get
-    (t0, newI) ← either throwError pure . parse (ParserContext (IsErased False) []) oldI =<< sendIO (readFile' $ path <> unsafeEncodeUtf ".fad")
-    put newI
-    -- Load submodules
-    t ← runReader path $ subload t0
-    -- Add this file as a module
-    oldModules :: Vector Term <- get
-    let i = fromIntegral $ length oldModules
-    modify @(HashMap OsPath Word64) $ HM.insert path i
-    put (oldModules |> t)
-    pure i
-  subload ∷ Term → ReaderC OsPath LoaderC Term
-  subload =
-    unTerm >>> \case
-      Import Nothing subpath → do
-        dir ← R.ask
-        subpath' ← sendIO $ encodeUtf (BS.unpack subpath)
-        let path = takeDirectory dir </> subpath'
-        loaded :: HashMap OsPath Word64 ← get
-        i ← case HM.lookup path loaded of
-          Just i → pure $ fromIntegral i
-          Nothing → RIO.lift $ new path
-        pure $ Term $ Import (Just i) subpath
-      t → do
-        let
-          label = case t of
-            Block (BlockLet (Right (Just (Ident n False))) _ _ _ _) → Just n
-            Block (BlockLet (Left (OpaqueId (Ident n False) _)) _ _ _ _) → Just n
-            Lam _ (Just (Ident n False)) _ → Just n
-            Pi _ (Just (Ident n False)) _ _ → Just n
-            _ → Nothing
-        for_ label $ modify . N.use
-        Term <$> traverseTermF subload (\_n → fmap Lambda . subload . unLambda) t
+loadModule' :: N.UsedNames -> OsPath -> IO (Vector OsPath, Either (Doc AnsiStyle) (N.UsedNames, Module))
+loadModule' names0 = evalState @Int 0 . runWriter (curry pure) . runError (pure . Left) (pure . Right) . runState (\t u -> pure (u, Module t)) [] . execState names0 . evalState mempty . new
+  where
+    new :: OsPath -> LoaderC Word64
+    new path = do
+      tell @(Vector OsPath) [path] -- Keep track of all loaded files for `watch`
+      -- Parse this file
+      oldI <- get
+      (t0, newI) <- either throwError pure . parse (ParserContext (IsErased False) []) oldI =<< sendIO (readFile' $ path <> unsafeEncodeUtf ".fad")
+      put newI
+      -- Load submodules
+      t <- runReader path $ subload t0
+      -- Add this file as a module
+      oldModules :: Vector Term <- get
+      let i = fromIntegral $ length oldModules
+      modify @(HashMap OsPath Word64) $ HM.insert path i
+      put (oldModules |> t)
+      pure i
+    subload :: Term -> ReaderC OsPath LoaderC Term
+    subload =
+      unTerm >>> \case
+        Import Nothing subpath -> do
+          dir <- R.ask
+          subpath' <- sendIO $ encodeUtf (BS.unpack subpath)
+          let path = takeDirectory dir </> subpath'
+          loaded :: HashMap OsPath Word64 <- get
+          i <- case HM.lookup path loaded of
+            Just i -> pure $ fromIntegral i
+            Nothing -> RIO.lift $ new path
+          pure $ Term $ Import (Just i) subpath
+        t -> do
+          let label = case t of
+                Block (BlockLet (Right (Just (Ident n False))) _ _ _ _) -> Just n
+                Block (BlockLet (Left (OpaqueId (Ident n False) _)) _ _ _ _) -> Just n
+                Lam _ (Just (Ident n False)) _ -> Just n
+                Pi _ (Just (Ident n False)) _ _ -> Just n
+                _ -> Nothing
+          for_ label $ modify . N.use
+          Term <$> traverseTermF subload (\_n -> fmap Lambda . subload . unLambda) t
 
-parseQQ ∷ QuasiQuoter
+parseQQ :: QuasiQuoter
 parseQQ =
   QuasiQuoter
-    { quoteExp = \s → do
-        term ← case parse (ParserContext (IsErased False) []) 0 (BS.pack s) of
-          Left e → fail $ "parseQQ: Parse error: " ++ show e
-          Right t → pure t
-        ⟦term⟧
-    , quotePat = error "parseQQ: No pattern support"
-    , quoteType = error "parseQQ: No type support"
-    , quoteDec = error "parseQQ: No declaration support"
+    { quoteExp = \s -> do
+        term <- case parse (ParserContext (IsErased False) []) 0 (BS.pack s) of
+          Left e -> fail $ "parseQQ: Parse error: " ++ show e
+          Right t -> pure t
+        [|term|],
+      quotePat = error "parseQQ: No pattern support",
+      quoteType = error "parseQQ: No type support",
+      quoteDec = error "parseQQ: No declaration support"
     }
