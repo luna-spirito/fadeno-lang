@@ -5,12 +5,17 @@ import Compiler (CompileResult, Instr (..), TagSet, Value (..))
 import Control.Monad (replicateM)
 import Data.ByteString qualified as B
 import Data.IntMap.Strict qualified as IM
+import Data.List (sortOn)
 import Data.RRBVector (Vector)
 import Data.Serialize qualified as S
 import GHC.Exts (IsList (..))
-import Parser (Bits (..), BuiltinT (..), Ident (..), NumDesc (..), OpaqueId (..))
+import Parser (Bits (..), BuiltinT (..), Ident (..), NumDesc (..), OpaqueId (..), regIdent)
 import RIO hiding (Vector, toList)
 import RIO.HashMap qualified as HM
+
+-- ===========================================================================
+-- CompileResult
+-- ===========================================================================
 
 serializeCompileResult :: CompileResult -> ByteString
 serializeCompileResult = S.runPut . putCompileResult
@@ -20,16 +25,37 @@ deserializeCompileResult = S.runGet getCompileResult
 
 putCompileResult :: CompileResult -> S.Put
 putCompileResult ((tagsMap, tagSetsMap), instrs) = do
-  putHashMap putIdent S.putWord64le tagsMap
+  putIdentsVec tagsMap
   putHashMap putTagSet S.putWord64le tagSetsMap
   putVector (putVector putInstr) instrs
 
 getCompileResult :: S.Get CompileResult
 getCompileResult = do
-  tagsMap <- getHashMap getIdent S.getWord64le
+  tagsMap <- getIdentsVec
   tagSetsMap <- getHashMap getTagSet S.getWord64le
   instrs <- getVector $ getVector getInstr
   pure ((tagsMap, tagSetsMap), instrs)
+
+-- ===========================================================================
+-- Idents (dense vector, indexed by tag_id)
+-- ===========================================================================
+
+putIdentsVec :: HashMap Ident Word64 -> S.Put
+putIdentsVec tagsMap = do
+  let n = HM.size tagsMap
+  S.putWord32le $ fromIntegral n
+  let sorted = sortOn snd $ HM.toList tagsMap
+  for_ sorted $ \(Ident bs isOp, _i) -> putByteStringLen bs *> putBool8 isOp
+
+getIdentsVec :: S.Get (HashMap Ident Word64)
+getIdentsVec = do
+  len <- fromIntegral <$> S.getWord32le
+  idents <- replicateM len $ Ident <$> getByteStringLen <*> getBool8
+  pure $ HM.fromList $ zip idents (map fromIntegral [0 .. len - 1])
+
+-- ===========================================================================
+-- HashMap / TagSet / Vector helpers
+-- ===========================================================================
 
 putHashMap :: (a -> S.Put) -> (b -> S.Put) -> HashMap a b -> S.Put
 putHashMap putKey putVal hm = do
@@ -69,6 +95,10 @@ getVector getItem = do
   items <- replicateM len getItem
   pure $ fromList items
 
+-- ===========================================================================
+-- Instr
+-- ===========================================================================
+
 putInstr :: Instr -> S.Put
 putInstr = \case
   IPush v -> S.putWord8 0 *> putValue v
@@ -88,6 +118,7 @@ putInstr = \case
   IMkList n -> S.putWord8 7 *> S.putWord8 n
   IMkRecord n -> S.putWord8 8 *> S.putWord8 n
   IMkQRecord ts n -> S.putWord8 9 *> S.putWord64le ts *> S.putWord8 n
+  IRecordCat -> S.putWord8 10
 
 getInstr :: S.Get Instr
 getInstr = do
@@ -107,7 +138,12 @@ getInstr = do
     7 -> IMkList <$> S.getWord8
     8 -> IMkRecord <$> S.getWord8
     9 -> IMkQRecord <$> S.getWord64le <*> S.getWord8
+    10 -> pure IRecordCat
     _ -> fail "Unknown instruction tag"
+
+-- ===========================================================================
+-- Value
+-- ===========================================================================
 
 putValue :: Value -> S.Put
 putValue = \case
@@ -138,9 +174,20 @@ getValue = do
     9 -> VKolQuery <$> S.getWord64le
     _ -> fail "Unknown value tag"
 
+-- ===========================================================================
+-- BuiltinT — canonical tag scheme
+-- ===========================================================================
+--
+-- Tags 0–29: non-Kol builtins (dense, matching Rust deser.rs)
+-- Tags 30–49: Kol domain builtins (in builtinsList order, minus KolMkQuery)
+--
+-- KolMkQuery is never serialized — the compiler emits VKolQuery instead.
+-- VM-only builtins (KolMkData, KolResolveData, etc.) have no wire tag.
+
 putBuiltin :: BuiltinT -> S.Put
 putBuiltin = \case
   KolMkQuery -> error "putBuiltin: KolMkQuery should never be serialized (compiler emits VKolQuery instead)"
+  -- Non-Kol (0–29)
   Any' -> S.putWord8 0
   Bool -> S.putWord8 1
   Eq -> S.putWord8 2
@@ -171,35 +218,33 @@ putBuiltin = \case
   IntNeg d -> S.putWord8 27 *> putNumDesc d
   PropListViewlDec -> S.putWord8 28
   PropLteTrans -> S.putWord8 29
-  KolEventId -> S.putWord8 30
-  KolUserId -> S.putWord8 31
-  KolMkEventType -> S.putWord8 32
-  KolUnEventType -> S.putWord8 33
-  KolGear -> S.putWord8 34
+  -- Kol domain (30–49): builtinsList order minus KolMkQuery
+  KolDataId -> S.putWord8 30
+  KolGear -> S.putWord8 31
+  KolId -> S.putWord8 32
+  KolLocEventId -> S.putWord8 33
+  KolMkEventType -> S.putWord8 34
   KolMkGear -> S.putWord8 35
   KolQuery -> S.putWord8 36
-  KolListNew -> S.putWord8 37
-  KolListPush -> S.putWord8 38
-  KolId -> S.putWord8 39
+  KolUserId -> S.putWord8 37
+  KolEventTypeId -> S.putWord8 38
+  KolMkStateGraph -> S.putWord8 39
   KolQueryDelta -> S.putWord8 40
   KolSenderToUser -> S.putWord8 41
-  KolMkStateGraph -> S.putWord8 42
-  KolStateGraphApply -> S.putWord8 43
-  KolStateGraphOut -> S.putWord8 44
-  KolSgCtxQuery -> S.putWord8 45
-  KolSgCtxUpdate -> S.putWord8 46
-  KolSgCtxDepQuery -> S.putWord8 47
-  KolEventTypeId -> S.putWord8 48
-  KolLocalEventId -> S.putWord8 49
-  KolTimestamp -> S.putWord8 50
-  KolLocalUserId -> S.putWord8 51
-  KolStateGraphT -> S.putWord8 52
-  KolStateGraphOutT -> S.putWord8 53
+  KolSgCtxDepQuery -> S.putWord8 42
+  KolSgCtxQuery -> S.putWord8 43
+  KolSgCtxUpdate -> S.putWord8 44
+  KolStateGraphApply -> S.putWord8 45
+  KolStateGraphOut -> S.putWord8 46
+  KolStateGraphOutT -> S.putWord8 47
+  KolStateGraphT -> S.putWord8 48
+  KolTimestamp -> S.putWord8 49
 
 getBuiltin :: S.Get BuiltinT
 getBuiltin = do
   tag <- S.getWord8
   case tag of
+    -- Non-Kol (0–29)
     0 -> pure Any'
     1 -> pure Bool
     2 -> pure Eq
@@ -212,50 +257,53 @@ getBuiltin = do
     9 -> pure ListLength
     10 -> pure ListViewL
     11 -> pure Never
-    12 -> pure RecordDropFields
-    13 -> pure RecordGet
-    14 -> pure RecordKeepFields
-    15 -> pure Refl
-    16 -> pure RowPlus
-    17 -> pure Tag
-    18 -> pure TagEq
-    19 -> pure TypePlus
-    20 -> pure W
-    21 -> pure WUnwrap
-    22 -> pure WWrap
-    23 -> Int' <$> getNumDesc
-    24 -> IntAdd <$> getNumDesc
-    25 -> IntMul <$> getNumDesc
-    26 -> IntNeg <$> getNumDesc
+    12 -> do
+      x <- fromIntegral <$> S.getWord64le
+      pure $ OpaqueVal (OpaqueId (regIdent "<deser>") x)
+    13 -> pure RecordDropFields
+    14 -> pure RecordGet
+    15 -> pure RecordKeepFields
+    16 -> pure Refl
+    17 -> pure RowPlus
+    18 -> pure Tag
+    19 -> pure TagEq
+    20 -> pure TypePlus
+    21 -> pure W
+    22 -> pure WUnwrap
+    23 -> pure WWrap
+    24 -> Int' <$> getNumDesc
+    25 -> IntAdd <$> getNumDesc
+    26 -> IntMul <$> getNumDesc
+    27 -> IntNeg <$> getNumDesc
     28 -> pure PropListViewlDec
     29 -> pure PropLteTrans
-    30 -> pure KolEventId
-    31 -> pure KolUserId
-    32 -> pure KolMkEventType
-    33 -> pure KolUnEventType
-    34 -> pure KolGear
+    -- Kol domain (30–49)
+    30 -> pure KolDataId
+    31 -> pure KolGear
+    32 -> pure KolId
+    33 -> pure KolLocEventId
+    34 -> pure KolMkEventType
     35 -> pure KolMkGear
     36 -> pure KolQuery
-    37 -> pure KolListNew
-    38 -> pure KolListPush
-    39 -> pure KolId
+    37 -> pure KolUserId
+    38 -> pure KolEventTypeId
+    39 -> pure KolMkStateGraph
     40 -> pure KolQueryDelta
     41 -> pure KolSenderToUser
-    42 -> pure KolMkStateGraph
-    43 -> pure KolStateGraphApply
-    44 -> pure KolStateGraphOut
-    45 -> pure KolSgCtxQuery
-    46 -> pure KolSgCtxUpdate
-    47 -> pure KolSgCtxDepQuery
-    48 -> pure KolEventTypeId
-    49 -> pure KolLocalEventId
-    50 -> pure KolTimestamp
-    51 -> pure KolLocalUserId
-    52 -> pure KolStateGraphT
-    53 -> pure KolStateGraphOutT
+    42 -> pure KolSgCtxDepQuery
+    43 -> pure KolSgCtxQuery
+    44 -> pure KolSgCtxUpdate
+    45 -> pure KolStateGraphApply
+    46 -> pure KolStateGraphOut
+    47 -> pure KolStateGraphOutT
+    48 -> pure KolStateGraphT
+    49 -> pure KolTimestamp
     _ -> fail "Unknown builtin tag"
 
--- TODO: More dense?
+-- ===========================================================================
+-- NumDesc / Bits
+-- ===========================================================================
+
 putNumDesc :: NumDesc -> S.Put
 putNumDesc = \case
   NumFin nonNeg bits -> do
@@ -288,6 +336,10 @@ getBits = do
     2 -> pure Bits32
     3 -> pure Bits64
     _ -> fail "Unknown bits tag"
+
+-- ===========================================================================
+-- Ident / primitives
+-- ===========================================================================
 
 putIdent :: Ident -> S.Put
 putIdent (Ident bs isOp) = putByteStringLen bs *> putBool8 isOp

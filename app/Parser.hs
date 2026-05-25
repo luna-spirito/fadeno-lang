@@ -126,89 +126,79 @@ data BuiltinT
   | W
   | WUnwrap
   | WWrap
-  | -- Kolorinko domain builtins (content-addressable type IDs, gears, queries)
-    KolEventId
-  | KolUserId
-  | KolMkEventType
-  | KolUnEventType
+  -- Kolorinko domain builtins (content-addressable type IDs, gears, queries)
+  | KolDataId
   | KolGear
-  | KolMkGear
-  | KolQuery
-  | KolMkQuery -- Compiles to VKolQuery 0 constant (not serialized as builtin)
-  | KolListNew -- list_new
-  | KolListPush -- list_push
   | KolId -- Id type
+  | KolLocEventId
+  | KolMkEventType
+  | KolMkGear
+  | KolMkQuery -- Compiles to VKolQuery 0 constant (not serialized as builtin)
+  | KolQuery
+  | KolUserId
   -- StateGraph builtins
+  | KolEventTypeId
+  | KolMkStateGraph
   | KolQueryDelta
   | KolSenderToUser
-  | KolMkStateGraph
-  | KolStateGraphApply
-  | KolStateGraphOut
+  | KolSgCtxDepQuery
   | KolSgCtxQuery
   | KolSgCtxUpdate
-  | KolSgCtxDepQuery
-  | KolEventTypeId
-  | KolLocalEventId
-  | KolTimestamp
-  | KolLocalUserId
-  | KolStateGraphT
+  | KolStateGraphApply
+  | KolStateGraphOut
   | KolStateGraphOutT
+  | KolStateGraphT
+  | KolTimestamp
   deriving (Show, Eq, Ord, Lift)
 
 builtinsList :: Vector BuiltinT
 builtinsList =
-  [ Any',
-    Bool,
-    Eq,
-    Loop,
-    If,
-    IntEq,
-    IntGte0,
-    List,
-    ListIndexL,
-    ListLength,
-    ListViewL,
-    Never,
-    PropListViewlDec,
-    PropLteTrans,
-    RecordDropFields,
-    RecordGet,
-    RecordKeepFields,
-    Refl,
-    RowPlus,
-    Tag,
-    TagEq,
-    TypePlus,
-    W,
-    WUnwrap,
-    WWrap,
-    -- Kolorinko domain builtins
-    KolEventId,
-    KolUserId,
-    KolMkEventType,
-    KolUnEventType,
-    KolGear,
-    KolMkGear,
-    KolQuery,
-    KolMkQuery,
-    KolListNew,
-    KolListPush,
-    KolId,
-    -- StateGraph builtins
-    KolQueryDelta,
-    KolSenderToUser,
-    KolMkStateGraph,
-    KolStateGraphApply,
-    KolStateGraphOut,
-    KolSgCtxQuery,
-    KolSgCtxUpdate,
-    KolSgCtxDepQuery,
-    KolEventTypeId,
-    KolLocalEventId,
-    KolTimestamp,
-    KolLocalUserId,
-    KolStateGraphT,
-    KolStateGraphOutT
+  [ Any'
+  , Bool
+  , Eq
+  , Loop
+  , If
+  , IntEq
+  , IntGte0
+  , List
+  , ListIndexL
+  , ListLength
+  , ListViewL
+  , Never
+  , PropListViewlDec
+  , PropLteTrans
+  , RecordDropFields
+  , RecordGet
+  , RecordKeepFields
+  , Refl
+  , RowPlus
+  , Tag
+  , TagEq
+  , TypePlus
+  , W
+  , WUnwrap
+  , WWrap
+  , KolDataId
+  , KolGear
+  , KolId
+  , KolLocEventId
+  , KolMkEventType
+  , KolMkGear
+  , KolMkQuery
+  , KolQuery
+  , KolUserId
+  , KolEventTypeId
+  , KolMkStateGraph
+  , KolQueryDelta
+  , KolSenderToUser
+  , KolSgCtxDepQuery
+  , KolSgCtxQuery
+  , KolSgCtxUpdate
+  , KolStateGraphApply
+  , KolStateGraphOut
+  , KolStateGraphOutT
+  , KolStateGraphT
+  , KolTimestamp
   ]
     <> (Int' <$> nd)
     <> (IntAdd <$> nd)
@@ -226,7 +216,6 @@ identOfBuiltin = \case
   Any' -> r "Any"
   Bool -> r "Bool"
   Eq -> r "Eq"
-  Loop -> r "loop"
   If -> r "if"
   Int' d -> r $ numDesc True d
   IntAdd d -> r $ numDesc False d <> "_add"
@@ -234,11 +223,34 @@ identOfBuiltin = \case
   IntGte0 -> r "int_>=0" -- TODO: int>=0?
   IntMul d -> r $ numDesc False d <> "_mul"
   IntNeg d -> r $ numDesc False d <> "_neg"
+  KolDataId -> r "DataId"
+  KolEventTypeId -> r "EventTypeId"
+  KolGear -> r "Gear"
+  KolId -> r "Id"
+  KolLocEventId -> r "LocEventId"
+  KolMkEventType -> r "mk_event_type"
+  KolMkGear -> r "mk_gear"
+  KolMkQuery -> r "mk_query"
+  KolMkStateGraph -> r "mk_stategraph"
+  KolQuery -> r "Query"
+  KolQueryDelta -> r "query_delta"
+  KolSenderToUser -> r "sender-to>user"
+  KolSgCtxDepQuery -> r "sgctx_dep_query"
+  KolSgCtxQuery -> r "sgctx_query"
+  KolSgCtxUpdate -> r "sgctx_update"
+  KolStateGraphApply -> r "stategraph_apply"
+  KolStateGraphOut -> r "stategraph_out"
+  KolStateGraphOutT -> r "StateGraphOut"
+  KolStateGraphT -> r "StateGraph"
+  KolTimestamp -> r "Timestamp"
+  KolUserId -> r "UserId"
   List -> r "List"
   ListIndexL -> r "list_indexl"
   ListLength -> r "list_length"
   ListViewL -> r "list_viewl"
+  Loop -> r "loop"
   Never -> r "Never"
+  OpaqueVal (OpaqueId x i) -> r ("OpaqueVal[" <> BS.pack (show $ pIdent x) <> "]#" <> BS.pack (show i))
   PropListViewlDec -> r "list_viewl~dec"
   PropLteTrans -> r "<=~trans"
   RecordDropFields -> r "record_drop_fields"
@@ -249,35 +261,9 @@ identOfBuiltin = \case
   Tag -> r "Tag"
   TagEq -> r "tag_=="
   TypePlus -> r "Type^"
-  OpaqueVal (OpaqueId x i) -> r ("OpaqueVal[" <> BS.pack (show $ pIdent x) <> "]#" <> BS.pack (show i))
   W -> r "W"
   WUnwrap -> r "w_unwrap"
   WWrap -> r "w_wrap"
-  KolEventId -> r "EventId"
-  KolUserId -> r "UserId"
-  KolMkEventType -> r "mk_event_type"
-  KolUnEventType -> r "un_event_type"
-  KolGear -> r "Gear"
-  KolMkGear -> r "mk_gear"
-  KolQuery -> r "Query"
-  KolMkQuery -> r "mk_query"
-  KolListNew -> r "list_new"
-  KolListPush -> r "list_push"
-  KolId -> r "Id"
-  KolQueryDelta -> r "query_delta"
-  KolSenderToUser -> r "sender-to>user"
-  KolMkStateGraph -> r "mk_stategraph"
-  KolStateGraphApply -> r "stategraph_apply"
-  KolStateGraphOut -> r "stategraph_out"
-  KolSgCtxQuery -> r "sgctx_query"
-  KolSgCtxUpdate -> r "sgctx_update"
-  KolSgCtxDepQuery -> r "sgctx_dep_query"
-  KolEventTypeId -> r "EventTypeId"
-  KolLocalEventId -> r "LocalEventId"
-  KolTimestamp -> r "Timestamp"
-  KolLocalUserId -> r "LocalUserId"
-  KolStateGraphT -> r "StateGraph"
-  KolStateGraphOutT -> r "StateGraphOut"
   where
     numDesc upper desc =
       (if upper then "I" else "i")

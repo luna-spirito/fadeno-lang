@@ -132,6 +132,7 @@ data Instr
   | IMkList !Word8
   | IMkRecord !Word8 -- consumes n values and n keys
   | IMkQRecord !Word64 !Word8 -- [archetype] [n] -- consumes n values
+  | IRecordCat -- pop two records, push merged record (tag_set 0)
   deriving (Show, Eq)
 
 type RawTag = Ident
@@ -164,6 +165,7 @@ instr x = do
     IMkList n -> trackPop n *> trackPush False
     IMkRecord n -> trackPop (2 * n) *> trackPush False
     IMkQRecord _ n -> trackPop n *> trackPush False
+    IRecordCat -> trackPop 2 *> trackPush False
   tell @(Vector Instr) [x]
 
 toCodeGen :: Code -> CodeGen
@@ -291,7 +293,11 @@ compile' =
     Import (fromMaybe (error "Internal error: unresolved import") -> n) _ -> pure $ CConst $ VImport n
     Sorry -> pure $ CConst VPanic
     Pi {} -> pure $ CConst VPanic -- TODO
-    Concat {} -> pure $ CConst VPanic -- TODO
+    Concat left (FRecord right) -> do
+      left' ← compile' left
+      right' ← compile' right
+      pure $ left' <> right' <> CGen (instr IRecordCat)
+    Concat _ (FRow _) → pure $ CConst VPanic
 
 type CompileResult = ((HashMap Ident Word64, HashMap TagSet Word64), Vector (Vector Instr))
 
@@ -342,7 +348,7 @@ decompileModule ((tags0, tagSets0), instrs00) =
       VTag t -> decompileTag t
       VRecord tIdx values -> mkRecord tIdx =<< traverse decompileValue values
       VImport x -> pure $ Term $ Import (Just $ fromIntegral x) (pack $ show x)
-      VKolQuery n →
+      VKolQuery n ->
         if n == 0
           then pure $ Term $ Builtin KolMkQuery
           else empty
@@ -411,4 +417,9 @@ decompileModule ((tags0, tagSets0), instrs00) =
           IMkQRecord ts n -> do
             values <- popStackValLastN n
             pushStack . Just =<< mkRecord ts values
+            scope
+          IRecordCat → do
+            r ← popStackVal
+            l ← popStackVal
+            pushStack $ Just $ Term $ Concat l (FRecord r)
             scope
