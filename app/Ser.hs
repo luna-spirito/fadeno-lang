@@ -156,7 +156,7 @@ putValue = \case
   VBuiltin b -> S.putWord8 6 *> putBuiltin b
   VPanic -> S.putWord8 7
   VImport x -> S.putWord8 8 *> S.putWord64le x
-  VKolQuery n -> S.putWord8 9 *> S.putWord64le n
+  VKolQuery n m -> S.putWord8 9 *> S.putWord64le n *> S.putWord64le m
 
 getValue :: S.Get Value
 getValue = do
@@ -171,7 +171,7 @@ getValue = do
     6 -> VBuiltin <$> getBuiltin
     7 -> pure VPanic
     8 -> VImport <$> S.getWord64le
-    9 -> VKolQuery <$> S.getWord64le
+    9 -> VKolQuery <$> S.getWord64le <*> S.getWord64le
     _ -> fail "Unknown value tag"
 
 -- ===========================================================================
