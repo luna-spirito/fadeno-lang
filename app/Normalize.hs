@@ -39,6 +39,7 @@ appBuiltin locals = curry \case
   -- types catch-all
   ((Any'; Bool; Eq; Int' _; List; Never; OpaqueVal{}; PropLteTrans; PropListViewlDec; Refl; RowPlus; Tag; TypePlus; W
    ; KolLocEventId; KolDataId; KolUserId; KolGear; KolQuery; KolId; KolEventTypeId; KolTimestamp; KolStateGraphT; KolStateGraphOutT
+   ; KolMkAnchorAgg; KolAnchorAggT; KolMkTextAgg; KolTextAggT; KolTextUpdT; KolSenderId; KolLocalUserId
    ), _) → pure Nothing
   (Loop, [i0, f]) | not (isStuck i0) → fmap Just $ normalize' locals $ f `TApp` i0 `TApp` Term (Lam QNorm (Just $ regIdent "i") $ Lambda $ TBuiltin Loop `TApp` Term (Var 0) `TApp` f)
   (If, [Term (BoolLit cond), th, el]) → pure $ Just $ if cond then th else el
@@ -70,7 +71,9 @@ appBuiltin locals = curry \case
   ((Loop; If; IntEq; IntGte0; ListIndexL; ListLength; ListViewL; RecordDropFields; RecordGet; RecordKeepFields; TagEq; WWrap; WUnwrap
    ; KolMkEventType; KolMkGear; KolMkQuery; KolId; KolQueryDelta; KolSenderToUser; KolMkStateGraph; KolStateGraphApply; KolStateGraphOut
    ; KolSgCtxQuery; KolSgCtxUpdate; KolSgCtxDepQuery; KolEventTypeId; KolTimestamp; KolUserId; KolStateGraphT; KolStateGraphOutT
-   ; KolResolveData), _) → pure Nothing
+   ; KolResolveData; KolResolveEvent
+   ; KolUserEq; KolAnchorAggApply; KolTextAggApply; KolTextAggMerge; KolSecondaryGet
+   ; KolLoopIter; KolIterList; KolListNew; KolListPush), _) → pure Nothing
  where
   isStuck =
     unTerm >>> \case

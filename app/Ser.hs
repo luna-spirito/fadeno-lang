@@ -156,7 +156,6 @@ putValue = \case
   VBuiltin b -> S.putWord8 6 *> putBuiltin b
   VPanic -> S.putWord8 7
   VImport x -> S.putWord8 8 *> S.putWord64le x
-  VKolQuery n m -> S.putWord8 9 *> S.putWord64le n *> S.putWord64le m
 
 getValue :: S.Get Value
 getValue = do
@@ -171,7 +170,6 @@ getValue = do
     6 -> VBuiltin <$> getBuiltin
     7 -> pure VPanic
     8 -> VImport <$> S.getWord64le
-    9 -> VKolQuery <$> S.getWord64le <*> S.getWord64le
     _ -> fail "Unknown value tag"
 
 -- ===========================================================================
@@ -180,7 +178,6 @@ getValue = do
 
 putBuiltin :: BuiltinT -> S.Put
 putBuiltin = \case
-  KolMkQuery -> error "putBuiltin: KolMkQuery should never be serialized (compiler emits VKolQuery instead)"
   -- Non-Kol (0–29)
   Any' -> S.putWord8 0
   Bool -> S.putWord8 1
@@ -212,7 +209,7 @@ putBuiltin = \case
   IntNeg d -> S.putWord8 27 *> putNumDesc d
   PropListViewlDec -> S.putWord8 28
   PropLteTrans -> S.putWord8 29
-  -- Kol domain (30–49): builtinsList order minus KolMkQuery
+  -- Kol domain (30–49): builtinsList order
   KolDataId -> S.putWord8 30
   KolGear -> S.putWord8 31
   KolId -> S.putWord8 32
@@ -234,6 +231,24 @@ putBuiltin = \case
   KolStateGraphT -> S.putWord8 48
   KolTimestamp -> S.putWord8 49
   KolResolveData -> S.putWord8 50
+  KolMkQuery -> S.putWord8 51
+  KolResolveEvent -> S.putWord8 52
+  KolUserEq -> S.putWord8 53
+  KolMkAnchorAgg -> S.putWord8 54
+  KolAnchorAggApply -> S.putWord8 55
+  KolMkTextAgg -> S.putWord8 56
+  KolTextAggApply -> S.putWord8 57
+  KolTextAggMerge -> S.putWord8 58
+  KolSecondaryGet -> S.putWord8 59
+  KolLoopIter -> S.putWord8 60
+  KolIterList -> S.putWord8 61
+  KolListNew -> S.putWord8 62
+  KolListPush -> S.putWord8 63
+  KolSenderId -> S.putWord8 64
+  KolLocalUserId -> S.putWord8 65
+  KolTextUpdT -> S.putWord8 66
+  KolAnchorAggT -> S.putWord8 67
+  KolTextAggT -> S.putWord8 68
 
 getBuiltin :: S.Get BuiltinT
 getBuiltin = do
@@ -294,6 +309,24 @@ getBuiltin = do
     48 -> pure KolStateGraphT
     49 -> pure KolTimestamp
     50 -> pure KolResolveData
+    51 -> pure KolMkQuery
+    52 -> pure KolResolveEvent
+    53 -> pure KolUserEq
+    54 -> pure KolMkAnchorAgg
+    55 -> pure KolAnchorAggApply
+    56 -> pure KolMkTextAgg
+    57 -> pure KolTextAggApply
+    58 -> pure KolTextAggMerge
+    59 -> pure KolSecondaryGet
+    60 -> pure KolLoopIter
+    61 -> pure KolIterList
+    62 -> pure KolListNew
+    63 -> pure KolListPush
+    64 -> pure KolSenderId
+    65 -> pure KolLocalUserId
+    66 -> pure KolTextUpdT
+    67 -> pure KolAnchorAggT
+    68 -> pure KolTextAggT
     _ -> fail "Unknown builtin tag"
 
 -- ===========================================================================

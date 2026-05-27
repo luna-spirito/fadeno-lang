@@ -134,6 +134,7 @@ data BuiltinT
   | KolMkEventType
   | KolMkGear
   | KolMkQuery -- Compiles to VKolQuery 0 constant (not serialized as builtin)
+  | KolResolveEvent
   | KolResolveData
   | KolQuery
   | KolUserId
@@ -150,6 +151,22 @@ data BuiltinT
   | KolStateGraphOut
   | KolStateGraphOutT
   | KolStateGraphT
+  | KolUserEq
+  | KolMkAnchorAgg
+  | KolAnchorAggApply
+  | KolMkTextAgg
+  | KolTextAggApply
+  | KolTextAggMerge
+  | KolSecondaryGet
+  | KolLoopIter
+  | KolIterList
+  | KolListNew
+  | KolListPush
+  | KolSenderId
+  | KolLocalUserId
+  | KolTextUpdT
+  | KolAnchorAggT
+  | KolTextAggT
   deriving (Show, Eq, Ord, Lift)
 
 builtinsList :: Vector BuiltinT
@@ -186,6 +203,7 @@ builtinsList =
   , KolMkEventType
   , KolMkGear
   , KolMkQuery
+  , KolResolveEvent
   , KolResolveData
   , KolQuery
   , KolUserId
@@ -201,6 +219,22 @@ builtinsList =
   , KolStateGraphOut
   , KolStateGraphOutT
   , KolStateGraphT
+  , KolUserEq
+  , KolMkAnchorAgg
+  , KolAnchorAggApply
+  , KolMkTextAgg
+  , KolTextAggApply
+  , KolTextAggMerge
+  , KolSecondaryGet
+  , KolLoopIter
+  , KolIterList
+  , KolListNew
+  , KolListPush
+  , KolSenderId
+  , KolLocalUserId
+  , KolTextUpdT
+  , KolAnchorAggT
+  , KolTextAggT
   ]
     <> (Int' <$> nd)
     <> (IntAdd <$> nd)
@@ -236,6 +270,7 @@ identOfBuiltin = \case
   KolMkStateGraph -> r "mk_stategraph"
   KolQuery -> r "Query"
   KolQueryDelta -> r "query_delta"
+  KolResolveEvent -> r "resolve_event"
   KolResolveData -> r "resolve_data"
   KolSenderToUser -> r "sender-to>user"
   KolSgCtxDepQuery -> r "sgctx_dep_query"
@@ -245,6 +280,22 @@ identOfBuiltin = \case
   KolStateGraphOut -> r "stategraph_out"
   KolStateGraphOutT -> r "StateGraphOut"
   KolStateGraphT -> r "StateGraph"
+  KolUserEq -> r "user_eq"
+  KolMkAnchorAgg -> r "mk_anchor_agg"
+  KolAnchorAggApply -> r "anchor_agg_apply"
+  KolMkTextAgg -> r "mk_text_agg"
+  KolTextAggApply -> r "text_agg_apply"
+  KolTextAggMerge -> r "text_agg_merge"
+  KolSecondaryGet -> r "secondary_get"
+  KolLoopIter -> r "loop_iter"
+  KolIterList -> r "iter_list"
+  KolListNew -> r "list_new"
+  KolListPush -> r "list_push"
+  KolSenderId -> r "SenderId"
+  KolLocalUserId -> r "LocalUserId"
+  KolTextUpdT -> r "TextUpd"
+  KolAnchorAggT -> r "AnchorAgg"
+  KolTextAggT -> r "TextAgg"
   KolTimestamp -> r "Timestamp"
   KolUserId -> r "UserId"
   List -> r "List"

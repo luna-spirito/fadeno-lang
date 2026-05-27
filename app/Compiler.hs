@@ -111,7 +111,6 @@ data Value
   | -- | Pi !Quant !Term !(Either (Ident, Lambda Term) Term)
     --    | Concat !Term !(Either (Ident, Lambda Term) Term)  deriving
     VImport !Word64
-  | VKolQuery !Word64 !Word64
   deriving (Show, Eq)
 
 {-
@@ -251,7 +250,6 @@ compile' =
       pure $ fold values <> mkRecord -- ts <> CGen (instr $ IMkRecord $ fromIntegral $ length entries)
     FieldsLit (FRow ()) _ -> pure $ CConst VPanic
     BuiltinsVar -> pure $ CConst VBuiltinsVar
-    Builtin KolMkQuery -> pure $ CConst $ VKolQuery 0 0
     Builtin x -> pure $ CConst $ VBuiltin x
     Lam QNorm _ body -> do
       let (n, body') = getLambdaN body
@@ -348,10 +346,6 @@ decompileModule ((tags0, tagSets0), instrs00) =
       VTag t -> decompileTag t
       VRecord tIdx values -> mkRecord tIdx =<< traverse decompileValue values
       VImport x -> pure $ Term $ Import (Just $ fromIntegral x) (pack $ show x)
-      VKolQuery n m ->
-        if n == 0 && m == 0
-          then pure $ Term $ Builtin KolMkQuery
-          else empty
     subdecompile (stack :: Vector (Maybe Term)) instrs = do
       (stack0 :: Vector (Maybe Term), instrs0 :: Vector Instr) <- (,) <$> get <*> get
       put stack *> put instrs
