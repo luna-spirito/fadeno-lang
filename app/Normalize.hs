@@ -68,7 +68,9 @@ appBuiltin locals = curry \case
   (WUnwrap, [a]) → pure $ Just a
   (WWrap, [a]) → pure $ Just a
   ((Loop; If; IntEq; IntGte0; ListIndexL; ListLength; ListViewL; RecordDropFields; RecordGet; RecordKeepFields; TagEq; WWrap; WUnwrap
-   ; KolMkEventType; KolMkGear; KolMkQuery; KolId; KolQueryDelta; KolSenderToUser; KolMkStateGraph; KolStateGraphApply; KolStateGraphOut; KolSgCtxQuery; KolSgCtxUpdate; KolSgCtxDepQuery; KolEventTypeId; KolTimestamp; KolUserId; KolStateGraphT; KolStateGraphOutT), _) → pure Nothing
+   ; KolMkEventType; KolMkGear; KolMkQuery; KolId; KolQueryDelta; KolSenderToUser; KolMkStateGraph; KolStateGraphApply; KolStateGraphOut
+   ; KolSgCtxQuery; KolSgCtxUpdate; KolSgCtxDepQuery; KolEventTypeId; KolTimestamp; KolUserId; KolStateGraphT; KolStateGraphOutT
+   ; KolResolveData), _) → pure Nothing
  where
   isStuck =
     unTerm >>> \case

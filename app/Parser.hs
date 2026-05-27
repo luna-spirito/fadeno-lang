@@ -134,8 +134,10 @@ data BuiltinT
   | KolMkEventType
   | KolMkGear
   | KolMkQuery -- Compiles to VKolQuery 0 constant (not serialized as builtin)
+  | KolResolveData
   | KolQuery
   | KolUserId
+  | KolTimestamp
   -- StateGraph builtins
   | KolEventTypeId
   | KolMkStateGraph
@@ -148,7 +150,6 @@ data BuiltinT
   | KolStateGraphOut
   | KolStateGraphOutT
   | KolStateGraphT
-  | KolTimestamp
   deriving (Show, Eq, Ord, Lift)
 
 builtinsList :: Vector BuiltinT
@@ -185,9 +186,11 @@ builtinsList =
   , KolMkEventType
   , KolMkGear
   , KolMkQuery
+  , KolResolveData
   , KolQuery
   , KolUserId
   , KolEventTypeId
+  , KolTimestamp
   , KolMkStateGraph
   , KolQueryDelta
   , KolSenderToUser
@@ -198,7 +201,6 @@ builtinsList =
   , KolStateGraphOut
   , KolStateGraphOutT
   , KolStateGraphT
-  , KolTimestamp
   ]
     <> (Int' <$> nd)
     <> (IntAdd <$> nd)
@@ -234,6 +236,7 @@ identOfBuiltin = \case
   KolMkStateGraph -> r "mk_stategraph"
   KolQuery -> r "Query"
   KolQueryDelta -> r "query_delta"
+  KolResolveData -> r "resolve_data"
   KolSenderToUser -> r "sender-to>user"
   KolSgCtxDepQuery -> r "sgctx_dep_query"
   KolSgCtxQuery -> r "sgctx_query"

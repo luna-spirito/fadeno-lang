@@ -177,12 +177,6 @@ getValue = do
 -- ===========================================================================
 -- BuiltinT — canonical tag scheme
 -- ===========================================================================
---
--- Tags 0–29: non-Kol builtins (dense, matching Rust deser.rs)
--- Tags 30–49: Kol domain builtins (in builtinsList order, minus KolMkQuery)
---
--- KolMkQuery is never serialized — the compiler emits VKolQuery instead.
--- VM-only builtins (KolMkData, KolResolveData, etc.) have no wire tag.
 
 putBuiltin :: BuiltinT -> S.Put
 putBuiltin = \case
@@ -239,6 +233,7 @@ putBuiltin = \case
   KolStateGraphOutT -> S.putWord8 47
   KolStateGraphT -> S.putWord8 48
   KolTimestamp -> S.putWord8 49
+  KolResolveData -> S.putWord8 50
 
 getBuiltin :: S.Get BuiltinT
 getBuiltin = do
@@ -298,6 +293,7 @@ getBuiltin = do
     47 -> pure KolStateGraphOutT
     48 -> pure KolStateGraphT
     49 -> pure KolTimestamp
+    50 -> pure KolResolveData
     _ -> fail "Unknown builtin tag"
 
 -- ===========================================================================
