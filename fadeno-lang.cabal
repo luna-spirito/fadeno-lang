@@ -1,26 +1,18 @@
 cabal-version:      3.4
 name:               fadeno-lang
 version:            0.1.0.0
--- synopsis:
--- description:
 homepage:           dentrado.art
 license:            AGPL-3.0-or-later
 license-file:       LICENSE
 author:             Gardanta Spirito
 maintainer:         guardspirit@protonmail.com
--- copyright:
 category:           Language
 build-type:         Simple
 extra-doc-files:    CHANGELOG.md
--- extra-source-files:
 
-common warnings
+common shared-properties
     ghc-options: -Wall -fmax-pmcheck-models=300
-
-executable fadeno-lang
-    import:           warnings
-    main-is:          Main.hs
-    other-modules: Parser, Normalize, Compiler, Arithmetic, NameGen, Ser, Context, Driver
+    default-language: GHC2021
     default-extensions:
         LambdaCase, UnicodeSyntax, BlockArguments, TemplateHaskell,
         OverloadedStrings, NoImplicitPrelude, DataKinds, OverloadedLists,
@@ -39,7 +31,6 @@ executable fadeno-lang
         template-haskell >= 2,
         hashable >= 1.5,
         rrb-vector >= 0.2,
-        cereal >= 0.5,
         filepath >= 1.5,
         file-io >= 0.1.5,
         directory >= 1.3,
@@ -47,43 +38,26 @@ executable fadeno-lang
         base64-bytestring >= 1.2,
         text >= 2.0,
         aeson >= 2.2
+
+library
+    import:           shared-properties
+    hs-source-dirs:   src
+    exposed-modules:  Parser, Normalize, Compiler, Arithmetic, NameGen, Ser, Context, Driver
+
+executable fadeno-lang
+    import:           shared-properties
+    main-is:          Main.hs
     hs-source-dirs:   app
-    default-language: GHC2021
+    build-depends:    fadeno-lang
 
 test-suite fadeno-tests
-    import:           warnings
+    import:           shared-properties
     type:             exitcode-stdio-1.0
-    hs-source-dirs:   test, app
+    hs-source-dirs:   test
     main-is:          TestMain.hs
-    other-modules:    Parser, Normalize, Compiler, Arithmetic, Context, Ser, NameGen, Driver
-    default-extensions:
-        LambdaCase, UnicodeSyntax, BlockArguments, TemplateHaskell,
-        OverloadedStrings, NoImplicitPrelude, DataKinds, OverloadedLists,
-        TypeFamilies, ViewPatterns, QuasiQuotes, MultiWayIf, UndecidableInstances,
-        PatternSynonyms, OrPatterns
     build-depends:
-        base ^>=4.20.0.0,
-        rio >= 0.1,
-        containers >= 0.7,
-        prettyprinter >= 1,
-        prettyprinter-ansi-terminal >= 1,
-        bytestring >= 0.12,
-        filepath >= 1.5,
-        directory >= 1.3,
+        fadeno-lang,
         tasty >= 1.4,
         tasty-golden >= 2.3,
         tasty-hunit >= 0.10,
-        text >= 2.0,
-        process >= 1.6,
-        flatparse >= 0.5,
-        fused-effects >= 1,
-        cereal >= 0.5,
-        template-haskell >= 2,
-        hashable >= 1.5,
-        rrb-vector >= 0.2,
-        time >= 1,
-        file-io >= 0.1.5,
-        base64-bytestring >= 1.2,
-        text >= 2.0,
-        aeson >= 2.2
-    default-language: GHC2021
+        process >= 1.6
