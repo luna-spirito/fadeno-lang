@@ -32,7 +32,7 @@ import Data.Text qualified as T
 import Data.Time (UTCTime)
 import GHC.Exts (IsList (..))
 import NameGen qualified as N
-import Normalize (EqRes (..), applyLambda, applyLambdaRefineGetSkip, fDyn, fetchLambda, fetchT, findEVar, findEVarIndexScope, normalize, normalize', numDecDispatch, termQQ, traverseIsEq, withBinding, withMarked)
+import Normalize (EqRes (..), applyLambda, applyLambdaRefineGetSkip, fDyn, fetchLambda, fetchT, findEVar, findEVarIndexScope, normalize, normalize', numDecDispatch, termQQ, traverseIsEq, withBinding, withMarked, writeMeta')
 import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), Module (..), NumDesc (..), OpaqueId (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, loadModule', maxOf, nested, nestedBy', nestedByP, pIdent, pOpaqueId, pQuant, pTerm, regIdent, render, rowOf, splitAt3, traverseTermF, typ, typOf, pattern TApp, pattern TBuiltin)
 import Prettyprinter (Doc, annotate, defaultLayoutOptions, group, layoutSmart, line, list, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
@@ -62,50 +62,7 @@ import System.OsPath (OsPath, encodeUtf, replaceExtension, unsafeEncodeUtf)
 -- Check
 
 writeMeta :: (Int, Int) -> (Int, Term) -> ScopesM ()
-writeMeta exId0@(scope0, subi0) (valLocals0, valNow0) = do
-  stackLog \p -> "exi# " <> pretty exId0 <+> ":=" <+> p valNow0
-  depth <- (\scope -> scope - scope0) <$> getScopeId -- no -1 due to scope being ridiculous
-  val0 <- maybe (stackError \_ -> "Leak") pure $ nestedBy' valLocals0 valNow0 $ -depth
-  Scopes (splitAt scope0 -> (bindsBefore, bindsAfter)) (splitAt3 scope0 -> (exsBefore, exsMiddleM, exsAfter)) rs0 <- get @Scopes
-  (Epoch exsMiddleEpoch, (exsMiddleBef, exsMiddleMiddle, exsMiddleAft)) <- maybe (stackError \_ -> "ex not found in context") pure do
-    middle <- exsMiddleM
-    i <- findEVarIndexScope subi0 $ snd middle
-    pure $ splitAt3 i <$> middle
-  let rewrites =
-        foldl'
-          ( \acc -> \case
-              ERewrite {} -> acc + 1
-              _ -> acc
-          )
-          0
-          (exsMiddleAft <> (snd =<< exsAfter))
-      rsBef = take (length rs0 - rewrites) rs0
-  put $ Scopes bindsBefore (exsBefore |> (Epoch exsMiddleEpoch, exsMiddleBef)) rsBef
-  case exsMiddleMiddle of
-    Just (EVar _ (Right ty)) -> infer (IsErased True) val0 $ Check ty
-    _ -> stackError \_ -> "Internal error: existential already instantiated"
-  modify @Scopes \(Scopes bs es _) -> Scopes bs (adjust' scope0 (bimap (\(Epoch i) -> Epoch $ i + 1) (|> EVar subi0 (Left (valLocals0, val0)))) es) rsBef
-  let fe :: EEntry -> ScopesM ()
-      fe e0 = do
-        (e1, rsf) <- case e0 of
-          EMarker -> pure (EMarker, id)
-          EVar exId valty -> do
-            valty' <- bimapM (traverse normalize) normalize valty
-            pure (EVar exId valty', id)
-          EUniVar n -> pure (EUniVar n, id)
-          ERewrite (Rewrite locsCount lfromto0) -> do
-            let locs = replicate locsCount Nothing
-            lfromto <- fmap Lambda $ bimapM (normalize' locs) (normalize' locs) $ unLambda lfromto0
-            s <- getScopeId
-            let rewr = Rewrite locsCount lfromto
-            pure (ERewrite rewr, (|> (s, rewr)))
-        modify @Scopes \(Scopes bs es rs) -> Scopes bs (adjust (length es - 1) (fmap (|> e1)) es) $ rsf rs
-  for_ exsMiddleAft fe
-  when (length bindsAfter /= length exsAfter) $ error "Internal error: Binds/exs mismatch"
-  for_ (zip bindsAfter exsAfter) \((q, n, val, ty), (Epoch epoch, e)) -> do
-    ty' <- normalize ty
-    modify @Scopes \(Scopes bs es rs) -> Scopes (bs |> (q, n, val, ty')) (es |> (Epoch $ epoch + 1, [])) rs
-    for_ e fe
+writeMeta = writeMeta' $ \t ty → infer (IsErased True) t $ Check ty
 
 -- -- TODO: Dependent.
 
@@ -941,7 +898,7 @@ isEqUnify =
   runM . fix \rec -> \case
     (Term (ExVar i), b) -> lift (instMeta i b) $> EqYes
     (a, Term (ExVar i)) -> lift (instMeta i a) $> EqYes
-    x -> traverseIsEq rec (\_i -> rec . bimap unLambda unLambda) (bimap unTerm unTerm x)
+    x -> traverseIsEq rec (bimap unTerm unTerm x)
 
 -- -- TODO: Use isEq.
 
