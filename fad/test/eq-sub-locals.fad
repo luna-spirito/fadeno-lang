@@ -1,0 +1,14 @@
+// Regression test for behavior of substitutions with local bindings
+
+unpack fadeno. Eq refl
+
+test = \f.
+  /: Eq 4 f
+  proof = SORRY
+
+  /: Eq (\x. f) (\x. 4)
+  test = rewrite proof in refl
+
+  in {}
+
+in {}

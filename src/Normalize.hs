@@ -18,7 +18,7 @@ import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, fromList, ifoldr, 
 import Data.Tuple (swap)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedBy', nestedByP, nestedByP', parse, recordGet, regIdent, splitAt3, traverseTermF, pattern TApp, pattern TBuiltin, nested)
-import Prettyprinter ((<+>))
+import Prettyprinter ((<+>), pretty)
 import RIO hiding (Reader, Vector, ask, catch, concat, drop, force, link, local, replicate, reverse, runReader, take, to, toList, try, zip)
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -125,7 +125,7 @@ data EqRes
   = EqYes -- provably eq
   | EqNot -- provably uneq
   | EqUnknown
-  deriving (Eq)
+  deriving (Eq, Show)
 
 withBinding' ∷ (Has (Lift ScopesM) sig m) ⇒ Binding → m a → m a
 withBinding' b act = do
@@ -256,7 +256,7 @@ traverseIsEq c cNest (l0, r0) =
     (Builtin _, _) → pure EqNot
     (Lam QNorm i1 bod1, Lam QNorm i2 bod2) →
       withBinding' (QNorm, i1 <|> i2, Nothing, Term $ Builtin Any')
-        $ cNestM 1 (fetchLambda bod1) (fetchLambda bod2)
+        $ cM (fetchT $ unLambda bod1) (fetchT $ unLambda bod2)
     (Lam QNorm _ _, _) → pure EqNot
     (Pi q1 i1 inT1 outT1, Pi q2 i2 inT2 outT2)
       | q1 == q2 →
@@ -382,9 +382,9 @@ tryRewrite (nest, Rewrite forallsCount lfromto0) t = do
       -- All these exist in the same, current scope.
       let valsCurrScope = fromList (snd <$> IM.toDescList params)
       unless (length valsCurrScope == forallsCount) $ stackError \_ → "Not all existentials resolved"
-      let vals = imap (\i → Just . (`nestedByP` i)) valsCurrScope
+      let vals = replicate nest Nothing <> imap (\i → Just . (`nestedByP` i)) valsCurrScope
       final ← normalize' vals (nestedByP' forallsCount (snd $ unLambda lfromto0) nest)
-      stackLog \p → "Rewrote" <+> p t <+> "with" <+> p final
+      stackLog \p → "Rewrote" <+> p t <+> "with (todo inaccurate shift)" <+> (pretty $ show final)
       pure $ Just final
     else pure Nothing
 
@@ -419,6 +419,9 @@ traverseNormTermF c locals t0 = rewr =<< trav
           modify \(Scopes bs exs rs) → Scopes bs exs $ take rewrI rs
           let nest = (scope - oldScope) + (length locals - countErasedLocals)
           replacement ← tryRewrite (nest, oldRewr) res
+          -- when (isJust replacement) do
+          --   stackLog \_ → "Current scope:" <+> pretty scope <+> "; Old scope:" <+> pretty oldScope <+> "; locals:" <+> pretty (show locals) <+> "; but erased:" <+> pretty countErasedLocals
+          --   stackLog \_ → "final:" <+> pretty (show replacement)
           modify \(Scopes bs exs _rs) → Scopes bs exs rs0
           maybe rec pure replacement
       )

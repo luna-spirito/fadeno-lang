@@ -257,6 +257,8 @@ withRewr :: Rewrite -> ScopesM a -> ScopesM a
 withRewr rewr cont = do
   i <- getScopeId
   modify \(Scopes bs es rs) -> Scopes bs (adjust' i (fmap (|> ERewrite rewr)) es) (rs |> (i, rewr))
+  -- Scopes _ _ debugRs :: Scopes ← get
+  -- stackLog \_ → pretty $ show debugRs
   cont <* modify \(Scopes bs es rs) ->
     Scopes
       bs
@@ -589,7 +591,11 @@ infer ie = logAndRunInfer $ \case
     rewr <- intoRewr prfTy0
     withBlockLog inner case mode of
       (_, Infer) -> withRewr rewr $ infer ie inner Infer
-      (e, Check ty) -> withRewr rewr $ infer ie inner . Check =<< normalize =<< fetchT (Dyn e ty)
+      (_e, Check ty) -> withRewr rewr do
+        -- stackLog \p → "So we're normalizing:" <+> p ty
+        -- ty2 ← normalize ty
+        -- stackLog \p → "And we got:" <+> p ty2
+        infer ie inner . Check =<< normalize ty
   (Import (fromMaybe (error "Internal error: unresolved import") -> n) _, (_, Infer)) -> do
     Imports imps <- ask
     pure $ maybe (error "Incomplete context") snd $ imps !? fromIntegral n
