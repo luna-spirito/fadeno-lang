@@ -1,0 +1,1 @@
+{.length = 3 | .index = 2 | .view = {.left = 1 | .rest = [2 | 3]}}

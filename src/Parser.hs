@@ -167,6 +167,9 @@ data BuiltinT
   | KolTextUpdT
   | KolAnchorAggT
   | KolTextAggT
+  | KolPrimaryT
+  | KolSecondaryT
+  | KolPropQueryEvents
   deriving (Show, Eq, Ord, Lift)
 
 builtinsList :: Vector BuiltinT
@@ -235,6 +238,9 @@ builtinsList =
   , KolTextUpdT
   , KolAnchorAggT
   , KolTextAggT
+  , KolPrimaryT
+  , KolSecondaryT
+  , KolPropQueryEvents
   ]
     <> (Int' <$> nd)
     <> (IntAdd <$> nd)
@@ -318,6 +324,9 @@ identOfBuiltin = \case
   W -> r "W"
   WUnwrap -> r "w_unwrap"
   WWrap -> r "w_wrap"
+  KolPrimaryT -> r "Primary"
+  KolSecondaryT -> r "Secondary"
+  KolPropQueryEvents → r "~query_events"
   where
     numDesc upper desc =
       (if upper then "I" else "i")

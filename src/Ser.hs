@@ -249,6 +249,7 @@ putBuiltin = \case
   KolTextUpdT -> S.putWord8 66
   KolAnchorAggT -> S.putWord8 67
   KolTextAggT -> S.putWord8 68
+  _ → S.putWord8 0 -- FIX NOW
 
 getBuiltin :: S.Get BuiltinT
 getBuiltin = do

@@ -17,7 +17,7 @@ import Data.IntMap.Strict qualified as IM
 import Data.RRBVector (Vector, adjust', deleteAt, findIndexL, fromList, ifoldr, imap, replicate, take, viewl, viewr, zip, (!?), (<|), (|>))
 import Data.Tuple (swap)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedBy', nestedByP, nestedByP', parse, recordGet, regIdent, splitAt3, traverseTermF, pattern TApp, pattern TBuiltin)
+import Parser (Bits (..), BlockF (..), BuiltinT (..), FieldsK (..), Ident (..), IsErased (..), Lambda (..), NumDesc (..), ParserContext (..), Quant (..), RefineK (..), Term (..), TermF (..), Vector' (..), builtinsList, dotvar, identOfBuiltin, nestedBy', nestedByP, nestedByP', parse, recordGet, regIdent, splitAt3, traverseTermF, pattern TApp, pattern TBuiltin, nested)
 import Prettyprinter ((<+>))
 import RIO hiding (Reader, Vector, ask, catch, concat, drop, force, link, local, replicate, reverse, runReader, take, to, toList, try, zip)
 import System.IO.Unsafe (unsafePerformIO)
@@ -41,12 +41,12 @@ appBuiltin locals = curry \case
    ; KolLocEventId; KolDataId; KolUserId; KolGear; KolQuery; KolId; KolEventTypeId; KolTimestamp; KolStateGraphT; KolStateGraphOutT
    ; KolMkAnchorAgg; KolAnchorAggT; KolMkTextAgg; KolTextAggT; KolTextUpdT; KolSenderId; KolLocalUserId
    ), _) → pure Nothing
-  (Loop, [i0, f]) | not (isStuck i0) → fmap Just $ normalize' locals $ f `TApp` i0 `TApp` Term (Lam QNorm (Just $ regIdent "i") $ Lambda $ TBuiltin Loop `TApp` Term (Var 0) `TApp` f)
+  (Loop, [i0, f]) | not (isStuck i0) → fmap Just $ normalize' locals $ f `TApp` i0 `TApp` Term (Lam QNorm (Just $ regIdent "i") $ Lambda $ TBuiltin Loop `TApp` Term (Var 0) `TApp` nested f)
   (If, [Term (BoolLit cond), th, el]) → pure $ Just $ if cond then th else el
   (IntEq, [Term (NumLit a), Term (NumLit b)]) → pure $ Just $ Term $ BoolLit $ a == b
   (IntGte0, [Term (NumLit x)]) → pure $ Just $ Term $ BoolLit $ x >= 0
   ((IntAdd _; IntMul _; IntNeg _), _) → pure Nothing
-  (ListIndexL, [Term (ListLit (Vector' vals)), Term (NumLit i)]) → pure $ vals !? fromIntegral i
+  (ListIndexL, [Term (NumLit i), Term (ListLit (Vector' vals))]) → pure $ vals !? fromIntegral i
   (ListLength, [Term (ListLit vals)]) → pure $ Just $ Term $ NumLit $ fromIntegral $ length vals
   (ListViewL, [Term (ListLit (Vector' vals))]) →
     pure $ viewl vals <&> \(left, rest) →
@@ -64,16 +64,29 @@ appBuiltin locals = curry \case
                   EqUnknown → pure $ recordGet name1 a'
            in
             search a
-  (RecordKeepFields, [Term (ListLit tags), a]) → pure $ Just $ Term $ FieldsLit (FRecord ()) $ (\tag → (tag, recordGet tag a)) <$> tags
+  (RecordKeepFields, [Term (ListLit tags), a]) → do
+    let
+      getField tag = do
+        let search a' = case unconsField a' of
+              Nothing → pure $ recordGet tag a'
+              Just ((name2, v), rest) →
+                isEq (tag, name2) >>= \case
+                  EqYes → pure v
+                  EqNot → search rest
+                  EqUnknown → pure $ recordGet tag a'
+        search a
+    fields <- for tags \tag -> (tag,) <$> getField tag
+    pure $ Just $ Term $ FieldsLit (FRecord ()) fields
   (TagEq, [Term (TagLit a), Term (TagLit b)]) → pure $ Just $ Term $ BoolLit $ a == b
   (WUnwrap, [a]) → pure $ Just a
   (WWrap, [a]) → pure $ Just a
+  (KolPropQueryEvents, [Term (Builtin KolMkQuery)]) → pure $ Just $ Term $ ListLit []
   ((Loop; If; IntEq; IntGte0; ListIndexL; ListLength; ListViewL; RecordDropFields; RecordGet; RecordKeepFields; TagEq; WWrap; WUnwrap
    ; KolMkEventType; KolMkGear; KolMkQuery; KolId; KolQueryDelta; KolSenderToUser; KolMkStateGraph; KolStateGraphApply; KolStateGraphOut
    ; KolSgCtxQuery; KolSgCtxUpdate; KolSgCtxDepQuery; KolEventTypeId; KolTimestamp; KolUserId; KolStateGraphT; KolStateGraphOutT
    ; KolResolveData; KolResolveEvent
    ; KolUserEq; KolAnchorAggApply; KolTextAggApply; KolTextAggMerge; KolSecondaryGet
-   ; KolLoopIter; KolIterList; KolListNew; KolListPush), _) → pure Nothing
+   ; KolLoopIter; KolIterList; KolListNew; KolListPush; KolPrimaryT; KolSecondaryT; KolPropQueryEvents), _) → pure Nothing
  where
   isStuck =
     unTerm >>> \case
@@ -93,7 +106,7 @@ appBuiltin locals = curry \case
       fi
   recordDropFields ∷ Vector' Term → Term → ScopesM Term
   recordDropFields tags fields0 = case tags of
-    Vector' (null → True) → pure $ Term $ FieldsLit (FRecord ()) []
+    Vector' (null → True) → pure fields0
     _ →
       let
         stuck = Term $ App (Term $ App (Term $ Builtin RecordDropFields) $ Term $ ListLit tags) fields0

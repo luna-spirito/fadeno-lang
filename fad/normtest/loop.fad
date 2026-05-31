@@ -1,0 +1,19 @@
+test = \u.
+
+  unpack fadeno.
+    Eq refl
+    Int int_>=0 int_add int_neg int_mul
+    loop if
+
+  Int+ = Int @|>=0 : Eq (int_>=0 .) true|
+
+  facpu = \x0. loop @Int+ @(\x. x) @Int x0 (\x rec.
+    x-1 = int_add x (int_neg 1)
+    in int_add u (if (int_>=0 x-1)
+      // x-1 >= 0 => x >= 1
+      (\@yes. rewrite yes in int_mul x (rec (x-1 @|refl|) @refl))
+      // x-1 < 0 => x = 0
+      1))
+
+  in facpu 6
+in test 0

@@ -10,12 +10,12 @@ import Control.Carrier.Writer.Church (WriterC, runWriter)
 import Control.Effect.Error
 import Control.Effect.State (State, get, state)
 import Control.Effect.Writer (censor, tell)
-import Data.RRBVector (Vector, viewl, viewr)
+import Data.RRBVector (Vector, viewl, viewr, drop)
 import NameGen qualified as N
 import Parser (Ident, Lambda, OpaqueId, Quant, Term (..), TermF (..), pTerm, regIdent, render)
 import Prettyprinter (Doc, annotate, group, line, nest)
 import Prettyprinter.Render.Terminal
-import RIO hiding (Vector, runReader)
+import RIO hiding (Vector, runReader, drop)
 import RIO.HashMap qualified as HM
 
 {- | Church State outperformed IORef significantly.
@@ -67,7 +67,7 @@ execAppStd act = do
   case r of
     Left e → do
       render
-        $ pStacks logs
+        $ pStacks (drop (length logs - 10) logs)
         <> line
         <> annotate (color Red) "error: "
         <> e

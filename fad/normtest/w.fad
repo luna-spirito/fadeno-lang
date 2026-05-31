@@ -1,0 +1,3 @@
+unpack fadeno. w_wrap w_unwrap
+
+in w_unwrap (w_wrap 42)

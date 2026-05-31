@@ -1,0 +1,6 @@
+unpack fadeno. tag_==
+
+in {
+  .eq_yes = tag_== .hello .hello
+| .eq_no = tag_== .hello .world
+}

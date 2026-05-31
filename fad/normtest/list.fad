@@ -1,0 +1,9 @@
+unpack fadeno. Eq refl Int List list_length list_indexl list_viewl int_>=0
+
+Int+ = Int @|>=0 : Eq (int_>=0 .) true|
+
+in {
+  .length = list_length [1 | 2 | 3]
+| .index = list_indexl (1 @|refl|) [1 | 2 | 3] @refl
+| .view = list_viewl [1 | 2 | 3] @refl
+}

@@ -1,0 +1,8 @@
+unpack fadeno. int_== int_>=0 int_neg
+
+in {
+  .eq_yes = int_== 4 4
+| .eq_no = int_== 4 5
+| .gte_yes = int_>=0 0
+| .gte_no = int_>=0 (int_neg 1)
+}

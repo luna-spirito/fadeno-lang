@@ -1,15 +1,15 @@
 module Main where
 
 import Data.ByteString.Lazy (ByteString)
-import Data.List (concat, sort)
-import Prelude (FilePath, IO, filter, fmap, map, mapM, return, (.), ($), (<$>), (==))
+import Data.List (concat, isPrefixOf, sort)
+import Prelude (Bool, FilePath, IO, filter, fmap, map, mapM, not, return, (.), ($), (&&), (++), (<$>), (==), (||))
 import System.Directory (doesDirectoryExist, listDirectory)
 import System.FilePath
 import System.OsPath (unsafeEncodeUtf)
 import Test.Tasty (TestTree, defaultMain, testGroup)
 import Test.Tasty.Golden (goldenVsString)
 import Test.Tasty.HUnit (testCase)
-import Driver (testBuild)
+import Driver (testBuild, testNormalize)
 
 fadSourceDir :: FilePath
 fadSourceDir = "fad"
@@ -33,10 +33,15 @@ findFadFiles dir = do
           then return [fullPath]
           else return []
 
-mkGoldenTests :: IO TestTree
+mkGoldenTests :: IO [TestTree]
 mkGoldenTests = do
-  files <- sort <$> findFadFiles fadSourceDir
-  return $ testGroup "golden build" $ map mkGoldenTest files
+  allFiles <- sort <$> findFadFiles fadSourceDir
+  let isNormTest path = ("fad/normtest/" `isPrefixOf` path) || ("fad\\normtest\\" `isPrefixOf` path)
+      normFiles = filter isNormTest allFiles
+      buildFiles = filter (not . isNormTest) allFiles
+  let buildTests = testGroup "golden build" $ map mkGoldenTest buildFiles
+      normTests = testGroup "normalization" $ map mkNormTest normFiles
+  return [buildTests, normTests]
 
 mkGoldenTest :: FilePath -> TestTree
 mkGoldenTest fadFilePath =
@@ -51,10 +56,22 @@ mkGoldenTest fadFilePath =
     action :: IO ByteString
     action = testBuild (unsafeEncodeUtf $ dropExtension fadFilePath)
 
+mkNormTest :: FilePath -> TestTree
+mkNormTest fadFilePath =
+  goldenVsString
+    testName
+    goldenPath
+    action
+  where
+    testName = makeRelative fadSourceDir (dropExtension fadFilePath)
+    goldenPath = goldenDir </> makeRelative fadSourceDir (replaceExtension fadFilePath ".golden")
+    action :: IO ByteString
+    action = testNormalize (unsafeEncodeUtf $ dropExtension fadFilePath)
+
 smokeTest :: TestTree
 smokeTest = testCase "fadeno-lang runs" $ return ()
 
 main :: IO ()
 main = do
   goldenTests <- mkGoldenTests
-  defaultMain $ testGroup "fadeno" [goldenTests, smokeTest]
+  defaultMain $ testGroup "fadeno" (goldenTests ++ [smokeTest])

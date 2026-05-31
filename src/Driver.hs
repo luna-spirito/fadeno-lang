@@ -2,7 +2,7 @@
 
 {-# HLINT ignore "Use const" #-}
 
-module Driver (main, testBuild, runChecker', watch) where
+module Driver (main, testBuild, testNormalize, runChecker', watch) where
 
 import Compiler (compileModule)
 import Context (AppM, Dyn (..), EEntry (..), Epoch (..), Imports (..), Rewrite (..), Scopes (..), ScopesM, dyn, execAppStd, freshIdent, getEpoch, getScopeId, pStacks, registerOpaque, runApp, runScopes, stackError, stackLog, stackScope)
@@ -794,17 +794,18 @@ typOfBuiltin opaques = \case
   WWrap -> [termQQ| Fun {A} (A) -> W A |]
   -- Kolorinko builtins: stubbed types since we don't run type-check in this path
   KolDataId → [termQQ| Any |]
-  KolEventTypeId -> [termQQ| Any |]
-  KolGear -> [termQQ| Any |]
+  KolEventTypeId -> [termQQ| Type^ 0 |]
+  KolGear -> [termQQ| Fun {u} (Type^ u) -> Type^ u |]
   KolId -> [termQQ| Any |]
   KolLocEventId -> [termQQ| Any |]
-  KolMkEventType -> [termQQ| Any |]
-  KolMkGear -> [termQQ| Any |]
-  KolMkQuery -> [termQQ| Any |]
+  KolMkEventType → [termQQ| Any |]
+  -- KolMkEventType -> [termQQ| Fun ({(.key = Tag | .group = Type^ 0 | .body = Type^ 0)}) -> EventTypeId |]
+  KolMkGear -> [termQQ| Fun {Out} {Cache : Type^ 0} ({( .primary = {( .type = ({(.key = Tag | .group = Type^ 0 | .body = Type^ 0)}) | .group = Any )} | .initial_cache = Cache | .step = Fun (Cache) (Primary) (Secondary) -> {( .cache = Cache | .out = Out )} )}) -> Gear Out |]
+  KolMkQuery -> [termQQ| Fun {Body} -> Query Body |]
   KolMkStateGraph -> [termQQ| Any |]
   KolUserId -> [termQQ| Any |]
-  KolQuery -> [termQQ| Any |]
-  KolQueryDelta -> [termQQ| Any |]
+  KolQuery -> [termQQ| Fun ({(.key = Tag | .group = Type^ 0 | .body = Type^ 0)}) -> Type^ 0 |]
+  KolQueryDelta -> [termQQ| Fun {def} (Query def) (Primary) -> {( .query = Query def | .delta = {( .removed = List def.body | .added = List def.body)} )} |]
   KolResolveEvent → [termQQ| Any |]
   KolResolveData → [termQQ| Any |]
   KolTimestamp -> [termQQ| Any |]
@@ -833,6 +834,9 @@ typOfBuiltin opaques = \case
   KolTextUpdT -> [termQQ| Any |]
   KolAnchorAggT -> [termQQ| Any |]
   KolTextAggT -> [termQQ| Any |]
+  KolPrimaryT → [termQQ| Type^ 0 |]
+  KolSecondaryT → [termQQ| Type^ 0 |]
+  KolPropQueryEvents → [termQQ| Fun {def : {(.key = Tag | .group = Type^ 0 | .body = Type^ 0)}} (Query def) -> List def.body |]
   where
     opd d = Term $ Pi QNorm Nothing (Term $ Builtin $ Int' d) $ Lambda $ Term $ Builtin $ Int' d
     op2d d = Term $ Pi QNorm Nothing (Term $ Builtin $ Int' d) $ Lambda $ opd d
@@ -884,6 +888,7 @@ instMeta = (\f a b -> stackScope (\_ -> "instMeta") $ f a b) \(scope1, sub1) ->
           TagLit x -> pure $ Term $ TagLit x
           BoolLit x -> pure $ Term $ BoolLit x
           FieldsLit fi flds -> Term . FieldsLit fi <$> traverse (bitraverse (instMeta' locs <=< fetchT) (instMeta' locs <=< fetchT)) flds
+          ListLit (Vector' vec) -> Term . ListLit . Vector' <$> traverse (instMeta' locs <=< fetchT) vec
           Builtin x -> pure $ Term $ Builtin x
           Lam QNorm i a -> Term . Lam QNorm i . Lambda <$> (instMeta' (locs + 1) . unLambda =<< fetchLambda a)
           App f a -> do
@@ -1108,6 +1113,21 @@ testBuild path' = do
     put names
     term <- checkModule m'
     pure (pTerm [] term)
+  let doc = case r of
+        Left e -> pStacks logs <> line <> annotate (color Red) "error: " <> e
+        Right res -> res
+  pure $ BSL.fromStrict $ encodeUtf8 $ renderStrict $ layoutSmart defaultLayoutOptions (doc <> line)
+
+testNormalize :: OsPath -> IO BSL.ByteString
+testNormalize path' = do
+  (_, m) <- loadModule' N.emptyUsedNames path'
+  (logs, r) <- runApp do
+    (names, m') <- either (throwError . ("parser:" <>)) pure m
+    put names
+    let Module ms = m'
+    imports <- foldlM (\is term -> (is |>) <$> runScopes (Imports is) ((,) <$> normalize term <*> infer (IsErased False) term Infer)) [] ms
+    let lastNormed = maybe (error "Internal error: module must be non-empty") (fst . snd) $ viewr imports
+    pure (pTerm [] lastNormed)
   let doc = case r of
         Left e -> pStacks logs <> line <> annotate (color Red) "error: " <> e
         Right res -> res

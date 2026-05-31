@@ -1,0 +1,7 @@
+unpack fadeno. record_drop_fields record_keep_fields
+
+in {
+  .get = { .a = 1 | .b = 2 }.a
+| .drop = record_drop_fields [.a] { .a = 1 | .b = 2 }
+| .keep = record_keep_fields [.a] { .a = 1 | .b = 2 }
+}
