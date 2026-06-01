@@ -242,14 +242,15 @@ putBuiltin = \case
   KolSecondaryGet -> S.putWord8 59
   KolLoopIter -> S.putWord8 60
   KolIterList -> S.putWord8 61
-  KolListNew -> S.putWord8 62
-  KolListPush -> S.putWord8 63
   KolSenderId -> S.putWord8 64
   KolLocalUserId -> S.putWord8 65
   KolTextUpdT -> S.putWord8 66
   KolAnchorAggT -> S.putWord8 67
   KolTextAggT -> S.putWord8 68
-  _ → S.putWord8 0 -- FIX NOW
+  KolUnEventType -> S.putWord8 69
+  KolPrimaryT -> S.putWord8 70
+  KolSecondaryT -> S.putWord8 71
+  KolPropQueryEvents -> S.putWord8 72
 
 getBuiltin :: S.Get BuiltinT
 getBuiltin = do
@@ -321,13 +322,15 @@ getBuiltin = do
     59 -> pure KolSecondaryGet
     60 -> pure KolLoopIter
     61 -> pure KolIterList
-    62 -> pure KolListNew
-    63 -> pure KolListPush
     64 -> pure KolSenderId
     65 -> pure KolLocalUserId
     66 -> pure KolTextUpdT
     67 -> pure KolAnchorAggT
     68 -> pure KolTextAggT
+    69 -> pure KolUnEventType
+    70 -> pure KolPrimaryT
+    71 -> pure KolSecondaryT
+    72 -> pure KolPropQueryEvents
     _ -> fail "Unknown builtin tag"
 
 -- ===========================================================================

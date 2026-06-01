@@ -138,6 +138,7 @@ data BuiltinT
   | KolResolveData
   | KolQuery
   | KolUserId
+  | KolUnEventType
   | KolTimestamp
   -- StateGraph builtins
   | KolEventTypeId
@@ -160,8 +161,6 @@ data BuiltinT
   | KolSecondaryGet
   | KolLoopIter
   | KolIterList
-  | KolListNew
-  | KolListPush
   | KolSenderId
   | KolLocalUserId
   | KolTextUpdT
@@ -210,6 +209,7 @@ builtinsList =
   , KolResolveData
   , KolQuery
   , KolUserId
+  , KolUnEventType
   , KolEventTypeId
   , KolTimestamp
   , KolMkStateGraph
@@ -231,8 +231,6 @@ builtinsList =
   , KolSecondaryGet
   , KolLoopIter
   , KolIterList
-  , KolListNew
-  , KolListPush
   , KolSenderId
   , KolLocalUserId
   , KolTextUpdT
@@ -287,6 +285,7 @@ identOfBuiltin = \case
   KolStateGraphOutT -> r "StateGraphOut"
   KolStateGraphT -> r "StateGraph"
   KolUserEq -> r "user_eq"
+  KolUnEventType -> r "un_event_type"
   KolMkAnchorAgg -> r "mk_anchor_agg"
   KolAnchorAggApply -> r "anchor_agg_apply"
   KolMkTextAgg -> r "mk_text_agg"
@@ -295,8 +294,6 @@ identOfBuiltin = \case
   KolSecondaryGet -> r "secondary_get"
   KolLoopIter -> r "loop_iter"
   KolIterList -> r "iter_list"
-  KolListNew -> r "list_new"
-  KolListPush -> r "list_push"
   KolSenderId -> r "SenderId"
   KolLocalUserId -> r "LocalUserId"
   KolTextUpdT -> r "TextUpd"

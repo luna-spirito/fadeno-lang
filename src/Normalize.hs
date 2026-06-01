@@ -80,13 +80,14 @@ appBuiltin locals = curry \case
   (TagEq, [Term (TagLit a), Term (TagLit b)]) → pure $ Just $ Term $ BoolLit $ a == b
   (WUnwrap, [a]) → pure $ Just a
   (WWrap, [a]) → pure $ Just a
+  (KolUnEventType, [TBuiltin KolMkEventType `TApp` x]) → pure $ Just x
   (KolPropQueryEvents, [Term (Builtin KolMkQuery)]) → pure $ Just $ Term $ ListLit []
   ((Loop; If; IntEq; IntGte0; ListIndexL; ListLength; ListViewL; RecordDropFields; RecordGet; RecordKeepFields; TagEq; WWrap; WUnwrap
    ; KolMkEventType; KolMkGear; KolMkQuery; KolId; KolQueryDelta; KolSenderToUser; KolMkStateGraph; KolStateGraphApply; KolStateGraphOut
    ; KolSgCtxQuery; KolSgCtxUpdate; KolSgCtxDepQuery; KolEventTypeId; KolTimestamp; KolUserId; KolStateGraphT; KolStateGraphOutT
    ; KolResolveData; KolResolveEvent
    ; KolUserEq; KolAnchorAggApply; KolTextAggApply; KolTextAggMerge; KolSecondaryGet
-   ; KolLoopIter; KolIterList; KolListNew; KolListPush; KolPrimaryT; KolSecondaryT; KolPropQueryEvents), _) → pure Nothing
+   ; KolLoopIter; KolIterList; KolPrimaryT; KolSecondaryT; KolPropQueryEvents; KolUnEventType), _) → pure Nothing
  where
   isStuck =
     unTerm >>> \case
