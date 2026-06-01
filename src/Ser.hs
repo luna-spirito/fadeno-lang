@@ -251,6 +251,8 @@ putBuiltin = \case
   KolPrimaryT -> S.putWord8 70
   KolSecondaryT -> S.putWord8 71
   KolPropQueryEvents -> S.putWord8 72
+  KolPropMkPrimary -> S.putWord8 73
+  KolPropMkSecondary -> S.putWord8 74
 
 getBuiltin :: S.Get BuiltinT
 getBuiltin = do
@@ -331,6 +333,8 @@ getBuiltin = do
     70 -> pure KolPrimaryT
     71 -> pure KolSecondaryT
     72 -> pure KolPropQueryEvents
+    73 -> pure KolPropMkPrimary
+    74 -> pure KolPropMkSecondary
     _ -> fail "Unknown builtin tag"
 
 -- ===========================================================================

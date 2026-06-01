@@ -169,6 +169,8 @@ data BuiltinT
   | KolPrimaryT
   | KolSecondaryT
   | KolPropQueryEvents
+  | KolPropMkPrimary
+  | KolPropMkSecondary
   deriving (Show, Eq, Ord, Lift)
 
 builtinsList :: Vector BuiltinT
@@ -239,6 +241,8 @@ builtinsList =
   , KolPrimaryT
   , KolSecondaryT
   , KolPropQueryEvents
+  , KolPropMkPrimary
+  , KolPropMkSecondary
   ]
     <> (Int' <$> nd)
     <> (IntAdd <$> nd)
@@ -324,6 +328,8 @@ identOfBuiltin = \case
   KolPrimaryT -> r "Primary"
   KolSecondaryT -> r "Secondary"
   KolPropQueryEvents → r "~query_events"
+  KolPropMkPrimary → r "~mk_primary"
+  KolPropMkSecondary → r "~mk_secondary"
   where
     numDesc upper desc =
       (if upper then "I" else "i")

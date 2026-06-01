@@ -841,6 +841,8 @@ typOfBuiltin opaques = \case
   KolPrimaryT → [termQQ| Type^ 0 |]
   KolSecondaryT → [termQQ| Type^ 0 |]
   KolPropQueryEvents → [termQQ| Fun {type : EventTypeId} (Query type) -> List (LocEventId type) |]
+  KolPropMkPrimary → [termQQ| Primary |]
+  KolPropMkSecondary → [termQQ| Secondary |]
   where
     opd d = Term $ Pi QNorm Nothing (Term $ Builtin $ Int' d) $ Lambda $ Term $ Builtin $ Int' d
     op2d d = Term $ Pi QNorm Nothing (Term $ Builtin $ Int' d) $ Lambda $ opd d
@@ -1050,6 +1052,10 @@ subtype = \a b ->
                   subtype a' =<< fetchT br
           branch True th
           branch False el
+        (TBuiltin Eq `TApp` a `TApp` b, TBuiltin Never) →
+          isEqUnify (a, b) >>= \case
+            EqNot → pure ()
+            _ -> stackError \p -> "Eq (" <> p a <> ") (" <> p b <> ") is not absurd"
         -- Catch-all: if no rule matches, check equality
         (t1, t2) ->
           isEqUnify (t1, t2) >>= \case

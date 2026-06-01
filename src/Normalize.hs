@@ -81,13 +81,16 @@ appBuiltin locals = curry \case
   (WUnwrap, [a]) → pure $ Just a
   (WWrap, [a]) → pure $ Just a
   (KolUnEventType, [TBuiltin KolMkEventType `TApp` x]) → pure $ Just x
-  (KolPropQueryEvents, [Term (Builtin KolMkQuery)]) → pure $ Just $ Term $ ListLit []
+  (KolPropQueryEvents, [TBuiltin KolMkQuery]) → pure $ Just $ Term $ ListLit []
+  (KolQueryDelta, [TBuiltin KolMkQuery, TBuiltin KolPropMkPrimary]) → pure $ Just $
+    let delta = Term $ FieldsLit (FRecord ()) [(Term $ TagLit (regIdent "added"), Term $ ListLit []), (Term $ TagLit (regIdent "removed"), Term $ ListLit [])]
+    in Term $ FieldsLit (FRecord ()) [(Term $ TagLit (regIdent "query"), TBuiltin KolMkQuery), (Term $ TagLit (regIdent "delta"), delta)]
   ((Loop; If; IntEq; IntGte0; ListIndexL; ListLength; ListViewL; RecordDropFields; RecordGet; RecordKeepFields; TagEq; WWrap; WUnwrap
    ; KolMkEventType; KolMkGear; KolMkQuery; KolId; KolQueryDelta; KolSenderToUser; KolMkStateGraph; KolStateGraphApply; KolStateGraphOut
    ; KolSgCtxQuery; KolSgCtxUpdate; KolSgCtxDepQuery; KolEventTypeId; KolTimestamp; KolUserId; KolStateGraphT; KolStateGraphOutT
    ; KolResolveData; KolResolveEvent
    ; KolUserEq; KolAnchorAggApply; KolTextAggApply; KolTextAggMerge; KolSecondaryGet
-   ; KolLoopIter; KolIterList; KolPrimaryT; KolSecondaryT; KolPropQueryEvents; KolUnEventType), _) → pure Nothing
+   ; KolLoopIter; KolIterList; KolPrimaryT; KolSecondaryT; KolPropQueryEvents; KolUnEventType; KolPropMkPrimary; KolPropMkSecondary), _) → pure Nothing
  where
   isStuck =
     unTerm >>> \case
